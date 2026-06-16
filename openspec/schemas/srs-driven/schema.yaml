@@ -1,0 +1,221 @@
+name: srs-driven
+version: 1
+description: Rigorous spec-driven workflow combining IEEE SRS/SDD structure with EARS requirements syntax — proposal → specs → design → tasks
+artifacts:
+  - id: proposal
+    generates: proposal.md
+    description: Problem space, scope, domain concepts, and quality attributes — the "Why" and "What"
+    template: proposal.md
+    instruction: |
+      Create the proposal document that establishes WHY this change is needed and WHAT it covers.
+      This document defines the problem space, scope, and domain concepts.
+      It MUST NOT contain implementation details.
+
+      Required sections (follow the template):
+
+      - **Motivation**: The business or technical problem. What pain does this solve? Why now?
+      - **Scope**:
+        - **In Scope**: What's changing? Detail the concrete boundaries of this change.
+        - **Out of Scope**: What is explicitly excluded.
+      - **Context**:
+        - **Background**: Relevant history, prior decisions, current state.
+        - **Affected Systems and Stakeholders**: Systems, teams, and users impacted.
+        - **Assumptions and Dependencies**: What must be true for this change to succeed.
+        - **Constraints**: Technical, organizational, regulatory, or timeline constraints.
+        - **References**: Links to related documents, RFCs, prior art.
+      - **Domain Model**: Implementation-neutral description of the data domain.
+        Use entity descriptions and relationship diagrams. No database schemas,
+        class diagrams, or implementation types. This is a conceptual model.
+      - **Preconditions, Postconditions, and Invariants**: Clearly state what must be
+        true before, after, and always during this change. What must be true for the system to be correct?
+        These will be formalized in specs.
+      - **Failure Modes**: Document failure modes that shape the product experience or
+        core functionality. Each failure mode MUST include a rationale explaining why
+        it matters. Focus on product-level failures, not implementation-level errors.
+      - **Quality Attributes**: Important quality attributes (performance, security,
+        reliability, availability, observability, etc.) with targets or thresholds
+        and their influence on the product.
+      - **Capabilities**:
+        - **New Capabilities**: Capabilities being introduced. Each becomes a new
+          `specs/<name>/spec.md`. Use kebab-case names.
+        - **Modified Capabilities**: Existing capabilities whose REQUIREMENTS are
+          changing. Only include if spec-level behavior changes. Check
+          `openspec/specs/` for existing spec names. Leave empty if none.
+
+      IMPORTANT: The Capabilities section is critical. It creates the contract between proposal
+      and specs phases. Research existing specs before filling it in.
+      Each capability listed here will need a corresponding spec file.
+
+      Keep the document focused on the problem domain. Implementation details belong
+      in design.md.
+    requires: []
+
+  - id: specs
+    generates: "specs/**/*.md"
+    description: Behavioral contract using EARS syntax with traceable requirement identifiers
+    template: spec.md
+    instruction: |
+      Create specification files that define the system's verifiable behavior.
+
+      Create one spec file per capability listed in the proposal's Capabilities section.
+      - New capabilities: `specs/<capability>/spec.md` using the exact kebab-case name.
+      - Modified capabilities: `specs/<capability>/spec.md` using the existing spec folder name.
+
+      ALL requirements and scenarios MUST use EARS (Easy Approach to Requirements Syntax)
+      with RFC 2119 keywords (SHALL/MUST, SHOULD, MAY):
+
+      | Pattern           | Template                                                              | When to use                    |
+      |-------------------|-----------------------------------------------------------------------|--------------------------------|
+      | Ubiquitous        | THE <system> SHALL <response>.                                        | Always active                  |
+      | State-driven      | WHILE <precondition>, THE <system> SHALL <response>.                  | Active in a continuous state   |
+      | Event-driven      | WHEN <trigger>, THE <system> SHALL <response>.                        | Discrete event causes behavior |
+      | Unwanted-behavior | IF <trigger>, THEN THE <system> SHALL <response>.                     | Error/failure mitigation       |
+      | Complex           | WHILE <precondition>, WHEN <trigger>, THE <system> SHALL <response>.  | Both state and event required  |
+      | Optional          | WHERE <feature is included>, THE <system> SHALL <response>.           | Optional/configurable behavior |
+
+      **Escape hatch:** When a requirement has more than 3 preconditions or is mathematical/tabular,
+      it MAY use decision tables, lists, or other formats. The requirement MUST include a
+      justification for why EARS is insufficient.
+
+      **Canonical identifiers:** Every `### Requirement:` and `#### Scenario:` header MUST
+      include a bracketed identifier, e.g. `[SESSION-IDLE-EXPIRE]`.
+      - Format: `[A-Z][A-Z0-9]*(-[A-Z0-9]+)+`, under 30 characters.
+      - Must name a single observable behavior or obligation.
+      - Must be behavior-oriented and stable across implementation changes.
+      - Removed requirements do not get identifiers.
+
+      **Granularity:** Split when one tag covers too much behavior. Merge when multiple
+      tags describe the same obligation.
+
+      **Structure:**
+      - Each requirement: `### Requirement: <name> [ID]` followed by an EARS statement.
+      - Each requirement MUST have a `**References:**` section linking to the proposal/design
+        section where the requirement originates.
+      - Each scenario: `#### Scenario: <name> [ID]` followed by an EARS statement.
+      - Each scenario MAY include a `**Postcondition:**` stating what must be true after.
+      - Failure scenarios use the Unwanted-behavior EARS pattern.
+      -  **CRITICAL**: Scenarios MUST use exactly 4 hashtags (`####`). Using 3 hashtags or bullets will fail silently.
+      - Every requirement MUST have at least one scenario.
+
+      **Delta operations (use `##` headers):**
+      - `## ADDED Requirements` — New capabilities.
+      - `## MODIFIED Requirements` — Changed behavior. MUST include full updated content.
+      - `## REMOVED Requirements` — Include `**Reason:**` and `**Migration:**`.
+      - `## RENAMED Requirements` — Use `FROM:`/`TO:` format.
+
+      MODIFIED requirements workflow:
+      1. Locate the existing requirement in openspec/specs/<capability>/spec.md
+      2. Copy the ENTIRE requirement block (from `### Requirement:` through all scenarios)
+      3. Paste under `## MODIFIED Requirements` and edit to reflect new behavior
+      4. Ensure header text matches exactly (whitespace-insensitive)
+
+      Common pitfall: Using MODIFIED with partial content loses detail at archive time.
+      If adding new concerns without changing existing behavior, use ADDED instead.
+
+      **Completeness mandate:** All preconditions, postconditions, invariants, error
+      conditions, and failure modes documented in proposal.md and design.md MUST be
+      captured as requirements or scenarios in spec files.
+
+      **All requirements and scenarios MUST be testable.**
+    requires:
+      - proposal
+
+  - id: design
+    generates: design.md
+    description: Technical implementation approach with architecture decisions and operational concerns
+    template: design.md
+    instruction: |
+      Create the design document that explains **HOW** to implement the change.
+
+      When to include design.md (create only if any apply):
+      - Cross-cutting change (multiple services/modules) or new architectural pattern
+      - New external dependency or significant data model changes
+      - Security, performance, or migration complexity
+      - A change to the state machine design or failure modes of the system
+      - Ambiguity that benefits from technical decisions before coding
+
+      The design MUST use either the **Proposed Design** approach (holistic design
+      for a single coherent change) OR the **Architecture Decisions** approach
+      (ADR-style for multiple independent decisions). Remove the unused section.
+
+      Required sections (follow the template):
+
+      - **Context**: Current state, constraints, and architecture drivers.
+      - **Goals / Non-Goals**: What this design achieves and explicitly excludes.
+      - **Proposed Design** (if holistic):
+        - System Model, Component Descriptions, System Invariant Tactics,
+          Quality Attribute Tactics, Interaction Protocols, Forward Evolution,
+          Costs, Alternatives Considered.
+      - **Architecture Decisions** (if ADR-style):
+        - Each decision: Context and Objective, Quality Attribute Tactics and
+          Key Results, Options Considered, Decision, Consequences.
+      - **Component Design** (REQUIRED): Key Components, Data Design (including all encoding and validity rules), Interface Contracts, Code Map.
+      - **Failure and Reliability** (REQUIRED):
+        - Failure Mode Analysis: Systematically consider unsafe inputs, inadequate
+          control actions, process model flaws, and coordination failures.
+        - Control and Recovery: How the system detects, mitigates, and recovers.
+      - **Operational Concerns** (REQUIRED):
+        - Observability, Deployment and Rollout, Capacity and Scaling.
+      - **Security**: Authentication, authorization, data protection considerations.
+      - **Risks / Trade-offs**: Known limitations. Format: [Risk] -> Mitigation.
+      - **Migration Plan**: Steps to deploy, rollback strategy (if applicable).
+      - **Verification Strategy**: How to verify the design meets spec requirements.
+      - **Open Questions**: Outstanding decisions or unknowns to resolve.
+
+      Reference the proposal for motivation and specs for requirements.
+      Focus on architecture and approach, not line-by-line implementation.
+
+      Good design docs explain the **"why"** behind technical decisions.
+    requires:
+      - proposal
+
+  - id: tasks
+    generates: tasks.md
+    description: Implementation checklist with trackable tasks
+    template: tasks.md
+    instruction: |
+      Create the task list that breaks down the implementation work.
+
+      **IMPORTANT: Follow the template below exactly.** The apply phase parses
+      checkbox format to track progress. Tasks not using `- [ ]` won't be tracked.
+
+      Guidelines:
+      - Group related tasks under ## numbered headings
+      - Each task MUST be a checkbox: `- [ ] X.Y Task description`
+      - Tasks should be small enough to complete in one session
+      - Order tasks by dependency (what must be done first?)
+      - When a task is completed, document the following criteria
+        - WHAT changes where made
+        - **WHY** they were made to accomplish the task section
+        - Decisions made that weren't in the spec
+        - Important information to pass on to other developers
+
+      Example:
+      ```
+      ## 1. Setup
+
+      - [ ] 1.1 Create new module structure
+      - [ ] 1.2 Add dependencies to package.json
+
+      ### Setup change summary
+
+      ## 2. Core Implementation
+
+      - [ ] 2.1 Implement data export function
+      - [ ] 2.2 Add CSV formatting utilities
+
+      ### Core implementation change summary
+      ```
+
+      Reference specs for what needs to be built, design for how to build it.
+      Each task should be verifiable - you know when it's done.
+    requires:
+      - specs
+      - design
+
+apply:
+  requires: [tasks]
+  tracks: tasks.md
+  instruction: |
+    Read context files, work through pending tasks, mark complete as you go.
+    Pause if you hit blockers or need clarification.

@@ -73,7 +73,7 @@ export function scanSpecMarkdown(file: string, markdown: string): readonly Scann
         identifier,
         file,
         line: lineNumber,
-        heading: currentHeading,
+        ...(currentHeading === undefined ? {} : { heading: currentHeading }),
       });
     }
   }
@@ -98,7 +98,12 @@ function parseHeading(line: string): string | undefined {
     return undefined;
   }
 
-  const heading = match[1]
+  const rawHeading = match[1];
+  if (rawHeading === undefined) {
+    return undefined;
+  }
+
+  const heading = rawHeading
     .replace(BRACKETED_IDENTIFIER_PATTERN, "")
     .replace(/\s+/gu, " ")
     .trim();
@@ -126,6 +131,9 @@ function readFenceBoundary(
   }
 
   const token = match[1];
+  if (token === undefined) {
+    return undefined;
+  }
   const marker = token.startsWith("`") ? "`" : "~";
   return { marker, length: token.length };
 }

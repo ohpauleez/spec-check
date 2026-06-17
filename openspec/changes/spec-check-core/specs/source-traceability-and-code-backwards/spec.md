@@ -126,9 +126,9 @@ IF no equivalence cluster meets the stability threshold for a code-derived claim
 **Postcondition:** Ambiguity in code-derived meaning is surfaced rather than hidden behind an arbitrary selection.
 
 #### Scenario: Code-Derived Formalization Failure [STC-FORMAL-FAIL]
-IF all formalization samples for a code-derived claim are invalid after bounded retries, THEN THE spec-check tool SHALL treat this as a fatal analysis failure and exit with code `2`.
+IF all formalization samples for a code-derived claim are invalid after bounded retries, THEN THE spec-check tool SHALL record the failure as an error-severity finding for that capability and SHALL continue with remaining capabilities. THE tool SHALL NOT abort the entire pipeline for a per-capability formalization failure.
 
-**Postcondition:** No cross-side implication analysis proceeds with zero valid code-derived formalizations.
+**Postcondition:** Per-capability formalization failures are surfaced as error findings; remaining capabilities proceed to cross-side analysis.
 
 ### Requirement: Solver Analysis Of Code-Derived Formalizations [STC-GEN-LOGIC]
 WHEN code-derived formalizations are available, THE spec-check tool SHALL run obligation-aware solver analysis on the code-derived formal artifacts to check their internal consistency and SHALL persist all solver inputs and outputs verbatim under the output directory.
@@ -191,6 +191,11 @@ WHEN cross-side implication checks complete, THE spec-check tool SHALL persist a
 
 **Postcondition:** Every cross-side classification is auditable through preserved solver evidence.
 
+#### Scenario: Single Solver Command Per Cross-Side Query [STC-IMPLY-QUERY]
+WHEN the spec-check tool constructs a cross-side implication query to test whether original claim A entails code-derived claim B, THE query SHALL include declarations from both sides for shared context, SHALL assert A's assertions as the premise, SHALL assert the negation of B's assertions as the consequent test, and SHALL contain exactly one `(check-sat)` command at the end.
+
+**Postcondition:** Each cross-side implication query produces exactly one solver result; multiple `(check-sat)` commands cannot produce ambiguous or contradictory output within a single query.
+
 ### Requirement: Surface Semantic Divergence As First-Class Evidence [STC-DIVERGE-EVIDENCE]
 WHEN cross-side implication analysis reveals divergence between original and code-derived formalizations, THE spec-check tool SHALL surface this divergence as first-class evidence in the comparison report with a per-capability summary that identifies the nature and extent of the divergence.
 
@@ -235,6 +240,11 @@ IF cross-side implication results are unavailable or uncertain for a claim pair,
 IF the blind comparison boundary would expose original requirement text to the code-derived comparison side, THEN THE spec-check tool SHALL prevent that comparison path and SHALL surface the boundary violation as an analysis defect.
 
 **Postcondition:** Blind comparison remains structurally separated from original requirement text.
+
+#### Scenario: Sanitize Untrusted Content In Code Fences [STC-COMPARE-FENCE]
+WHEN the spec-check tool embeds untrusted document content inside markdown code fences for comparison prompts, THE spec-check tool SHALL sanitize runs of three or more backticks in the content to prevent premature fence closure.
+
+**Postcondition:** Untrusted content cannot break out of its code fence boundary, preserving prompt structure integrity.
 
 ### Requirement: Evidence Hierarchy For Source Analysis [STC-EVIDENCE-HIERARCHY]
 WHEN the spec-check tool evaluates source-backed evidence, THE spec-check tool SHALL apply an evidence hierarchy: implementation code and verified contracts are primary evidence, traced tests are secondary evidence, and documentation within the source tree is supporting evidence only.

@@ -1,0 +1,40 @@
+{
+  "name": "spec-check",
+  "version": "0.1.0",
+  "description": "OpenSpec analysis CLI",
+  "type": "module",
+  "main": "dist/spec-check.js",
+  "files": [
+    "dist",
+    "README.md",
+    "LICENSE"
+  ],
+  "bin": {
+    "spec-check": "dist/spec-check.js"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "lint": "npm run lint:types && npm run lint:eslint",
+    "lint:types": "tsc -p tsconfig.json --noEmit",
+    "lint:eslint": "eslint \"src/**/*.ts\" \"test/**/*.ts\" \"build/**/*.ts\" --max-warnings=0",
+    "lint:fix": "eslint \"src/**/*.ts\" \"test/**/*.ts\" \"build/**/*.ts\" --fix",
+    "test": "vitest run",
+    "test:trace": "DEVBOX_TRACE_COVERAGE=1 vitest run",
+    "test:watch": "vitest",
+    "bundle": "node ./build/esbuild.ts",
+    "smoke:parity": "npm run build && npm run bundle && node ./scripts/smoke-parity.mjs"
+  },
+  "devDependencies": {
+    "@eslint/js": "^10.0.1",
+    "@types/node": "^22.15.0",
+    "esbuild": "^0.25.5",
+    "eslint": "^10.4.1",
+    "fast-check": "^3.23.2",
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.60.1",
+    "vitest": "^2.1.9"
+  }
+}

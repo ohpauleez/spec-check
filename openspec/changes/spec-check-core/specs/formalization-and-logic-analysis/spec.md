@@ -13,10 +13,15 @@ WHEN a claim is selected for formalization, THE spec-check tool SHALL emit inspe
 
 **Postcondition:** Formal analysis inputs are available as reviewable evidence linked to their source claims.
 
-#### Scenario: Fail Unusable Formalization [FLA-FORMAL-FAIL]
-IF required formalization output remains unavailable or invalid after bounded retries, THEN THE spec-check tool SHALL stop the run with exit code `2` rather than continue with incomplete formal evidence.
+#### Scenario: Abort On Complete Formalization Failure [FLA-FORMAL-FAIL]
+IF no formalization candidates are produced for the entire phase after bounded retries, THEN THE spec-check tool SHALL abort the run with exit code `2` rather than continue with zero formal evidence.
 
-**Postcondition:** No solver conclusion is produced from an unvalidated formalization step.
+**Postcondition:** No solver conclusion is produced when the formalization phase yields zero candidates.
+
+#### Scenario: Continue With Partial Formalization Results [FLA-FORMAL-PARTIAL]
+IF some claims fail formalization but at least one claim succeeds, THEN THE spec-check tool SHALL continue with the successful candidates, SHALL collect per-claim failures as errors in the formalization output, and SHALL let callers decide severity based on the ratio of successes to failures.
+
+**Postcondition:** Partial formalization results are preserved and downstream phases proceed with available candidates.
 
 ### Requirement: Formalization Sample Schema Validation [FLA-VALIDATE-SAMPLE]
 WHEN the spec-check tool receives a formalization sample from `opencode`, THE spec-check tool SHALL validate the sample against the logic IR schema including sort consistency, assertion well-formedness, and identifier format before accepting it into clustering.
@@ -36,12 +41,12 @@ IF a formalization sample violates the logic IR schema, THEN THE spec-check tool
 **Postcondition:** Invalid formalizations are visible to reviewers without corrupting downstream analysis.
 
 #### Scenario: All Samples Invalid After Retries [FLA-SAMPLE-EXHAUST]
-IF all formalization samples for a claim are invalid after bounded retries, THEN THE spec-check tool SHALL treat this as a fatal analysis failure and exit with code `2`.
+IF all formalization samples for a claim are invalid after bounded retries, THEN THE spec-check tool SHALL record the failure as an error in the formalization output and SHALL exclude that claim from clustering. THE tool SHALL NOT abort the entire phase unless no claims produce valid candidates.
 
-**Postcondition:** No solver analysis proceeds with zero valid formalizations.
+**Postcondition:** Per-claim formalization failures are collected as errors; remaining valid claims proceed to clustering.
 
 ### Requirement: SMT-LIB Compilation And Identifier Sanitization [FLA-SMTLIB-COMPILE]
-WHEN the spec-check tool compiles logic IR into SMT-LIB artifacts, THE spec-check tool SHALL sanitize user-derived identifiers to prevent solver syntax collisions and SHALL include reversible mapping comments that link sanitized identifiers back to their original claim identifiers.
+WHEN the spec-check tool compiles logic IR into SMT-LIB artifacts, THE spec-check tool SHALL sanitize user-derived identifiers to prevent solver syntax collisions, SHALL include reversible mapping comments that link sanitized identifiers back to their original claim identifiers, SHALL emit only declarations and assertions without solver commands (`(check-sat)`), and SHALL expose decomposed assertion expressions alongside the compiled text for downstream query construction.
 
 **References:**
 - `proposal.md#Constraints`
@@ -56,6 +61,16 @@ WHEN a claim identifier contains characters that conflict with SMT-LIB syntax (p
 WHEN a claim identifier contains only SMT-LIB-safe characters, THE spec-check tool SHALL use the identifier unchanged in the SMT-LIB output.
 
 **Postcondition:** No unnecessary transformation is applied to safe identifiers.
+
+#### Scenario: Compiled Output Excludes Solver Commands [FLA-SMTLIB-QUERYSAT]
+WHEN the spec-check tool compiles logic IR into SMT-LIB text, THE compiled output SHALL contain declarations (`declare-sort`, `declare-fun`) and assertions (`assert`) but SHALL NOT include `(check-sat)`. Callers SHALL append `(check-sat)` at query execution time.
+
+**Postcondition:** Compiled SMT-LIB is a reusable component that can be composed into different query types (satisfiability, implication) without stripping embedded solver commands.
+
+#### Scenario: Assertion Expressions Exposed [FLA-SMTLIB-ASSERTEXPRS]
+WHEN the spec-check tool compiles logic IR into SMT-LIB, THE compiled output SHALL include the decomposed inner assertion expressions (without the `(assert ...)` wrapper) for use in downstream implication query construction.
+
+**Postcondition:** Downstream consumers can construct negated or combined assertions from the compiled output without re-parsing the SMT-LIB text.
 
 ### Requirement: Surface Ambiguity Through Sample Clustering [FLA-CLUSTER-AMBIG]
 WHEN multiple formalization samples are produced for the same claim, THE spec-check tool SHALL compare the samples for semantic equivalence using solver-backed implication checks, select a stable interpretation only when it meets the configured stability threshold, and SHALL surface divergent interpretations as ambiguity findings with rationale.
@@ -79,6 +94,11 @@ IF no equivalence cluster meets the configured stability threshold, THEN THE spe
 IF the solver returns timeout or unknown for a pairwise implication check, THE spec-check tool SHALL record the inconclusive pair as evidence and SHALL NOT treat the pair as either equivalent or distinct.
 
 **Postcondition:** Inconclusive solver results do not corrupt cluster construction.
+
+#### Scenario: Single Solver Command Per Implication Query [FLA-CLUSTER-QUERY]
+WHEN the spec-check tool constructs a pairwise implication query to test whether sample A entails sample B, THE query SHALL assert A's declarations and assertions as the premise, SHALL assert the negation of B's assertions as the consequent test, and SHALL contain exactly one `(check-sat)` command at the end.
+
+**Postcondition:** Each implication query produces exactly one solver result; multiple `(check-sat)` commands cannot produce ambiguous or contradictory output within a single query.
 
 ### Requirement: Clustering Determinism And Symmetry [FLA-CLUSTER-PROPERTIES]
 WHEN the spec-check tool performs equivalence clustering on the same set of formalization samples with the same solver results, THE spec-check tool SHALL produce identical clusters.

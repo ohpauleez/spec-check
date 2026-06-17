@@ -1,0 +1,32 @@
+# Node
+package-lock.json
+node_modules/
+dist/
+coverage/
+.tmp/
+
+# Temp files
+*.orig
+*~
+.*.swp
+.*.swo
+*.tmp
+*.bak
+
+# Editors and tooling
+tooling/
+TAGS
+tags
+.tags
+.idea
+.classpath
+.project
+.settings
+recording.jfr
+*.iml
+.lsp/.cache/
+.clj-kondo/
+
+# Dev logging
+*.log
+

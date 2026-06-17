@@ -180,7 +180,7 @@ stateDiagram-v2
 
 #### Domain layer
 
-Defines findings, parsed models, claim graph types, logic IR, clustering semantics, run state, and domain errors.
+Defines findings, parsed models, claim graph types, logic IR, clustering semantics, run state, branded types, assertion utilities, and a structured error hierarchy. The error system uses a generic `ErrorBase<C>` discriminated union with 10 error categories, narrowed boundary unions for subsystem-specific error sets, and factory functions for construction. Branded types (`OutputDirPath`, `ClaimId`, `CapabilityName`, etc.) prevent compile-time interchange of semantically distinct values. Assertion utilities (`precondition`, `invariant`, `postcondition`, `assertNever`) enforce runtime structural invariants for programmer errors.
 
 ```mermaid
 stateDiagram-v2
@@ -742,6 +742,8 @@ src/
     logic-ir.ts
     clustering.ts
     errors.ts
+    assert.ts
+    branded.ts
     run-state.ts
     parser/
       shared.ts
@@ -792,13 +794,15 @@ Code/component responsibilities:
 - **`src/index.ts`**: CLI entrypoint and top-level process exit mapping. Maps domain results to exit codes `0`, `1`, `2`.
 - **`src/cli/parse-argv.ts`**: Validates raw CLI inputs including positional paths, `--output`, `--src`, `--caps`, `--z3`, `--config`, `--help`, and `--version` flags. Returns typed configuration or fatal error.
 - **`src/cli/config.ts`**: Loads and validates optional JSON config file. Merges config values with CLI flags (CLI flags take precedence).
-- **`src/cli/run-cli.ts`**: Orchestrates the full pipeline run: catalog, parse, claim graph, analysis phases, reporting, and manifest. Coordinates exit behavior and progress event emission.
+- **`src/cli/run-cli.ts`**: Orchestrates the full pipeline run: catalog, parse, claim graph, analysis phases, reporting, and manifest. Decomposed into `runIngestionPhases`, `runAnalysisPhases`, and `runReportingPhase` for phase-group isolation. Uses `PipelineAbortError` for typed error propagation between phase groups. Coordinates exit behavior and progress event emission.
 - **`src/domain/model.ts`**: Core type definitions for documents, parsed structures, document classifications, and section metadata.
 - **`src/domain/findings.ts`**: Finding type definitions with severity levels (error, warning, info), category taxonomy, provenance shape, and evidence attachment rules.
 - **`src/domain/claim-graph.ts`**: Claim normalization, typed claim records with obligation levels (mandatory, advisory, informational), provenance attachment, and orphaned-claim detection.
 - **`src/domain/logic-ir.ts`**: Typed logic intermediate representation for formalized claims, including sort declarations, function symbols, assertions, and obligation metadata.
 - **`src/domain/clustering.ts`**: Equivalence cluster construction from pairwise implication results, stability threshold evaluation, and representative sample selection.
-- **`src/domain/errors.ts`**: Tagged error categories and fatal/non-fatal classification. Maps domain errors to exit codes.
+- **`src/domain/errors.ts`**: Structured error hierarchy using `ErrorBase<C>` generic discriminated union with 10 error categories (`ArgumentError`, `ConfigError`, `DependencyError`, `CatalogError`, `ValidationError`, `AdapterError`, `QualitativeError`, `FormalizationError`, `PipelineError`, `OutputError`). Provides narrowed boundary unions (`PipelinePhaseError`, `AdapterBoundaryError`, `CliResolutionError`), `makeError()` and `makeTypedError()` factories, `exitCodeForError()` for per-category exit code resolution (codes 2–11), and `renderErrorLines()` for stderr output.
+- **`src/domain/assert.ts`**: Runtime invariant enforcement utilities: `precondition()`, `invariant()`, `postcondition()` as assertion functions with TypeScript type narrowing (`asserts condition`), and `assertNever()` for exhaustive discriminated union handling. Reserved for programmer errors and broken structural invariants, not expected domain failures.
+- **`src/domain/branded.ts`**: Compile-time branded types preventing value confusion: `OutputDirPath`, `RelativePath`, `SmtlibFilePath`, `ClaimId`, `CapabilityName`, `SanitizedClaimId`, `ModelName`, `SmtlibContent`. Construction functions validate and brand values at trust boundaries; interior code passes branded values without casting.
 - **`src/domain/run-state.ts`**: Immutable run-state accumulator that tracks pipeline progress, collected findings, and phase completion status.
 - **`src/domain/parser/shared.ts`**: Common parsing utilities: heading detection, identifier extraction (`[UPPER-KEBAB-CASE]` format), line classification, and unparsed-line collection with provenance.
 - **`src/domain/parser/catalog.ts`**: Input discovery, document classification, active capability resolution, archived-change exclusion, and delta conflict detection.
@@ -913,6 +917,8 @@ Overview:
 - **Formalization oracle tests**: Compare known EARS-to-logic fixtures against generated logic and solver equivalence checks.
 - **Traceability tests**: Verify canonical identifier handling, traced-test linkage, and unknown-identifier failure behavior.
 - **Regression fixtures**: Preserve every discovered ambiguity pattern, counterexample, and parser-loss issue as a permanent fixture.
+- **Fault injection tests**: Verify graceful degradation when adapters (Z3, OpenCode/LLM, filesystem) fail or timeout.
+- **Adversarial input tests**: Verify the system handles malformed, hostile, or boundary-case inputs without crashing or producing misleading results.
 
 ### Unit and Contract Tests
 
@@ -1071,6 +1077,40 @@ Overview:
 ### Regression Fixtures
 
 - Preserve every discovered ambiguity pattern, counterexample, parser-loss issue, and boundary violation as a permanent fixture in `test/fixtures/`
+
+### Fault Injection Tests
+
+- **Purpose**: Verify graceful degradation when adapters (Z3, OpenCode/LLM, filesystem) fail or timeout
+- **Approach**: Mock adapter boundaries to simulate failures, verify correct `SpecCheckError` categories are produced
+- **Coverage**: Each `ErrorCategory` that can result from adapter failure has at least one fault injection scenario
+- **Location**: `test/contract/fault-injection.test.ts`
+
+1. Z3 adapter returns non-zero exit code mid-analysis: solver phase emits `SolverError` finding and does not crash
+2. Z3 adapter exceeds per-query timeout: query is classified as `timeout` and analysis continues with remaining queries
+3. OpenCode adapter returns malformed JSON after all retries: phase fails with `AdapterError` and run exits code `2`
+4. OpenCode adapter TCP connection refused: adapter raises `AdapterError` without leaking connection details
+5. Filesystem write fails during report generation: run exits code `2` with no manifest written
+6. Filesystem read fails for a cataloged spec file: catalog phase emits `IOError` finding and skips the file
+7. Z3 adapter stdin pipe broken mid-write: solver phase emits `SolverError` and continues with next query
+8. OpenCode adapter response timeout (no response within deadline): adapter raises `AdapterError` after retry exhaustion
+
+### Adversarial Input Tests
+
+- **Purpose**: Verify the system handles malformed, hostile, or boundary-case inputs without crashing or producing misleading results
+- **Approach**: Feed pathological markdown, oversized files, unicode edge cases, circular references, and empty documents through parsers and domain logic
+- **Coverage**: Each parser and major domain function has adversarial variants
+- **Location**: `test/contract/adversarial-inputs.test.ts`
+
+1. Empty markdown file: parser produces zero claims and emits a structural finding
+2. Markdown file with only headings and no content: parser preserves headings and emits no crash
+3. File exceeding 1 MB of repeated content: parser completes within timeout and does not exhaust memory
+4. Markdown with deeply nested headings (100+ levels): parser treats excess depth as flat structure without stack overflow
+5. File containing null bytes and control characters: parser strips or escapes without crash
+6. Unicode edge cases (BOM, RTL overrides, zero-width joiners in identifiers): identifiers are sanitized consistently
+7. Circular requirement references (A references B, B references A): coverage analysis detects cycle and emits finding without infinite loop
+8. Identifier containing SMT-LIB reserved characters: sanitization produces valid SMT-LIB and reversible mapping
+9. Spec file with duplicate requirement identifiers: parser emits structural finding for each duplicate
+10. Markdown with unclosed fenced code blocks spanning entire file: parser treats content as code block without hanging
 
 ## Open Questions
 

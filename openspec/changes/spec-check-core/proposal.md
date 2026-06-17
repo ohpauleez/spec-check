@@ -152,6 +152,47 @@ Solver implication is the primary strength classifier;
 
 Conceptually, documents produce claims, claims produce findings and formal artifacts, and findings are synthesized into evidence-preserving reports.
 
+### Branded Domain Types
+
+The domain uses compile-time branded types to prevent accidental interchange of semantically distinct values that share the same runtime representation:
+
+- **OutputDirPath**: Absolute directory path used as the root for all artifact output.
+- **RelativePath**: Path relative to an OutputDirPath, confined within the output directory.
+- **SmtlibFilePath**: Relative path to an SMT-LIB artifact file (`.smt2` extension).
+- **ClaimId**: Canonical requirement or scenario identifier (e.g., `CAT-PARSE-EARS`).
+- **CapabilityName**: Lowercase kebab-case capability name (e.g., `catalog-and-parse`).
+- **SanitizedClaimId**: SMT-safe identifier produced by sanitization from a ClaimId.
+- **ModelName**: LLM model identifier passed to the `opencode` adapter.
+- **SmtlibContent**: SMT-LIB formula text content (not a file path).
+
+Branded values are constructed only through validated construction functions at trust boundaries. Interior code passes branded values through without casting.
+
+### Error Hierarchy
+
+The domain defines a structured error hierarchy using a generic `ErrorBase<C>` discriminated union pattern with 10 error categories:
+
+- **ArgumentError**: CLI argument parsing failure.
+- **ConfigError**: Configuration loading or validation failure.
+- **DependencyError**: Missing external binary dependency.
+- **CatalogError**: Input document discovery or reading failure.
+- **ValidationError**: Schema or structure validation failure.
+- **AdapterError**: External process adapter failure (spawn, timeout, invalid response).
+- **QualitativeError**: LLM-backed qualitative review failure.
+- **FormalizationError**: LLM-backed formalization failure.
+- **PipelineError**: Pipeline phase orchestration failure.
+- **OutputError**: File or manifest output failure.
+
+Narrowed boundary unions (`PipelinePhaseError`, `AdapterBoundaryError`, `CliResolutionError`) constrain which categories can appear at specific subsystem boundaries.
+
+### Assertion Utilities
+
+Runtime invariant enforcement uses four assertion functions for programmer errors and broken structural invariants (not for expected domain failures, which use `Result<T, E>`):
+
+- **precondition()**: Asserts caller contract obligations at function boundaries.
+- **invariant()**: Asserts structural invariants within functions or modules.
+- **postcondition()**: Asserts guaranteed outcomes before returning.
+- **assertNever()**: Asserts exhaustive handling in discriminated union switches.
+
 ## Preconditions, Postconditions, and Invariants
 
 ### Global
@@ -460,9 +501,18 @@ Invariants:
 |------|----------|---------|
 | 0 | — | Analysis completed without findings |
 | 1 | FindingsPresent | Analysis completed and surfaced one or more findings |
-| 2 | FatalError | Fatal error prevented successful analysis completion |
+| 2 | ArgumentError | CLI argument parsing failure |
+| 3 | ConfigError | Configuration loading or validation failure |
+| 4 | DependencyError | Missing external binary dependency |
+| 5 | CatalogError | Input document discovery or reading failure |
+| 6 | AdapterError | External process adapter failure |
+| 7 | ValidationError | Schema or structure validation failure |
+| 8 | QualitativeError | LLM-backed qualitative review failure |
+| 9 | FormalizationError | LLM-backed formalization failure |
+| 10 | PipelineError | Pipeline phase orchestration failure |
+| 11 | OutputError | File or manifest output failure |
 
-Exit code `2` covers invalid arguments, unreadable inputs, unavailable required dependencies, invalid external-tool output after retries, unrecoverable output failure, and any condition that prevents the tool from producing a trustworthy evidence set.
+Exit codes 2–11 correspond to the `ErrorCategory` discriminated union in the error hierarchy. Each category maps to a fixed code via `EXIT_CODE_BY_CATEGORY`. Fatal errors in any category prevent the tool from producing a trustworthy evidence set.
 
 ### Stderr Format
 

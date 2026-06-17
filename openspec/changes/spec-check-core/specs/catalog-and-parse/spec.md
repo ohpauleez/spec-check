@@ -27,6 +27,11 @@ IF the user supplies an unrecognized flag, THEN THE spec-check CLI SHALL exit wi
 
 **Postcondition:** No analysis output is produced.
 
+#### Scenario: Flag Value With Equals Syntax Accepted [CAT-CLI-EQSYNTAX]
+WHEN the user supplies a flag using `--flag=value` syntax, THE spec-check CLI SHALL accept the value as equivalent to `--flag value` syntax for all recognized value-bearing flags.
+
+**Postcondition:** Both `--flag value` and `--flag=value` syntaxes are accepted interchangeably.
+
 ### Requirement: Config Loading And Merge [CAT-CLI-CONFIG]
 WHEN `--config` is provided, THE spec-check CLI SHALL load the JSON config file, validate its structure, and merge config values with CLI flags where CLI flags take precedence.
 

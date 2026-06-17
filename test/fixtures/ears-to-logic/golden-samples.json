@@ -1,0 +1,81 @@
+[
+  {
+    "name": "event-driven SHALL",
+    "ears": "WHEN the user submits a form, THE system SHALL validate all required fields.",
+    "expectedIr": {
+      "claimId": "EARS-EVENT-1",
+      "obligation": "mandatory",
+      "sorts": [
+        { "name": "FormSubmitted", "sort": "Bool" },
+        { "name": "FieldsValidated", "sort": "Bool" }
+      ],
+      "functions": [],
+      "assertions": [
+        { "id": "EVENT-DRIVEN-1", "expr": "(=> FormSubmitted FieldsValidated)" }
+      ]
+    }
+  },
+  {
+    "name": "state-driven SHALL",
+    "ears": "WHILE the system is in maintenance mode, THE system SHALL reject all incoming requests.",
+    "expectedIr": {
+      "claimId": "EARS-STATE-1",
+      "obligation": "mandatory",
+      "sorts": [
+        { "name": "InMaintenanceMode", "sort": "Bool" },
+        { "name": "RequestsRejected", "sort": "Bool" }
+      ],
+      "functions": [],
+      "assertions": [
+        { "id": "STATE-DRIVEN-1", "expr": "(=> InMaintenanceMode RequestsRejected)" }
+      ]
+    }
+  },
+  {
+    "name": "ubiquitous SHOULD",
+    "ears": "THE system SHOULD log all API responses.",
+    "expectedIr": {
+      "claimId": "EARS-UBIQ-1",
+      "obligation": "advisory",
+      "sorts": [
+        { "name": "ApiResponseLogged", "sort": "Bool" }
+      ],
+      "functions": [],
+      "assertions": [
+        { "id": "UBIQ-1", "expr": "ApiResponseLogged" }
+      ]
+    }
+  },
+  {
+    "name": "option-driven SHALL",
+    "ears": "IF the user has admin privileges, THE system SHALL display the admin panel.",
+    "expectedIr": {
+      "claimId": "EARS-OPT-1",
+      "obligation": "mandatory",
+      "sorts": [
+        { "name": "HasAdminPrivileges", "sort": "Bool" },
+        { "name": "AdminPanelDisplayed", "sort": "Bool" }
+      ],
+      "functions": [],
+      "assertions": [
+        { "id": "OPTION-DRIVEN-1", "expr": "(=> HasAdminPrivileges AdminPanelDisplayed)" }
+      ]
+    }
+  },
+  {
+    "name": "unwanted-behavior SHALL NOT",
+    "ears": "IF the database connection fails, THE system SHALL NOT expose internal error details to the user.",
+    "expectedIr": {
+      "claimId": "EARS-UNWANTED-1",
+      "obligation": "mandatory",
+      "sorts": [
+        { "name": "DatabaseConnectionFailed", "sort": "Bool" },
+        { "name": "InternalErrorExposed", "sort": "Bool" }
+      ],
+      "functions": [],
+      "assertions": [
+        { "id": "UNWANTED-1", "expr": "(=> DatabaseConnectionFailed (not InternalErrorExposed))" }
+      ]
+    }
+  }
+]

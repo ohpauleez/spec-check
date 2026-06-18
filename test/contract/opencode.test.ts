@@ -19,7 +19,7 @@ describe("opencode adapter contract", () => {
     mocked.mockResolvedValueOnce({
       exitCode: 0,
       signal: null,
-      stdout: JSON.stringify({ result: "ok" }),
+      stdout: JSON.stringify({ type: "text", part: { text: "{\"result\":\"ok\"}" } }),
       stderr: "",
       timedOut: false,
     });
@@ -34,17 +34,49 @@ describe("opencode adapter contract", () => {
     expect(mocked).toHaveBeenCalledOnce();
     const [command, args] = mocked.mock.calls[0] as [string, readonly string[], unknown];
     expect(command).toBe("opencode");
-    expect(args).toEqual(["--prompt", "hello world", "--model", "test-model"]);
+    expect(args).toEqual(["run", "--model", "test-model", "--format", "json", "hello world"]);
   });
 
-  it("returns ok with parsed JSON on valid response", async () => {
+  it("returns ok with parsed JSON from a single text event", async () => {
     traceSpec("CAT-DEPS-OPENCODE");
     const { runProcess } = await import("../../src/adapters/process.js");
     const mocked = vi.mocked(runProcess);
     mocked.mockResolvedValueOnce({
       exitCode: 0,
       signal: null,
-      stdout: JSON.stringify({ findings: [{ severity: "info" }] }),
+      stdout: JSON.stringify({
+        type: "text",
+        part: { text: JSON.stringify({ findings: [{ severity: "info" }] }) },
+      }),
+      stderr: "",
+      timedOut: false,
+    });
+
+    const result = await callOpencode({
+      model: "m",
+      phase: "formalization",
+      prompt: "test",
+      retries: 1,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value).toEqual({ findings: [{ severity: "info" }] });
+  });
+
+  it("returns ok with parsed JSON from newline-delimited events", async () => {
+    traceSpec("CAT-DEPS-OPENCODE");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    const mocked = vi.mocked(runProcess);
+    mocked.mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      stdout: [
+        JSON.stringify({ type: "step_start", part: { id: "1" } }),
+        JSON.stringify({ type: "text", part: { text: "{\"findings\": [" } }),
+        JSON.stringify({ type: "text", part: { text: "{\"severity\":\"info\"}] }" } }),
+        JSON.stringify({ type: "step_finish", part: { id: "1" } }),
+      ].join("\n"),
       stderr: "",
       timedOut: false,
     });
@@ -68,7 +100,7 @@ describe("opencode adapter contract", () => {
     mocked.mockResolvedValue({
       exitCode: 0,
       signal: null,
-      stdout: JSON.stringify("not-an-object"),
+      stdout: JSON.stringify({ type: "text", part: { text: JSON.stringify("not-an-object") } }),
       stderr: "",
       timedOut: false,
     });
@@ -92,7 +124,7 @@ describe("opencode adapter contract", () => {
     mocked.mockResolvedValue({
       exitCode: 0,
       signal: null,
-      stdout: JSON.stringify({ findings: "not-an-array" }),
+      stdout: JSON.stringify({ type: "text", part: { text: JSON.stringify({ findings: "not-an-array" }) } }),
       stderr: "",
       timedOut: false,
     });
@@ -132,6 +164,114 @@ describe("opencode adapter contract", () => {
     if (result.ok) return;
     expect(result.error.kind).toBe("invalid_json");
     expect(mocked).toHaveBeenCalledTimes(2);
+  });
+
+  it("rejects event streams with no text payload", async () => {
+    traceSpec("FLA-VALIDATE-SAMPLE");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    const mocked = vi.mocked(runProcess);
+    mocked.mockResolvedValue({
+      exitCode: 0,
+      signal: null,
+      stdout: [
+        JSON.stringify({ type: "step_start", part: { id: "1" } }),
+        JSON.stringify({ type: "step_finish", part: { id: "1" } }),
+      ].join("\n"),
+      stderr: "",
+      timedOut: false,
+    });
+
+    const result = await callOpencode({
+      model: "m",
+      phase: "formalization",
+      prompt: "test",
+      retries: 1,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("invalid_json");
+  });
+
+  it("rejects text payloads that are not JSON", async () => {
+    traceSpec("FLA-VALIDATE-SAMPLE");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    const mocked = vi.mocked(runProcess);
+    mocked.mockResolvedValue({
+      exitCode: 0,
+      signal: null,
+      stdout: JSON.stringify({ type: "text", part: { text: "plain text" } }),
+      stderr: "",
+      timedOut: false,
+    });
+
+    const result = await callOpencode({
+      model: "m",
+      phase: "formalization",
+      prompt: "test",
+      retries: 1,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("invalid_json");
+  });
+
+  it("rejects opencode error events as invalid_json failures", async () => {
+    traceSpec("CAT-DEPS-OPENCODE");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    const mocked = vi.mocked(runProcess);
+    mocked.mockResolvedValue({
+      exitCode: 0,
+      signal: null,
+      stdout: JSON.stringify({
+        type: "error",
+        timestamp: Date.now(),
+        sessionID: "test",
+        error: { name: "UnknownError", data: { message: "Model not found: bad-model/." } },
+      }),
+      stderr: "",
+      timedOut: false,
+    });
+
+    const result = await callOpencode({
+      model: "bad-model",
+      phase: "formalization",
+      prompt: "test",
+      retries: 1,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("invalid_json");
+    expect(result.error.message).toContain("Model not found");
+  });
+
+  it("rejects error events embedded in a multi-line event stream", async () => {
+    traceSpec("CAT-DEPS-OPENCODE");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    const mocked = vi.mocked(runProcess);
+    mocked.mockResolvedValue({
+      exitCode: 0,
+      signal: null,
+      stdout: [
+        JSON.stringify({ type: "step_start", part: { id: "1" } }),
+        JSON.stringify({ type: "error", error: { data: { message: "provider timeout" } } }),
+      ].join("\n"),
+      stderr: "",
+      timedOut: false,
+    });
+
+    const result = await callOpencode({
+      model: "m",
+      phase: "qualitative-review",
+      prompt: "test",
+      retries: 1,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("invalid_json");
   });
 
   it("retries on timeout up to retry limit then returns timeout error", async () => {

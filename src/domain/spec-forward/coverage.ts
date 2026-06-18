@@ -90,7 +90,8 @@ function detectMissingSpecFiles(
  * @remarks
  * Precondition: `graph.claims` includes all upstream and downstream claims.
  * Postcondition: finding severity matches the obligation level of the referencing requirement.
- * Invariant: only requirement claims are checked; empty references are skipped.
+ * Invariant: only requirement claims are checked; empty references and archived
+ * provenance references (`openspec/changes/archive/`) are skipped.
  */
 function detectUnsupportedReferences(graph: ClaimGraph): readonly Finding[] {
   const upstreamClaims = graph.claims.filter((claim) => claim.kind !== "requirement" && claim.kind !== "scenario");
@@ -103,6 +104,12 @@ function detectUnsupportedReferences(graph: ClaimGraph): readonly Finding[] {
 
     for (const reference of claim.references) {
       if (reference.length === 0) {
+        continue;
+      }
+
+      // Archived change references are valid provenance-only links and do not
+      // require the referenced document to be present in the active catalog.
+      if (isArchivedChangeReference(reference)) {
         continue;
       }
 
@@ -407,4 +414,19 @@ function normalizeCapabilityName(raw: string): string {
     .toLowerCase()
     .replace(/[`*_]/gu, "")
     .replace(/\s+/gu, "-");
+}
+
+/**
+ * Check whether a reference path points to an archived change directory.
+ *
+ * @param reference - raw reference path string from a requirement's `**References:**` block
+ * @returns true if the reference path includes `openspec/changes/archive/`
+ *
+ * @remarks
+ * Archived change documents are valid provenance-only links — they record the design
+ * history behind a requirement but do not need to be present in the active analysis catalog.
+ * Postcondition: returns true only for paths that pass through the archive directory.
+ */
+function isArchivedChangeReference(reference: string): boolean {
+  return reference.includes("openspec/changes/archive/");
 }

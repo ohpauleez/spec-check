@@ -76,6 +76,16 @@ describe("coverage analysis contracts", () => {
     expect(findings.some((f) => f.category === "coverage.unsupported_reference")).toBe(true);
   });
 
+  it("accepts archived change references as valid provenance", () => {
+    traceSpec("CGC-VALIDATE-REFS");
+    const spec = makeSpec("cap", [
+      { title: "R1", id: "R1", body: "WHEN x, THE system SHALL y.", refs: ["openspec/changes/archive/2026-01-01-feature/proposal.md#Scope"] },
+    ]);
+    const graph = buildClaimGraph({ specs: [spec] });
+    const findings = analyzeCoverage({ claimGraph: graph.graph, specs: [spec] });
+    expect(findings.some((f) => f.category === "coverage.unsupported_reference")).toBe(false);
+  });
+
   it("detects semantic drift for failure modes", () => {
     traceSpec("CGC-COVER-DRIFT");
     const proposal: ParsedProposal = {

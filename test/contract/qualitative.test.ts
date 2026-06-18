@@ -39,7 +39,8 @@ describe("qualitative review contract", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value.findings.length).toBe(2);
+    expect(result.value.pass1Findings.length).toBe(1);
+    expect(result.value.pass2Findings.length).toBe(1);
     expect(result.value.rawResponses.length).toBe(2);
     expect(mocked).toHaveBeenCalledTimes(2);
   });

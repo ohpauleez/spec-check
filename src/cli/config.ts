@@ -38,7 +38,7 @@ type ConfigError =
   | { readonly kind: "missing_inputs" };
 
 /** Default LLM model used when no --model flag or config is provided. */
-const DEFAULT_MODEL = "gpt-5.3-codex";
+const DEFAULT_MODEL = "github-copilot/gpt-5.4";
 
 /**
  * Load optional config and merge with CLI flags where CLI wins.

@@ -154,7 +154,7 @@ describe("adversarial inputs", () => {
       const r = await parseSpec(fixtures["malformed-ears.md"]!);
       expect(r.requirements.length).toBe(3);
       for (const req of r.requirements) {
-        expect(["event-driven", "state-driven", "conditional", "unwanted-behavior", "non-ears"]).toContain(req.earsType);
+        expect(["event-driven", "state-driven", "conditional", "unwanted-behavior", "ubiquitous", "non-ears"]).toContain(req.earsType);
       }
     });
 

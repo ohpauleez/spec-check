@@ -313,5 +313,9 @@ function classifyEarsType(body: string): ParsedRequirement["earsType"] {
     );
     return hasUnwantedIndicator ? "unwanted-behavior" : "conditional";
   }
+  // Ubiquitous: unconditional obligation with no trigger keyword.
+  if (normalized.includes("THE") && normalized.includes("SHALL")) {
+    return "ubiquitous";
+  }
   return "non-ears";
 }

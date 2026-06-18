@@ -99,9 +99,10 @@ export interface ParsedDesign {
  * - `"state-driven"` — active while a state holds ("While X, the system shall…").
  * - `"unwanted-behavior"` — specifies response to an undesirable condition ("If X, then the system shall…").
  * - `"conditional"` — general conditional constraint.
+ * - `"ubiquitous"` — unconditional obligation ("The system shall…").
  * - `"non-ears"` — requirement that does not conform to any EARS pattern.
  */
-export type EarsType = "event-driven" | "state-driven" | "unwanted-behavior" | "conditional" | "non-ears";
+export type EarsType = "event-driven" | "state-driven" | "unwanted-behavior" | "conditional" | "ubiquitous" | "non-ears";
 
 /**
  * A single requirement extracted from a spec document.

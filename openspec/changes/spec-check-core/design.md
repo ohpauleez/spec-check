@@ -717,7 +717,7 @@ Contract notes:
   - `0`: Analysis completed without findings.
   - `1`: Analysis completed and surfaced one or more findings.
   - `2`: Fatal error prevented successful analysis completion, such as invalid arguments, unreadable inputs, unavailable required dependencies, invalid external-tool output after retries, or unrecoverable output failure.
-- **LLM adapter contract**: Executes `opencode --prompt <text> --model <name>` and accepts only schema-valid JSON output.
+- **LLM adapter contract**: Executes `opencode run --model <name> --format json <prompt>`, parses newline-delimited JSON event output, extracts `type:"text"` event payloads, detects `type:"error"` events as failures, and accepts only schema-valid JSON from the assembled payload.
 - **Solver adapter contract**: Executes `z3` with SMT-LIB over stdin and records stdout/stderr plus timeout and unknown states.
 - **Traceability contract**: Canonical requirement and scenario identifiers are bracketed uppercase kebab-case identifiers and align with traced verification workflows.
 - **Reporting contract**: All reports and intermediate artifacts live under the configured output directory; manifest presence marks successful run completion. When `--src` is enabled, the output includes `gen_specs/` (code-derived Markdown specs), `gen_specs_smt/` (code-derived SMT-LIB artifacts), `report_2.logic.md` (code-derived formal analysis), and `report_2.compare.md` (cross-side comparison with dual-layer evidence).
@@ -828,7 +828,7 @@ Code/component responsibilities:
 - **`src/domain/reporting/manifest.ts`**: Computes file checksums, assembles manifest JSON, and writes it as the atomic completion marker.
 - **`src/adapters/fs.ts`**: Filesystem operations: path resolution and confinement to output directory, atomic file writes (temp file + rename), directory creation, file reading with UTF-8 and LF normalization.
 - **`src/adapters/process.ts`**: Generic child-process execution with argv arrays, timeout handling, exit-code capture, and stdout/stderr collection. No shell interpolation.
-- **`src/adapters/opencode.ts`**: `opencode` subprocess adapter. Builds argv (`opencode --prompt <text> --model <name>`), executes with bounded timeout, validates JSON response against phase-specific schemas, and returns typed results or retry-eligible failures.
+- **`src/adapters/opencode.ts`**: `opencode` subprocess adapter. Builds argv (`opencode run --model <name> --format json <prompt>`), executes with bounded timeout, parses newline-delimited JSON event stream, detects `type:"error"` events as failures, extracts `type:"text"` payloads, validates assembled JSON response against phase-specific schemas, and returns typed results or retry-eligible failures.
 - **`src/adapters/z3.ts`**: `z3` subprocess adapter. Pipes SMT-LIB content via stdin, captures stdout/stderr, handles per-query timeout, and classifies exit into sat/unsat/timeout/unknown/error.
 - **`build/esbuild.ts`**: Single-file bundle production targeting Node.js 20+ with `#!/usr/bin/env node` shebang.
 

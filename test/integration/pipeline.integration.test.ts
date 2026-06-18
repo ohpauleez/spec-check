@@ -186,7 +186,20 @@ describe("end-to-end integration", () => {
     });
 
     const trace = await traceClaimsToSource({ srcDir, claimGraph: graph.graph });
-    const derived = await deriveSpecsFromSource({ outputDir: toOutputDirPath(output), traces: trace.traces });
+
+    const { callOpencode } = await import("../../src/adapters/opencode.js");
+    vi.mocked(callOpencode).mockResolvedValueOnce({
+      ok: true,
+      value: {
+        capabilities: [{
+          name: "int-e2e",
+          description: "E2E test capability",
+          requirements: [{ id: "INT-E2E-001", text: "WHEN x, THE system SHALL produce output.", evidence: [] }],
+        }],
+      },
+    });
+
+    const derived = await deriveSpecsFromSource({ outputDir: toOutputDirPath(output), srcDir, model: "test-model", traces: trace.traces });
 
     expect(derived.specs.length).toBeGreaterThan(0);
     const genSpec = await readFile(join(output, "gen_specs", `${derived.specs[0]!.capability}.md`), "utf8");

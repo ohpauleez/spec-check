@@ -51,7 +51,7 @@ describe("gen-formal contract", () => {
 
     const output = await formalizeGeneratedSpecs({
       outputDir: toOutputDirPath("/tmp/test-output"),
-      generatedSpecs: [{ capability: "cat-pipeline", sourceIdentifiers: ["SRC-R1"] }],
+      generatedSpecs: [{ capability: "cat-pipeline", requirements: [{ id: "SRC-R1", text: "WHEN pipeline runs, THE system SHALL produce output." }], sourceIdentifiers: ["SRC-R1"] }],
       model: toModelName("test-model"),
     });
 
@@ -75,7 +75,7 @@ describe("gen-formal contract", () => {
 
     const output = await formalizeGeneratedSpecs({
       outputDir: toOutputDirPath("/tmp/test-output"),
-      generatedSpecs: [{ capability: "cat-pipeline", sourceIdentifiers: ["SRC-R1"] }],
+      generatedSpecs: [{ capability: "cat-pipeline", requirements: [{ id: "SRC-R1", text: "WHEN pipeline runs, THE system SHALL produce output." }], sourceIdentifiers: ["SRC-R1"] }],
       model: toModelName("test-model"),
     });
 
@@ -98,7 +98,7 @@ describe("gen-formal contract", () => {
 
     await formalizeGeneratedSpecs({
       outputDir: toOutputDirPath("/tmp/test-output"),
-      generatedSpecs: [{ capability: "cat-pipeline", sourceIdentifiers: ["SRC-R1"] }],
+      generatedSpecs: [{ capability: "cat-pipeline", requirements: [{ id: "SRC-R1", text: "WHEN pipeline runs, THE system SHALL produce output." }], sourceIdentifiers: ["SRC-R1"] }],
       model: toModelName("test-model"),
     });
 
@@ -123,7 +123,7 @@ describe("gen-formal contract", () => {
 
     const output = await formalizeGeneratedSpecs({
       outputDir: toOutputDirPath("/tmp/test-output"),
-      generatedSpecs: [{ capability: "cat-pipeline", sourceIdentifiers: ["SRC-R1"] }],
+      generatedSpecs: [{ capability: "cat-pipeline", requirements: [{ id: "SRC-R1", text: "WHEN pipeline runs, THE system SHALL produce output." }], sourceIdentifiers: ["SRC-R1"] }],
       model: toModelName("test-model"),
     });
 
@@ -141,7 +141,7 @@ describe("gen-formal contract", () => {
 
     const output = await formalizeGeneratedSpecs({
       outputDir: toOutputDirPath("/tmp/test-output"),
-      generatedSpecs: [{ capability: "cat-pipeline", sourceIdentifiers: ["SRC-R1"] }],
+      generatedSpecs: [{ capability: "cat-pipeline", requirements: [{ id: "SRC-R1", text: "WHEN pipeline runs, THE system SHALL produce output." }], sourceIdentifiers: ["SRC-R1"] }],
       model: toModelName("test-model"),
     });
 

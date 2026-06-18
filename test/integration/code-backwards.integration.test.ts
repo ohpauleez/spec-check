@@ -71,8 +71,34 @@ describe("code-backwards pipeline", () => {
       srcDir: root,
       claimGraph: graph.graph,
     });
+
+    const { callOpencode } = await import("../../src/adapters/opencode.js");
+    vi.mocked(callOpencode).mockResolvedValueOnce({
+      ok: true,
+      value: {
+        capabilities: [{
+          name: "cat-pipeline",
+          description: "Pipeline capability",
+          requirements: [{ id: "CAT-PIPELINE-001", text: "WHEN source runs, THE system SHALL produce output.", evidence: [] }],
+        }],
+      },
+    }).mockResolvedValue({
+      ok: true,
+      value: {
+        sample: {
+          claimId: "CAT-PIPELINE-001",
+          obligation: "mandatory",
+          sorts: [{ name: "State", sort: "Bool" }],
+          functions: [{ name: "supports", args: ["Bool"], returns: "Bool" }],
+          assertions: [{ id: "ASSERT_1", expr: "(supports true)" }],
+        },
+      },
+    });
+
     const derived = await deriveSpecsFromSource({
       outputDir: toOutputDirPath(output),
+      srcDir: root,
+      model: toModelName("gpt-5.3-codex"),
       traces: trace.traces,
     });
 

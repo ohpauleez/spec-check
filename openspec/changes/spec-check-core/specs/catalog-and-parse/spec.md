@@ -119,7 +119,7 @@ WHEN the spec-check tool parses a capability spec file, THE spec-check tool SHAL
 - `proposal.md#Scope`
 
 #### Scenario: EARS Requirement Recognized [CAT-EARS-MATCH]
-WHEN a requirement body follows a recognized EARS pattern, THE spec-check tool SHALL classify it with the appropriate EARS type (event-driven, state-driven, unwanted-behavior, conditional).
+WHEN a requirement body follows a recognized EARS pattern, THE spec-check tool SHALL classify it with the appropriate EARS type (ubiquitous, event-driven, state-driven, unwanted-behavior, conditional).
 
 **Postcondition:** The parsed requirement carries its EARS classification for downstream analysis.
 

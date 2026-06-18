@@ -64,8 +64,10 @@ describe("formalize contract", () => {
     traceSpec("FLA-SAMPLE-REJECT", "FLA-VALIDATE-SAMPLE");
     const { callOpencode } = await import("../../src/adapters/opencode.js");
     const mocked = vi.mocked(callOpencode);
-    // First call returns invalid (missing assertions), second returns valid
+    // First call is the batch — returns invalid entry so claim falls back to individual.
+    // Second call (individual attempt 1) returns invalid, third returns valid.
     mocked
+      .mockResolvedValueOnce({ ok: true, value: { formalizations: [{ claimId: "R1", obligation: "mandatory" }] } })
       .mockResolvedValueOnce({ ok: true, value: { sample: { claimId: "R1", obligation: "mandatory" } } })
       .mockResolvedValue({ ok: true, value: makeValidSample("R1") });
 
@@ -161,23 +163,27 @@ describe("formalize contract", () => {
     traceSpec("FLA-FORMALIZE-CLAIMS", "FLA-FORMAL-PARTIAL");
     const { callOpencode } = await import("../../src/adapters/opencode.js");
     const mocked = vi.mocked(callOpencode);
-    // First claim (R1) succeeds, second claim (R2) fails fatally.
-    // Use concurrency: 1 to ensure deterministic call ordering.
+    // Put claims in different files so they go to separate batches with concurrency: 1.
+    // Batch 1 (R1) succeeds via batch response; batch 2 (R2) fails entirely.
     let callCount = 0;
     mocked.mockImplementation(async () => {
       callCount += 1;
-      if (callCount <= 2) {
-        // First claim's samples (samplesPerClaim: 2)
+      if (callCount === 1) {
+        // Batch call for R1's file: valid batch response
+        return { ok: true, value: { formalizations: [makeValidSample("R1").sample] } };
+      }
+      if (callCount === 2) {
+        // Additional sample for R1 (samplesPerClaim: 2)
         return { ok: true, value: makeValidSample("R1") };
       }
-      // Second claim's attempt fails fatally
+      // Batch call and fallback for R2's file: all fail
       return { ok: false, error: { kind: "spawn_error", phase: "formalization", message: "binary not found" } };
     });
 
     const result = await formalizeClaims({
       claims: [
-        makeClaim({ id: toClaimId("R1") }),
-        makeClaim({ id: toClaimId("R2") }),
+        makeClaim({ id: toClaimId("R1"), provenance: { file: "spec-a.md", heading: "R1" } }),
+        makeClaim({ id: toClaimId("R2"), provenance: { file: "spec-b.md", heading: "R2" } }),
       ],
       model: "test-model",
       samplesPerClaim: 2,

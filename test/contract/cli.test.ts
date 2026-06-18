@@ -12,6 +12,8 @@ describe("CLI argument parsing", () => {
       "out",
       "--src",
       "src",
+      "--model",
+      "github-copilot/gpt-5.3-codex",
       "--caps",
       "caps.md",
       "--z3",
@@ -28,6 +30,7 @@ describe("CLI argument parsing", () => {
     expect(parsed.value.inputs).toEqual(["openspec/changes/spec-check-core"]);
     expect(parsed.value.output).toBe("out");
     expect(parsed.value.src).toBe("src");
+    expect(parsed.value.model).toBe("github-copilot/gpt-5.3-codex");
     expect(parsed.value.caps).toBe("caps.md");
     expect(parsed.value.z3).toBe("/usr/bin/z3");
     expect(parsed.value.config).toBe("config.json");

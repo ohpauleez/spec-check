@@ -51,7 +51,7 @@ export interface GeneratedFormalizationOutput {
  */
 export async function formalizeGeneratedSpecs(input: {
   readonly outputDir: OutputDirPath;
-  readonly generatedSpecs: readonly { readonly capability: string; readonly sourceIdentifiers: readonly string[] }[];
+  readonly generatedSpecs: readonly { readonly capability: string; readonly requirements: readonly { readonly id: string; readonly text: string }[]; readonly sourceIdentifiers: readonly string[] }[];
   readonly model: ModelName;
   readonly z3Path?: string;
 }): Promise<GeneratedFormalizationOutput> {
@@ -59,12 +59,13 @@ export async function formalizeGeneratedSpecs(input: {
   const outputClaims: GeneratedFormalization[] = [];
 
   for (const spec of input.generatedSpecs) {
-    const syntheticClaims: Claim[] = spec.sourceIdentifiers.map((identifier) => ({
-      id: toClaimId(identifier),
+    // Use actual requirement text from informalization (not tautological templates).
+    const syntheticClaims: Claim[] = spec.requirements.map((req) => ({
+      id: toClaimId(req.id),
       kind: "requirement",
-      text: `WHEN implementation executes for ${spec.capability}, THE system SHALL satisfy ${identifier}`,
+      text: req.text,
       obligation: "mandatory",
-      provenance: { file: `<gen_specs/${spec.capability}.md>`, heading: identifier },
+      provenance: { file: `<gen_specs/${spec.capability}.md>`, heading: req.id },
       references: [],
       capability: toCapabilityName(spec.capability),
     }));
@@ -72,7 +73,7 @@ export async function formalizeGeneratedSpecs(input: {
     const formalized = await formalizeClaims({
       claims: syntheticClaims,
       model: input.model,
-      samplesPerClaim: 3,
+      samplesPerClaim: 1,
     });
 
     // formalizeClaims always returns ok; check for errors in the output.

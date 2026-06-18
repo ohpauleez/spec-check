@@ -120,9 +120,27 @@ describe("determinism - extended", () => {
   it("code-derived spec generation produces identical content across runs", async () => {
     traceSpec("STC-GEN-SPECS", "STC-GEN-EARS");
     const traces = [makeTrace("DET-GEN-REQ"), makeTrace("DET-GEN-OPT")];
+    const { mkdtemp, mkdir, writeFile: writeF } = await import("node:fs/promises");
+    const { join: j } = await import("node:path");
+    const { tmpdir: td } = await import("node:os");
+    const srcDir = await mkdtemp(j(td(), "spec-check-det-"));
+    await mkdir(j(srcDir, "src"), { recursive: true });
+    await writeF(j(srcDir, "src/code.ts"), "export const x = 1;\n", "utf8");
 
-    const outputA = await deriveSpecsFromSource({ outputDir: toOutputDirPath("/tmp/det-gen-a"), traces });
-    const outputB = await deriveSpecsFromSource({ outputDir: toOutputDirPath("/tmp/det-gen-b"), traces });
+    const { callOpencode } = await import("../../src/adapters/opencode.js");
+    vi.mocked(callOpencode).mockResolvedValue({
+      ok: true,
+      value: {
+        capabilities: [{
+          name: "det-gen",
+          description: "Determinism test capability",
+          requirements: [{ id: "DET-GEN-001", text: "THE system SHALL be deterministic.", evidence: [] }],
+        }],
+      },
+    });
+
+    const outputA = await deriveSpecsFromSource({ outputDir: toOutputDirPath("/tmp/det-gen-a"), srcDir, model: "test-model", traces });
+    const outputB = await deriveSpecsFromSource({ outputDir: toOutputDirPath("/tmp/det-gen-b"), srcDir, model: "test-model", traces });
 
     expect(outputA.specs.length).toBe(outputB.specs.length);
     for (let index = 0; index < outputA.specs.length; index += 1) {
@@ -134,10 +152,32 @@ describe("determinism - extended", () => {
   it("code-derived formalization produces identical output with cached responses", async () => {
     traceSpec("STC-GEN-FORMAL", "STC-FORMAL-STABLE");
     const { formalizeGeneratedSpecs } = await import("../../src/domain/code-backwards/gen-formal.js");
+    const { callOpencode } = await import("../../src/adapters/opencode.js");
+    const { runZ3Query } = await import("../../src/adapters/z3.js");
+
+    // Explicitly set mock for formalization (previous test may have contaminated).
+    vi.mocked(callOpencode).mockResolvedValue({
+      ok: true,
+      value: {
+        sample: {
+          claimId: "DET-REQ",
+          obligation: "mandatory",
+          sorts: [{ name: "S", sort: "Bool" }],
+          functions: [{ name: "f", args: ["Bool"], returns: "Bool" }],
+          assertions: [{ id: "A1", expr: "(f true)" }],
+        },
+      },
+    });
+    vi.mocked(runZ3Query).mockResolvedValue({
+      kind: "unsat",
+      stdout: "unsat\n",
+      stderr: "",
+      exitCode: 0,
+    });
 
     const input = {
       outputDir: toOutputDirPath("/tmp/det-formal"),
-      generatedSpecs: [{ capability: "det-cap", sourceIdentifiers: ["DET-REQ"] }],
+      generatedSpecs: [{ capability: "det-cap", requirements: [{ id: "DET-REQ", text: "THE system SHALL be deterministic." }], sourceIdentifiers: ["DET-REQ"] }],
       model: toModelName("test-model"),
     };
 
@@ -145,8 +185,6 @@ describe("determinism - extended", () => {
     vi.clearAllMocks();
 
     // Re-mock with same responses
-    const { callOpencode } = await import("../../src/adapters/opencode.js");
-    const { runZ3Query } = await import("../../src/adapters/z3.js");
     vi.mocked(callOpencode).mockResolvedValue({
       ok: true,
       value: {

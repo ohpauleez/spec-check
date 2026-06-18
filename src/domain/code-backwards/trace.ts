@@ -6,7 +6,7 @@ import type { ClaimId } from "../branded.js";
 import type { ClaimGraph } from "../claim-graph.js";
 import type { Finding } from "../findings.js";
 
-const TRACE_IDENTIFIER_PATTERN = /\[([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)\]/gu;
+const TRACE_IDENTIFIER_PATTERN = /\[([A-Z][A-Z0-9]+(?:-[A-Z0-9]+)+)\]/gu;
 
 /** Maximum concurrent file reads during source tracing. */
 const TRACE_READ_CONCURRENCY_DEFAULT = 16;

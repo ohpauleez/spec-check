@@ -93,7 +93,7 @@ interface AnalysisResult {
   readonly state: RunState;
   readonly claimGraphResult: { readonly graph: ClaimGraphOutput["graph"]; readonly claimFindings: readonly Finding[]; readonly coverageFindings: readonly Finding[] };
   readonly clusterResult: { readonly representatives: readonly LogicIrClaim[]; readonly findings: readonly Finding[] };
-  readonly qualResult: { readonly findings: readonly Finding[] };
+  readonly qualResult: { readonly pass1Findings: readonly Finding[]; readonly pass2Findings: readonly Finding[] };
   readonly logicResult: { readonly findings: readonly Finding[] };
 }
 
@@ -246,14 +246,14 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
     }
     return result.value;
   });
-  state = addFindings(qualResult.state, qualResult.value.findings);
+  state = addFindings(qualResult.state, [...qualResult.value.pass1Findings, ...qualResult.value.pass2Findings]);
 
   // Phase 6: Formalize claims via LLM.
   const formalResult = await runPhaseWithResult("formalization", state, async () => {
     const result = await formalizeClaims({
       claims: claimGraphResult.value.graph.claims,
       model: config.model,
-      samplesPerClaim: 3,
+      samplesPerClaim: 1,
     });
     if (!result.ok) {
       throw new PipelineAbortError("FormalizationError", result.error.map((e) => e.message).join("; "));
@@ -323,8 +323,8 @@ async function runReportingPhase(
   return await runPhase("reporting", state, async () => {
     const phaseFiles = await writePhaseReports({
       outputDir: config.output,
-      report11: analysis.qualResult.findings.filter((f) => f.category.startsWith("qualitative.qualitative-review")),
-      report12: analysis.qualResult.findings.filter((f) => f.category.startsWith("qualitative.qualitative-properties")),
+      report11: analysis.qualResult.pass1Findings,
+      report12: analysis.qualResult.pass2Findings,
       report13: analysis.claimGraphResult.coverageFindings,
       logicReport: analysis.logicResult.findings,
       ...(srcTraceFindings === undefined ? {} : { srcTraceReport: srcTraceFindings }),
@@ -580,6 +580,8 @@ async function runCodeBackwardsWork(
 
   const derivedSpecs = await deriveSpecsFromSource({
     outputDir: config.output,
+    srcDir: config.src!,
+    model: config.model,
     traces: traceOutput.traces,
   });
   allFindings.push(...derivedSpecs.findings);

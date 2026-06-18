@@ -169,7 +169,7 @@ describe("liveness properties", () => {
 
     expect(result.ok).toBe(true);
     if (!result.ok) return;
-    expect(result.value.findings.length).toBeGreaterThanOrEqual(1);
+    expect(result.value.pass1Findings.length).toBeGreaterThanOrEqual(1);
     expect(result.value.rawResponses.length).toBe(2);
   });
 

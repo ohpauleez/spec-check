@@ -2,6 +2,7 @@ import { callOpencode } from "../../adapters/opencode.js";
 import type { Finding } from "../findings.js";
 import type { CrossImplicationResult } from "./cross-implication.js";
 import { sanitizeForCodeFence } from "../fence.js";
+import { BLIND_COMPARE_INSTRUCTIONS } from "../prompts/blind-compare.js";
 
 /**
  * Output from the blind comparison pass, containing rationale findings for each classification.
@@ -57,7 +58,6 @@ export async function runBlindComparison(input: {
       phase: "blind-comparison",
       prompt,
       retries: 3,
-      timeoutMs: 30_000,
     });
 
     // Graceful degradation: record LLM failure as a finding rather than aborting.
@@ -104,14 +104,12 @@ export async function runBlindComparison(input: {
  */
 export function buildBlindPrompt(result: CrossImplicationResult, generatedSummary: string): string {
   return [
-    "Explain the formal classification using only generated-side context.",
-    "Do not infer or request original requirement text.",
+    BLIND_COMPARE_INSTRUCTIONS,
     `Classification: ${result.classification}`,
     "Generated-side context:",
     "```text",
     sanitizeForCodeFence(generatedSummary),
     "```",
-    "Return JSON with field rationale.",
   ].join("\n");
 }
 

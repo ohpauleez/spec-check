@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 
 import { traceSpec } from "../support/spec-trace.js";
 import { parseArgv } from "../../src/cli/parse-argv.js";
+import { resolveRunConfig } from "../../src/cli/config.js";
 
 describe("CLI argument parsing", () => {
   it("parses valid flags and positional paths", () => {
@@ -86,5 +87,48 @@ describe("CLI argument parsing", () => {
     if (!parsed.ok) return;
     expect(parsed.value.output).toBe("my-dir");
     expect(parsed.value.z3).toBe("/usr/bin/z3-4.12");
+  });
+
+  it("rejects output directory inside source directory", async () => {
+    traceSpec("CAT-CLI-OUTSRC");
+    const resolved = await resolveRunConfig({
+      inputs: ["openspec/changes/spec-check-core"],
+      output: "/tmp/project/src/output",
+      src: "/tmp/project/src",
+      help: false,
+      version: false,
+    });
+
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(resolved.error.kind).toBe("output_inside_src");
+  });
+
+  it("rejects output directory equal to source directory", async () => {
+    traceSpec("CAT-CLI-OUTSRC");
+    const resolved = await resolveRunConfig({
+      inputs: ["openspec/changes/spec-check-core"],
+      output: "/tmp/shared-dir",
+      src: "/tmp/shared-dir",
+      help: false,
+      version: false,
+    });
+
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(resolved.error.kind).toBe("output_inside_src");
+  });
+
+  it("accepts output directory outside source directory", async () => {
+    traceSpec("CAT-CLI-OUTSRC");
+    const resolved = await resolveRunConfig({
+      inputs: ["openspec/changes/spec-check-core"],
+      output: "/tmp/output",
+      src: "/tmp/project/src",
+      help: false,
+      version: false,
+    });
+
+    expect(resolved.ok).toBe(true);
   });
 });

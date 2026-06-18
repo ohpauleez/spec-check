@@ -1,3 +1,6 @@
+import { unlink } from "node:fs/promises";
+import { join } from "node:path";
+
 import { writeOutputAtomic, sha256Hex } from "../../adapters/fs.js";
 import { toRelativePath, type OutputDirPath } from "../branded.js";
 
@@ -45,4 +48,31 @@ export function buildManifestEntries(
 export async function writeManifest(outputDir: OutputDirPath, entries: readonly ManifestEntry[]): Promise<void> {
   const manifest: ManifestFile = { files: entries };
   await writeOutputAtomic(outputDir, toRelativePath("manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
+}
+
+/**
+ * Remove a stale manifest from a prior run before analysis begins.
+ *
+ * @param outputDir - configured output directory
+ * @returns true if a stale manifest was removed, false if none existed
+ *
+ * @remarks
+ * [RAE-MANIFEST-STALE] Ensures that a failed rerun cannot be mistaken for
+ * a prior successful run. The manifest is removed eagerly at the start of
+ * each run; only a successfully completed run writes a new manifest at the end.
+ *
+ * Precondition: `outputDir` is a valid path (directory may or may not exist).
+ * Postcondition: no manifest.json exists in `outputDir` after this call.
+ */
+export async function invalidateStaleManifest(outputDir: OutputDirPath): Promise<boolean> {
+  const manifestPath = join(outputDir, "manifest.json");
+  try {
+    await unlink(manifestPath);
+    return true;
+  } catch (error: unknown) {
+    if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") {
+      return false;
+    }
+    throw error;
+  }
 }

@@ -1,7 +1,7 @@
 ## ADDED Requirements
 
 ### Requirement: Trace Requirements To Source-Backed Evidence [STC-TRACE-SOURCE]
-WHEN a readable source directory is provided via `--src`, THE spec-check tool SHALL trace requirement and scenario claims to relevant source artifacts and SHALL report whether the located evidence supports, weakens, or fails to demonstrate the intended behavior.
+WHEN a readable source directory is provided via `--src`, THE spec-check tool SHALL trace requirement and scenario claims to relevant source artifacts and SHALL classify each claim as `supported` (located evidence demonstrates the intended behavior), `weakly supported` (located evidence references the claim but does not demonstrate behavioral correctness), or `missing` (no relevant source evidence found).
 
 **References:**
 - `proposal.md#Scope`
@@ -13,8 +13,13 @@ WHEN source code, traced tests, or verified contracts support a requirement or s
 
 **Postcondition:** The output identifies which source artifacts support each traced requirement or scenario.
 
+#### Scenario: Report Weakly Supported Trace [STC-TRACE-WEAK]
+IF a requirement or scenario identifier appears in source but the located evidence does not demonstrate the behavioral correctness of the claim (e.g., identifier in a comment without corresponding implementation), THEN THE spec-check tool SHALL classify the trace as `weakly supported` and SHALL note that the evidence establishes a link but not behavioral proof.
+
+**Postcondition:** Weak traceability links are distinguished from strong behavioral evidence.
+
 #### Scenario: Report Missing Trace [STC-TRACE-MISSING]
-IF a requirement or scenario cannot be traced to supporting source-backed evidence, THEN THE spec-check tool SHALL emit a traceability gap finding for that claim.
+IF a requirement or scenario cannot be traced to any source-backed evidence, THEN THE spec-check tool SHALL emit a traceability gap finding for that claim.
 
 **Postcondition:** Unimplemented or unverified claims remain visible to reviewers.
 
@@ -26,14 +31,14 @@ WHEN tracing requirements to source evidence, THE spec-check tool SHALL search f
 - `proposal.md#Preconditions, Postconditions, and Invariants`
 
 #### Scenario: Identifier Found In Test File [STC-ID-TEST]
-WHEN a canonical requirement or scenario identifier appears in a test file within the declared source scope, THE spec-check tool SHALL record the test file as supporting evidence for that claim.
+WHEN a canonical requirement or scenario identifier appears in a test file within the declared source scope, THE spec-check tool SHALL record the test file as a traceability link for that claim. This establishes that the claim was considered during testing but does not alone constitute proof of behavioral correctness.
 
-**Postcondition:** Test-to-requirement traceability is established through canonical identifiers.
+**Postcondition:** Test-to-requirement traceability is established through canonical identifiers; the evidence hierarchy determines how strongly this link supports the claim.
 
 #### Scenario: Identifier Found In Source Comment [STC-ID-SOURCE]
-WHEN a canonical requirement or scenario identifier appears in a source code comment within the declared source scope, THE spec-check tool SHALL record the source file as supporting evidence for that claim.
+WHEN a canonical requirement or scenario identifier appears in a source code comment within the declared source scope, THE spec-check tool SHALL record the source file as a traceability link for that claim. This establishes that the claim was considered during implementation but does not alone constitute proof of behavioral correctness.
 
-**Postcondition:** Implementation-to-requirement traceability is established through canonical identifiers.
+**Postcondition:** Implementation-to-requirement traceability is established through canonical identifiers; the evidence hierarchy determines how strongly this link supports the claim.
 
 #### Scenario: Unknown Identifier In Source [STC-ID-UNKNOWN]
 IF a bracketed identifier is found in source that does not match any known requirement or scenario identifier, THEN THE spec-check tool SHALL emit a finding noting the unknown traceability reference.
@@ -93,7 +98,7 @@ WHEN generating code-derived specifications, THE spec-check tool SHALL provide t
 **Postcondition:** The LLM receives structural metadata (capability names only) that improves naming alignment without violating the blind boundary.
 
 #### Scenario: EARS Preference With Structured Fallback [STC-GEN-EARS]
-WHEN code semantics support EARS decomposition, THE spec-check tool SHALL generate requirements using EARS patterns. WHERE code semantics resist EARS decomposition, THE spec-check tool SHALL use structured behavioral prose and SHALL note the deviation.
+WHEN code semantics support EARS decomposition, THE spec-check tool SHALL generate requirements using EARS patterns. IF code semantics resist EARS decomposition for a code-derived requirement, THEN THE spec-check tool SHALL use structured behavioral prose and SHALL note the deviation.
 
 **Postcondition:** Generated specs prefer EARS format but do not force unnatural EARS encoding at the expense of accuracy.
 
@@ -187,9 +192,9 @@ WHEN the solver determines that neither original claim A implies code-derived cl
 **Postcondition:** Non-comparable guarantees are explicitly identified with solver evidence.
 
 #### Scenario: Classify Uncertain When Solver Inconclusive [STC-IMPLY-UNCERTAIN]
-IF the solver returns timeout or unknown for either direction of an implication check, THEN THE spec-check tool SHALL classify the relationship as `uncertain` and SHALL preserve the inconclusive result as evidence.
+IF the solver returns timeout or unknown for either direction of an implication check, THEN THE spec-check tool SHALL classify the solver-layer result as `uncertain`, SHALL preserve the inconclusive result as evidence, and SHALL delegate final classification to the blind LLM comparison fallback as defined in [STC-COMPARE-FALLBACK].
 
-**Postcondition:** Inconclusive solver results produce honest uncertainty rather than false classification.
+**Postcondition:** Inconclusive solver results are preserved as evidence and trigger fallback classification rather than producing a terminal `uncertain` verdict.
 
 #### Scenario: Persist Implication Evidence [STC-IMPLY-PERSIST]
 WHEN cross-side implication checks complete, THE spec-check tool SHALL persist all implication queries and solver results verbatim under the output directory.
@@ -197,9 +202,9 @@ WHEN cross-side implication checks complete, THE spec-check tool SHALL persist a
 **Postcondition:** Every cross-side classification is auditable through preserved solver evidence.
 
 #### Scenario: Single Solver Command Per Cross-Side Query [STC-IMPLY-QUERY]
-WHEN the spec-check tool constructs a cross-side implication query to test whether original claim A entails code-derived claim B, THE query SHALL include declarations from both sides for shared context, SHALL assert A's assertions as the premise, SHALL assert the negation of B's assertions as the consequent test, and SHALL contain exactly one `(check-sat)` command at the end.
+WHEN the spec-check tool constructs a cross-side implication query to test whether original claim A entails code-derived claim B, THE query SHALL include declarations from both sides for shared context, SHALL assert A's assertions as the premise, SHALL assert the negation of the conjunction of B's assertions (i.e., `(assert (not (and b1 b2 ...)))`) as the consequent test, and SHALL contain exactly one `(check-sat)` command at the end. A result of `unsat` means A entails B; a result of `sat` means A does not entail B.
 
-**Postcondition:** Each cross-side implication query produces exactly one solver result; multiple `(check-sat)` commands cannot produce ambiguous or contradictory output within a single query.
+**Postcondition:** Each cross-side implication query produces exactly one solver result with unambiguous interpretation.
 
 #### Scenario: Capability-Level Aggregate Comparison [STC-IMPLY-AGGREGATE]
 WHEN a capability is present on both the original and code-derived sides, THE spec-check tool SHALL combine all SMT assertions from each side into a single conjunction per side and SHALL run a bidirectional implication check (2 Z3 calls) to produce a capability-level aggregate classification.
@@ -252,19 +257,19 @@ WHEN comparing code-derived guarantees against original specifications, THE spec
 - `proposal.md#Quality Attributes`
 
 #### Scenario: Solver Implication As Primary Classifier [STC-COMPARE-PRIMARY]
-WHEN cross-side implication results are available for a claim pair, THE spec-check tool SHALL use the solver-backed classification (same, stronger, weaker, different, uncertain) as the primary verdict.
+WHEN cross-side implication results are available and conclusive (same, stronger, weaker, or different) for a claim pair, THE spec-check tool SHALL use the solver-backed classification as the final verdict.
 
-**Postcondition:** The formal classification takes precedence over qualitative assessment.
+**Postcondition:** Conclusive formal classification takes precedence over qualitative assessment.
 
 #### Scenario: Blind Comparison As Explanatory Rationale [STC-COMPARE-EXPLAIN]
 WHEN both solver implication results and blind LLM comparison results are available, THE spec-check tool SHALL attach the blind comparison rationale as supporting evidence that explains the formal classification in human-readable terms.
 
 **Postcondition:** Reviewers receive both a formal verdict and a human-readable explanation.
 
-#### Scenario: Blind Comparison As Fallback [STC-COMPARE-FALLBACK]
-IF cross-side implication results are unavailable or uncertain for a claim pair, THEN THE spec-check tool SHALL use the blind LLM comparison as the fallback classifier.
+#### Scenario: Blind Comparison As Fallback Classifier [STC-COMPARE-FALLBACK]
+IF cross-side implication results are unavailable or the solver-layer classification is `uncertain` for a claim pair, THEN THE spec-check tool SHALL use the blind LLM comparison as the fallback classifier to produce the final verdict for that pair, and SHALL preserve the solver-layer `uncertain` evidence alongside the blind comparison result.
 
-**Postcondition:** Claims without formal evidence still receive a classification through the explanatory layer.
+**Postcondition:** Claims without conclusive formal evidence receive a final classification through the blind comparison layer; both the inconclusive solver evidence and the blind comparison verdict are preserved.
 
 #### Scenario: Prevent Requirement-Text Leakage [STC-COMPARE-BLIND]
 IF the blind comparison boundary would expose original requirement text to the code-derived comparison side, THEN THE spec-check tool SHALL prevent that comparison path and SHALL surface the boundary violation as an analysis defect.

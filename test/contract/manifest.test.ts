@@ -1,10 +1,10 @@
-import { mkdtemp, readFile, readdir } from "node:fs/promises";
+import { mkdtemp, readFile, readdir, writeFile, access } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { describe, expect, it } from "vitest";
 
-import { buildManifestEntries, writeManifest } from "../../src/domain/reporting/manifest.js";
+import { buildManifestEntries, writeManifest, invalidateStaleManifest } from "../../src/domain/reporting/manifest.js";
 import { writeOutputAtomic } from "../../src/adapters/fs.js";
 import { traceSpec } from "../support/spec-trace.js";
 import { toOutputDirPath, toRelativePath } from "../../src/domain/branded.js";
@@ -41,5 +41,26 @@ describe("manifest semantics", () => {
     ]);
     const { sha256Hex } = await import("../../src/adapters/fs.js");
     expect(entries[0]?.checksum).toBe(sha256Hex(content));
+  });
+
+  it("removes stale manifest from prior run", async () => {
+    traceSpec("RAE-MANIFEST-STALE");
+    const outDir = await mkdtemp(join(tmpdir(), "spec-check-manifest-"));
+    const staleManifest = JSON.stringify({ files: [{ path: "old.md", checksum: "abc", phase: "old" }] });
+    await writeFile(join(outDir, "manifest.json"), staleManifest, "utf8");
+
+    const removed = await invalidateStaleManifest(toOutputDirPath(outDir));
+    expect(removed).toBe(true);
+
+    // Verify manifest no longer exists.
+    await expect(access(join(outDir, "manifest.json"))).rejects.toThrow();
+  });
+
+  it("returns false when no stale manifest exists", async () => {
+    traceSpec("RAE-MANIFEST-STALE");
+    const outDir = await mkdtemp(join(tmpdir(), "spec-check-manifest-"));
+
+    const removed = await invalidateStaleManifest(toOutputDirPath(outDir));
+    expect(removed).toBe(false);
   });
 });

@@ -202,4 +202,47 @@ describe("source traceability scope and hierarchy", () => {
     expect(docTrace).toBeDefined();
     expect(docTrace!.level).toBe("supporting");
   });
+
+  it("identifier in documentation only classifies as weakly supported", async () => {
+    traceSpec("STC-TRACE-WEAK");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-stc-weak-"));
+    // Identifier appears only in a markdown doc — no implementation source or test.
+    await writeFile(join(root, "notes.md"), "Reference: [WEAK-ONLY-REQ] mentioned here.\n", "utf8");
+
+    const graph = buildClaimGraph({
+      specs: [{
+        file: "spec.md",
+        requirements: [{
+          title: "Weak",
+          identifier: "WEAK-ONLY-REQ",
+          body: "WHEN x, THE system SHALL y.",
+          earsType: "event-driven",
+          references: [],
+          provenance: { file: "spec.md", line: 1 },
+        }],
+        scenarios: [],
+        deltaSections: ["ADDED"],
+        structuralFindings: [],
+        unparsed: [],
+      }],
+    });
+
+    const trace = await traceClaimsToSource({ srcDir: root, claimGraph: graph.graph });
+    const weakTrace = trace.traces.find((t) => t.identifier === "WEAK-ONLY-REQ");
+    expect(weakTrace).toBeDefined();
+    expect(weakTrace!.level).toBe("supporting");
+
+    // Finding should be weakly_supported, not fully supported.
+    const weakFinding = trace.findings.find(
+      (f) => f.category === "source_trace.weakly_supported" && f.relatedClaimIdentifiers?.includes("WEAK-ONLY-REQ"),
+    );
+    expect(weakFinding).toBeDefined();
+    expect(weakFinding!.description).toContain("does not demonstrate behavioral correctness");
+
+    // Ensure it is NOT classified as fully supported.
+    const strongFinding = trace.findings.find(
+      (f) => f.category === "source_trace.supported" && f.relatedClaimIdentifiers?.includes("WEAK-ONLY-REQ"),
+    );
+    expect(strongFinding).toBeUndefined();
+  });
 });

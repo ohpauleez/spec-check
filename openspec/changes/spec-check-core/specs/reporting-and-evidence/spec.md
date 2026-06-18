@@ -1,14 +1,14 @@
 ## ADDED Requirements
 
 ### Requirement: Emit Bounded Analysis Reports [RAE-EMIT-REPORTS]
-WHEN one or more analysis phases complete, THE spec-check tool SHALL write the phase reports and synthesized summary reports defined for the selected analysis mode under the configured output directory.
+WHEN one or more analysis phases complete, THE spec-check tool SHALL write the phase reports and synthesized summary reports defined for the selected analysis mode under the configured output directory. The analysis mode is determined by the provided flags: base mode (no `--src`) produces `report_1.*`, `report_1.logic.md`, and `report_summary.md`; source-backed mode (`--src` provided) additionally produces `report_2.trace.md`, `report_2.logic.md`, `report_2.compare.md`, `gen_specs/`, and `gen_specs_smt/`.
 
 **References:**
 - `proposal.md#Scope`
 - `proposal.md#Quality Attributes`
 
 #### Scenario: Emit Phase-Specific Reports [RAE-REPORT-PHASES]
-WHEN specs-forward analysis completes for a run, THE spec-check tool SHALL emit distinct reports for qualitative analysis, invariant and property assessment, coverage analysis, and logic analysis, plus any optional source or tasks reports enabled for that run.
+WHEN specs-forward analysis completes for a run, THE spec-check tool SHALL emit distinct reports for qualitative analysis (first pass), qualitative properties and invariants (second pass), coverage analysis, and logic analysis, plus any optional source or tasks reports enabled for that run.
 
 **Postcondition:** Reviewers can inspect each analytical pass separately instead of relying only on a synthesized summary.
 
@@ -23,7 +23,7 @@ IF an optional phase is not enabled for a run, THEN THE spec-check tool SHALL ex
 **Postcondition:** Reviewers can distinguish intentionally skipped analysis from missing output.
 
 ### Requirement: Report File Naming Convention [RAE-REPORT-NAMES]
-WHEN the spec-check tool writes phase reports, THE spec-check tool SHALL use a stable naming convention that identifies the phase and pass number: `report_1.1.md` for the first qualitative pass, `report_1.2.md` for the second qualitative pass, `report_1.3.md` for coverage analysis, `report_1.logic.md` for logic analysis, `report_2.trace.md` for source traceability, `report_2.logic.md` for code-derived formal analysis, `report_2.compare.md` for code-backwards comparison, and `report_summary.md` for the synthesized summary.
+WHEN the spec-check tool writes phase reports, THE spec-check tool SHALL use a stable naming convention that identifies the phase and pass number: `report_1.1.md` for the first qualitative pass (spec quality review), `report_1.2.md` for the second qualitative pass (properties and invariants), `report_1.3.md` for coverage analysis, `report_1.logic.md` for logic analysis, `report_2.trace.md` for source traceability, `report_2.logic.md` for code-derived formal analysis, `report_2.compare.md` for code-backwards comparison, and `report_summary.md` for the synthesized summary.
 
 **References:**
 - `proposal.md#Scope`
@@ -73,14 +73,14 @@ WHEN a finding depends on an LLM-backed analysis response, THE spec-check tool S
 **Postcondition:** No final verdict rests on an unpreserved LLM response.
 
 ### Requirement: Finding Shape And Severity [RAE-FINDING-SHAPE]
-WHEN the spec-check tool creates a finding, THE spec-check tool SHALL use a stable finding shape with required fields: severity (error, warning, info), category, provenance (source file and heading), description, and evidence references. Optional fields include suggestion and related claim identifiers.
+WHEN the spec-check tool creates a finding, THE spec-check tool SHALL use a stable finding shape with required fields: severity (error, warning, info), category, provenance (source file and heading), description, rationale (explanation of why the finding exists), and evidence references. Optional fields include suggestion and related claim identifiers.
 
 **References:**
 - `proposal.md#Domain Model`
 - `proposal.md#Preconditions, Postconditions, and Invariants`
 
 #### Scenario: Finding With All Required Fields [RAE-SHAPE-COMPLETE]
-WHEN a finding is created, THE spec-check tool SHALL populate severity, category, provenance, description, and at least one evidence reference.
+WHEN a finding is created, THE spec-check tool SHALL populate severity, category, provenance, description, rationale, and at least one evidence reference.
 
 **Postcondition:** Every finding is self-describing and reviewable without external context.
 
@@ -121,6 +121,11 @@ WHEN all selected outputs are written successfully, THE spec-check tool SHALL wr
 IF the run fails before all selected outputs are finalized, THEN THE spec-check tool SHALL NOT leave a final manifest that implies completed output.
 
 **Postcondition:** Partial runs cannot be mistaken for completed analyses.
+
+#### Scenario: Invalidate Stale Manifest From Prior Run [RAE-MANIFEST-STALE]
+IF the output directory already contains a manifest from a previous run WHEN a new run begins, THEN THE spec-check tool SHALL remove the existing manifest before analysis begins so that a failed rerun cannot be mistaken for a prior successful run.
+
+**Postcondition:** Only a successfully completed run can leave a manifest in the output directory.
 
 ### Requirement: Manifest Content Schema [RAE-MANIFEST-SCHEMA]
 THE spec-check tool SHALL write the manifest as a UTF-8 JSON file containing an array of output file entries, each with `path` (relative to output directory), `checksum` (SHA-256 hex), and `phase` (originating phase name) fields.

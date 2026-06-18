@@ -769,7 +769,7 @@ Contract notes:
 
 - Input artifacts are read as UTF-8 text with line ending normalization to LF for internal processing.
 - Parsed document records carry document type, source path, recognized sections, extracted identifiers, and unmatched lines.
-- Findings use a stable shape with severity, category, provenance, description, evidence, and optional suggestion.
+- Findings use a stable shape with severity, category, provenance, description, rationale, evidence, and optional suggestion.
 - Claims represent normalized semantic units and carry origin metadata plus obligation level where relevant.
 - Logic artifacts are emitted as ASCII-safe SMT-LIB files with sanitized identifiers and reversible mapping comments.
 - Code-derived specifications are persisted as UTF-8 Markdown files in `gen_specs/` under the output directory, one per capability with sufficient source evidence.
@@ -783,7 +783,7 @@ Contract notes:
 - **CLI exit codes**:
   - `0`: Analysis completed without findings.
   - `1`: Analysis completed and surfaced one or more findings.
-  - `2`: Fatal error prevented successful analysis completion, such as invalid arguments, unreadable inputs, unavailable required dependencies, invalid external-tool output after retries, or unrecoverable output failure.
+  - `2–11`: Fatal error prevented successful analysis completion. Each code corresponds to a specific error category as defined in the proposal exit code table (ArgumentError=2, ConfigError=3, DependencyError=4, CatalogError=5, AdapterError=6, ValidationError=7, QualitativeError=8, FormalizationError=9, PipelineError=10, OutputError=11).
 - **LLM adapter contract**: Executes `opencode run --model <name> --format json <prompt>`, parses newline-delimited JSON event output, extracts `type:"text"` event payloads, detects `type:"error"` events as failures, and accepts only schema-valid JSON from the assembled payload.
 - **Solver adapter contract**: Executes `z3` with SMT-LIB over stdin and records stdout/stderr plus timeout and unknown states.
 - **Traceability contract**: Canonical requirement and scenario identifiers are bracketed uppercase kebab-case identifiers and align with traced verification workflows.
@@ -858,7 +858,7 @@ test/
 
 Code/component responsibilities:
 
-- **`src/index.ts`**: CLI entrypoint and top-level process exit mapping. Maps domain results to exit codes `0`, `1`, `2`.
+- **`src/index.ts`**: CLI entrypoint and top-level process exit mapping. Maps domain results to exit codes `0` (no findings), `1` (findings present), or `2–11` (fatal error per category).
 - **`src/cli/parse-argv.ts`**: Validates raw CLI inputs including positional paths, `--output`, `--src`, `--caps`, `--z3`, `--config`, `--pair-budget`, `--help`, and `--version` flags. Returns typed configuration or fatal error.
 - **`src/cli/config.ts`**: Loads and validates optional JSON config file. Merges config values with CLI flags (CLI flags take precedence).
 - **`src/cli/run-cli.ts`**: Orchestrates the full pipeline run: catalog, parse, claim graph, analysis phases, reporting, and manifest. Decomposed into `runIngestionPhases`, `runAnalysisPhases`, and `runReportingPhase` for phase-group isolation. Uses `PipelineAbortError` for typed error propagation between phase groups. Coordinates exit behavior and progress event emission.

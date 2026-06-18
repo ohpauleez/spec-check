@@ -63,7 +63,7 @@ WHEN a claim identifier contains only SMT-LIB-safe characters, THE spec-check to
 **Postcondition:** No unnecessary transformation is applied to safe identifiers.
 
 #### Scenario: Compiled Output Excludes Solver Commands [FLA-SMTLIB-QUERYSAT]
-WHEN the spec-check tool compiles logic IR into SMT-LIB text, THE compiled output SHALL contain variable declarations (`declare-const`), function declarations (`declare-fun`), and assertions (`assert`) but SHALL NOT include `(check-sat)`. Callers SHALL append `(check-sat)` at query execution time.
+WHEN the spec-check tool compiles logic IR into SMT-LIB text, THE compiled output SHALL contain variable declarations (`declare-const`), function declarations (`declare-fun`), and assertions (`assert`) but SHALL NOT include `(check-sat)`. THE spec-check tool SHALL append `(check-sat)` at query execution time when submitting the compiled output to the solver.
 
 **Postcondition:** Compiled SMT-LIB is a reusable component that can be composed into different query types (satisfiability, implication) without stripping embedded solver commands.
 
@@ -119,9 +119,9 @@ IF the solver returns timeout or unknown for a pairwise implication check, THE s
 **Postcondition:** Inconclusive solver results do not corrupt cluster construction.
 
 #### Scenario: Single Solver Command Per Implication Query [FLA-CLUSTER-QUERY]
-WHEN the spec-check tool constructs a pairwise implication query to test whether sample A entails sample B, THE query SHALL assert A's declarations and assertions as the premise, SHALL assert the negation of B's assertions as the consequent test, and SHALL contain exactly one `(check-sat)` command at the end.
+WHEN the spec-check tool constructs a pairwise implication query to test whether sample A entails sample B, THE query SHALL assert A's declarations and assertions as the premise, SHALL assert the negation of the conjunction of B's assertions (i.e., `(assert (not (and b1 b2 ...)))`) as the consequent test, and SHALL contain exactly one `(check-sat)` command at the end. A result of `unsat` means A entails B; a result of `sat` means A does not entail B.
 
-**Postcondition:** Each implication query produces exactly one solver result; multiple `(check-sat)` commands cannot produce ambiguous or contradictory output within a single query.
+**Postcondition:** Each implication query produces exactly one solver result with unambiguous interpretation; the negation applies to the conjunction of all target assertions jointly.
 
 ### Requirement: Clustering Determinism And Symmetry [FLA-CLUSTER-PROPERTIES]
 WHEN the spec-check tool performs equivalence clustering on the same set of formalization samples with the same solver results, THE spec-check tool SHALL produce identical clusters.
@@ -192,7 +192,7 @@ WHEN two conditional assertions have guards that can coexist and consequents tha
 **Postcondition:** Compatible conditional rules do not produce false-positive contradiction findings.
 
 #### Scenario: Pairwise Check Bounded By Pair Count [FLA-PAIRWISE-BOUND]
-WHEN the number of candidate pairs exceeds the configured limit, THE spec-check tool SHALL check only up to the limit and SHALL NOT block indefinitely on quadratic pair explosion.
+WHEN the number of candidate pairs exceeds the configured `--pair-budget` (default 200), THE spec-check tool SHALL check only up to the limit and SHALL NOT block indefinitely on quadratic pair explosion. The `--pair-budget` controls pairwise bounds for both specs-forward guard-activation checks and code-backwards cross-side implication checks.
 
 **Postcondition:** Pairwise analysis completes in bounded time regardless of claim count.
 

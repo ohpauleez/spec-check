@@ -1,4 +1,5 @@
 import { readFile } from "node:fs/promises";
+import { resolve, relative } from "node:path";
 
 import { toModelName, toOutputDirPath, type ModelName, type OutputDirPath } from "../domain/branded.js";
 import { err, ok, type Result } from "../domain/result.js";
@@ -37,7 +38,8 @@ type ConfigError =
   | { readonly kind: "config_read_error"; readonly path: string }
   | { readonly kind: "config_parse_error"; readonly path: string }
   | { readonly kind: "config_validation_error"; readonly path: string; readonly message: string }
-  | { readonly kind: "missing_inputs" };
+  | { readonly kind: "missing_inputs" }
+  | { readonly kind: "output_inside_src" };
 
 /** Default pair budget for bounded pairwise cross-implication. */
 const DEFAULT_PAIR_BUDGET = 200;
@@ -67,10 +69,23 @@ export async function resolveRunConfig(args: CliArgs): Promise<Result<RunConfig,
     return err({ kind: "missing_inputs" });
   }
 
+  const rawOutput = args.output ?? fromFile.value.output ?? "spec-check-output";
+  const resolvedSrc = args.src ?? fromFile.value.src;
+
+  // [CAT-CLI-OUTSRC] Reject output directory inside source directory.
+  if (resolvedSrc !== undefined) {
+    const resolvedOutputAbs = resolve(rawOutput);
+    const resolvedSrcAbs = resolve(resolvedSrc);
+    const rel = relative(resolvedSrcAbs, resolvedOutputAbs);
+    if (rel === "" || (!rel.startsWith("..") && !rel.startsWith("/"))) {
+      return err({ kind: "output_inside_src" });
+    }
+  }
+
   return ok({
     inputs: mergedInputs,
-    output: toOutputDirPath(args.output ?? fromFile.value.output ?? "spec-check-output"),
-    src: args.src ?? fromFile.value.src,
+    output: toOutputDirPath(rawOutput),
+    src: resolvedSrc,
     caps: args.caps ?? fromFile.value.caps,
     z3: args.z3 ?? fromFile.value.z3,
     model: toModelName(args.model ?? fromFile.value.model ?? DEFAULT_MODEL),

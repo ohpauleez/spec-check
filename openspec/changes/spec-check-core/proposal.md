@@ -539,7 +539,7 @@ The CLI version is read from `package.json` at build time and embedded as a cons
   - **Target/Threshold**: The tool SHALL never silently drop findings or evidence. It SHALL hard-fail when required external-tool responses are unavailable, invalid, or unusable after bounded retries.
   - **Influence**: Reliability drives fail-fast handling at external boundaries, explicit failure policy, preserved intermediate artifacts, and bounded execution behavior.
 - **Observability**
-  - **Target/Threshold**: Every finding SHALL include provenance. Every run SHALL emit phase progress information and SHALL write a manifest that lists produced artifacts and checksums.
+  - **Target/Threshold**: Every finding SHALL include provenance. Every run SHALL emit phase progress information. Every successful run SHALL write a manifest that lists produced artifacts and checksums. Failed runs SHALL NOT leave a manifest that implies completed output.
   - **Influence**: Observability drives structured progress events, manifest-based completion semantics, report synthesis, and preserved solver and model artifacts.
 - **Security**
   - **Target/Threshold**: The tool SHALL use explicit argv-based subprocess invocation only, SHALL write only under `--output`, and SHALL fence prompt content so analyzed spec text is never elevated into system-level instruction position.
@@ -548,7 +548,7 @@ The CLI version is read from `package.json` at build time and embedded as a cons
   - **Target/Threshold**: LLM-backed phases SHALL use bounded retries (default 3 attempts per call) with configurable per-call timeout. Solver queries SHALL use a per-query timeout (default 30 seconds). The overall pipeline SHALL not hang indefinitely on any single external call.
   - **Influence**: Bounded responsiveness drives explicit timeout handling in adapters, retry constants, and non-blocking failure outcomes for both `opencode` and `z3` calls.
 - **Determinism**
-  - **Target/Threshold**: Re-running with identical inputs and fixed or cached LLM responses SHALL produce byte-identical outputs. Uncached runs SHALL surface materially similar findings for the same underlying issues.
+  - **Target/Threshold**: Re-running with identical inputs and fixed or cached LLM responses SHALL produce byte-identical outputs. Uncached runs SHALL surface findings for the same underlying issues: the set of finding categories and their associated claim identifiers SHALL remain stable across uncached runs for the same inputs, though wording, evidence depth, and sample details may differ.
   - **Influence**: Determinism drives the separation of deterministic core processing from nondeterministic boundary phases, parser design, claim graph construction, coverage analysis, and report rendering.
 - **Maintainability**
   - **Target/Threshold**: The specification and code map are structured so future changes can localize behavior by pipeline phase and architecture layer.

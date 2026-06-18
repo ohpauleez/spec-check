@@ -149,14 +149,26 @@ export async function traceClaimsToSource(input: {
       level,
     });
 
-    findings.push({
-      severity: "info",
-      category: "source_trace.supported",
-      provenance: claim.provenance,
-      description: `Source evidence supports ${claim.id}`,
-      evidence: filesList.map((file) => ({ kind: "source_file", value: file })),
-      relatedClaimIdentifiers: [claim.id],
-    });
+    // [STC-TRACE-WEAK] Distinguish strong behavioral evidence from weak traceability links.
+    if (level === "supporting") {
+      findings.push({
+        severity: "info",
+        category: "source_trace.weakly_supported",
+        provenance: claim.provenance,
+        description: `Source evidence links to ${claim.id} but does not demonstrate behavioral correctness (supporting evidence only)`,
+        evidence: filesList.map((file) => ({ kind: "source_file", value: file })),
+        relatedClaimIdentifiers: [claim.id],
+      });
+    } else {
+      findings.push({
+        severity: "info",
+        category: "source_trace.supported",
+        provenance: claim.provenance,
+        description: `Source evidence supports ${claim.id}`,
+        evidence: filesList.map((file) => ({ kind: "source_file", value: file })),
+        relatedClaimIdentifiers: [claim.id],
+      });
+    }
   }
 
   for (const [identifier, traceFiles] of identifiers) {

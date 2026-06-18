@@ -32,6 +32,11 @@ WHEN the user supplies a flag using `--flag=value` syntax, THE spec-check CLI SH
 
 **Postcondition:** Both `--flag value` and `--flag=value` syntaxes are accepted interchangeably.
 
+#### Scenario: Output Directory Inside Source Directory Rejected [CAT-CLI-OUTSRC]
+IF the resolved `--output` directory is a descendant of or equal to the resolved `--src` directory, THEN THE spec-check CLI SHALL exit with code `2` and a diagnostic message explaining that the output directory must not reside within the source directory.
+
+**Postcondition:** The read-only source guarantee and output confinement constraints cannot conflict.
+
 ### Requirement: Config Loading And Merge [CAT-CLI-CONFIG]
 WHEN `--config` is provided, THE spec-check CLI SHALL load the JSON config file, validate its structure, and merge config values with CLI flags where CLI flags take precedence.
 

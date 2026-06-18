@@ -39,6 +39,11 @@ WHEN a claim is derived from a design property, assumption, or informational sec
 
 **Postcondition:** Informational claims contribute to coverage analysis without triggering mandatory-severity findings.
 
+#### Scenario: MAY Requirement Classified As Informational [CGC-OBLIG-OPTIONAL]
+WHEN a requirement uses the keyword MAY, THE spec-check tool SHALL assign the informational obligation level to that claim.
+
+**Postcondition:** Optional behavior does not trigger mandatory- or advisory-severity findings when absent or deviated from.
+
 ### Requirement: Detect Missing Coverage And Contradictions Across Artifacts [CGC-FIND-MISSING]
 WHEN proposal or design claims are compared against capability specs, THE spec-check tool SHALL identify missing coverage, contradiction, and semantic mismatch between upstream intent and downstream requirements and SHALL report each result with supporting evidence.
 
@@ -75,9 +80,9 @@ WHEN the proposal declares a capability and no corresponding active spec file ex
 **Postcondition:** Proposal-to-spec contract gaps are explicitly surfaced.
 
 #### Scenario: Report Unsupported Reference [CGC-REF-BADLINK]
-IF a requirement references an upstream section whose content does not support the claimed behavior, THEN THE spec-check tool SHALL emit a semantic-mismatch finding that names the requirement and the unsupported reference target. References to archived change artifacts (`openspec/changes/archive/`) SHALL be accepted as valid provenance links and SHALL NOT be flagged as unsupported.
+IF a requirement references an upstream section whose content does not support the claimed behavior, THEN THE spec-check tool SHALL emit a semantic-mismatch finding that names the requirement and the unsupported reference target. References to archived change artifacts (`openspec/changes/archive/`) SHALL be accepted as valid provenance links regardless of whether their content semantically supports the citing requirement, and SHALL NOT be flagged as unsupported.
 
-**Postcondition:** References remain meaningful evidence links rather than decorative citations. Archived change references are preserved as historical provenance without triggering false findings.
+**Postcondition:** References remain meaningful evidence links rather than decorative citations. Archived change references are preserved as historical provenance without triggering semantic-support validation.
 
 ### Requirement: Task Evidence Consistency [CGC-TASK-EVIDENCE]
 WHEN task files with completed change summaries are present, THE spec-check tool SHALL compare task evidence claims against the claim graph and SHALL report inconsistencies between documented task outcomes and specification requirements.

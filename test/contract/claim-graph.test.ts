@@ -71,6 +71,34 @@ describe("claim graph contracts", () => {
     expect(graph.findings.some((f) => f.category === "claim_graph.orphaned_claim")).toBe(true);
   });
 
+  it("classifies MAY requirement as informational obligation", () => {
+    traceSpec("CGC-OBLIG-OPTIONAL");
+    const graph = buildClaimGraph({
+      specs: [
+        {
+          file: "spec.md",
+          requirements: [
+            {
+              title: "Optional",
+              identifier: "REQ-OPTIONAL",
+              body: "WHEN output is rendered, THE system MAY include color formatting.",
+              earsType: "event-driven",
+              references: [],
+              provenance: { file: "spec.md", line: 20 },
+            },
+          ],
+          scenarios: [],
+          deltaSections: ["ADDED"],
+          structuralFindings: [],
+          unparsed: [],
+        },
+      ],
+    });
+
+    const optional = graph.graph.claims.find((claim) => claim.id === "REQ-OPTIONAL");
+    expect(optional?.obligation).toBe("informational");
+  });
+
   it("classifies informational content at informational obligation", () => {
     traceSpec("CGC-OBLIG-INFO");
     const graph = buildClaimGraph({

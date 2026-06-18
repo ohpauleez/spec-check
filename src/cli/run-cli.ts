@@ -20,7 +20,7 @@ import { runQualitativePasses } from "../domain/spec-forward/qualitative.js";
 import { formalizeClaims, type FormalizationCandidate } from "../domain/formal/formalize.js";
 import { clusterFormalizationSamples } from "../domain/formal/clustering.js";
 import { runLogicAnalysis, type SpecClaimGroup } from "../domain/formal/logic-analysis.js";
-import { writeManifest, buildManifestEntries } from "../domain/reporting/manifest.js";
+import { writeManifest, buildManifestEntries, invalidateStaleManifest } from "../domain/reporting/manifest.js";
 import { writePhaseReports, writeSummaryReport } from "../domain/reporting/render.js";
 import { traceClaimsToSource, type SourceTrace } from "../domain/code-backwards/trace.js";
 import { deriveSpecsFromSource } from "../domain/code-backwards/derive.js";
@@ -176,6 +176,9 @@ export async function runCli(config: RunConfig): Promise<RunState> {
  */
 async function runIngestionPhases(config: RunConfig): Promise<IngestionResult> {
   let state = createInitialRunState();
+
+  // [RAE-MANIFEST-STALE] Remove stale manifest before analysis begins.
+  await invalidateStaleManifest(config.output);
 
   // Phase 1: Check external dependencies.
   state = await runPhase("dependencies", state, async () => {

@@ -101,6 +101,8 @@ function parseConfigError(error: { readonly kind: string; readonly path?: string
   switch (error.kind) {
     case "missing_inputs":
       return makeTypedError("ConfigError", "missing required input paths");
+    case "output_inside_src":
+      return makeTypedError("ConfigError", "output directory must not reside within the source directory");
     case "config_read_error":
       return makeTypedError("ConfigError", `config file is unreadable: ${error.path ?? "<unknown>"}`);
     case "config_parse_error":

@@ -208,6 +208,7 @@ Postconditions:
 - Valid arguments produce a fully resolved run configuration before any analysis phase begins.
 - Invalid arguments, unreadable input paths, or missing required dependencies produce a fatal error with exit code `2` before any analysis output is written.
 - `--help` and `--version` print the requested information and exit with code `0` without running analysis.
+- Optional flags (`--output`, `--src`, `--caps`, `--z3`, `--config`, `--pair-budget`) are validated and merged with config file values when provided.
 
 Invariants:
 - CLI validation is a local, deterministic operation that never contacts external tools or writes output artifacts.

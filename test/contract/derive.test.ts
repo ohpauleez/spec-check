@@ -232,7 +232,7 @@ describe("derive contract", () => {
   });
 
   it("includes suggested capability names in LLM prompt when provided", async () => {
-    traceSpec("STC-GEN-CAPABILITY");
+    traceSpec("STC-GEN-CAPABILITY", "STC-GEN-SUGGEST");
     const { callOpencode } = await import("../../src/adapters/opencode.js");
     vi.mocked(callOpencode).mockResolvedValue(makeInformalizationResponse([
       {

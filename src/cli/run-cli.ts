@@ -10,7 +10,7 @@ import { writeOutputAtomic } from "../adapters/fs.js";
 import { buildClaimGraph } from "../domain/claim-graph.js";
 import { createProgressEvent, emitProgressEvent } from "../domain/progress.js";
 import { createInitialRunState, markPhaseCompleted, addFindings, type RunState } from "../domain/run-state.js";
-import { buildCatalog } from "../domain/parser/catalog.js";
+import { buildCatalog, inferCapabilityName } from "../domain/parser/catalog.js";
 import { parseDesign } from "../domain/parser/design.js";
 import { parseProposal } from "../domain/parser/proposal.js";
 import { parseSpec } from "../domain/parser/spec.js";
@@ -26,7 +26,7 @@ import { traceClaimsToSource, type SourceTrace } from "../domain/code-backwards/
 import { deriveSpecsFromSource } from "../domain/code-backwards/derive.js";
 import { formalizeGeneratedSpecs } from "../domain/code-backwards/gen-formal.js";
 import { analyzeGeneratedLogic } from "../domain/code-backwards/gen-logic.js";
-import { runCrossImplication } from "../domain/code-backwards/cross-implication.js";
+import { runCapabilityAggregateComparison, runBoundedPairwiseComparison } from "../domain/code-backwards/cross-implication.js";
 import { runBlindComparison } from "../domain/code-backwards/blind-compare.js";
 import { analyzeTaskSourceConsistency } from "../domain/tasks-analysis.js";
 import { compileSmtlib } from "../domain/formal/smtlib.js";
@@ -583,12 +583,24 @@ async function runSourcePhases(
   state = addFindings(state, traceResult.value.taskFindings);
 
   // Phase 10: Code-backwards — derive specs, formalize, cross-imply, blind compare.
+  // Build claimId → capability mapping from the claim graph provenance paths.
+  const claimCapabilityMap = new Map<string, string>();
+  for (const claim of claimGraphResult.graph.claims) {
+    if (claim.id !== undefined) {
+      const cap = inferCapabilityName(claim.provenance.file);
+      if (cap !== undefined) {
+        claimCapabilityMap.set(claim.id, cap);
+      }
+    }
+  }
+
   const codeResult = await runPhaseWithResult("code-backwards", state, async () => {
     return await runCodeBackwardsWork(
       config,
       traceResult.value.traceOutput,
       representativeClaims,
       knownCapabilities,
+      claimCapabilityMap,
     );
   });
   state = addFindings(codeResult.state, codeResult.value.allFindings);
@@ -607,6 +619,8 @@ async function runSourcePhases(
  * @param config - run configuration
  * @param traceOutput - source trace output from phase 9
  * @param representativeClaims - original representative claims for cross-implication
+ * @param knownCapabilities - capability names from the catalog for informalization suggestions
+ * @param claimCapabilityMap - mapping from claim ID to resolved capability name
  * @returns categorized findings from all code-backwards sub-phases
  *
  * @remarks
@@ -618,6 +632,7 @@ async function runCodeBackwardsWork(
   traceOutput: { readonly findings: readonly Finding[]; readonly traces: readonly SourceTrace[] },
   representativeClaims: readonly LogicIrClaim[],
   knownCapabilities: readonly string[],
+  claimCapabilityMap: ReadonlyMap<string, string>,
 ): Promise<{
   readonly allFindings: readonly Finding[];
   readonly logicFindings: readonly Finding[];
@@ -650,30 +665,59 @@ async function runCodeBackwardsWork(
   allFindings.push(...generatedLogic.findings);
 
   // Compile original claims to SMT-LIB for cross-implication.
+  // Use the claim-to-capability map for correct capability resolution.
   const originalFormalRefs: { capability: string; claimId: string; smtlibPath: RelativePath }[] = [];
   for (const claim of representativeClaims) {
     const compiled = compileSmtlib(claim);
-    const capability = inferCapability(claim.claimId);
+    const capability = claimCapabilityMap.get(claim.claimId) ?? "unknown";
     const relativePath = toRelativePath(`smt/original/${compiled.sanitizedClaimId}.smt2`);
     await writeOutputAtomic(config.output, relativePath, compiled.smtlib);
     originalFormalRefs.push({ capability, claimId: claim.claimId, smtlibPath: relativePath });
   }
 
-  const crossImplication = await runCrossImplication({
+  // Group claims by capability for tiered comparison.
+  const originalByCapability = new Map<string, { claimId: string; smtlibPath: RelativePath }[]>();
+  for (const ref of originalFormalRefs) {
+    const existing = originalByCapability.get(ref.capability);
+    if (existing !== undefined) {
+      existing.push({ claimId: ref.claimId, smtlibPath: ref.smtlibPath });
+    } else {
+      originalByCapability.set(ref.capability, [{ claimId: ref.claimId, smtlibPath: ref.smtlibPath }]);
+    }
+  }
+
+  const generatedByCapability = new Map<string, { claimId: string; smtlibPath: RelativePath }[]>();
+  for (const claim of generatedFormal.claims) {
+    const existing = generatedByCapability.get(claim.capability);
+    if (existing !== undefined) {
+      existing.push({ claimId: claim.claimId, smtlibPath: claim.smtlibPath });
+    } else {
+      generatedByCapability.set(claim.capability, [{ claimId: claim.claimId, smtlibPath: claim.smtlibPath }]);
+    }
+  }
+
+  // Tier 1: Capability-level aggregate comparison (cheap, always runs).
+  const aggregate = await runCapabilityAggregateComparison({
     outputDir: config.output,
-    original: originalFormalRefs,
-    generated: generatedFormal.claims.map((c) => ({
-      capability: c.capability,
-      claimId: c.claimId,
-      smtlibPath: c.smtlibPath,
-    })),
+    originalByCapability,
+    generatedByCapability,
     ...(config.z3 === undefined ? {} : { z3Path: config.z3 }),
   });
-  allFindings.push(...crossImplication.findings);
+  allFindings.push(...aggregate.findings);
+
+  // Tier 2: Bounded pairwise cross-implication with greedy matching.
+  const pairwise = await runBoundedPairwiseComparison({
+    outputDir: config.output,
+    originalByCapability,
+    generatedByCapability,
+    pairBudget: config.pairBudget,
+    ...(config.z3 === undefined ? {} : { z3Path: config.z3 }),
+  });
+  allFindings.push(...pairwise.findings);
 
   const blindComparison = await runBlindComparison({
     model: config.model,
-    results: crossImplication.results,
+    results: pairwise.results,
     generatedOnlyContext: derivedSpecs.specs.flatMap((spec) =>
       spec.sourceIdentifiers.map((id) => ({
         capability: spec.capability,
@@ -687,27 +731,13 @@ async function runCodeBackwardsWork(
   return {
     allFindings,
     logicFindings: generatedLogic.findings,
-    compareFindings: [...crossImplication.findings, ...blindComparison.findings],
+    compareFindings: [...aggregate.findings, ...pairwise.findings, ...blindComparison.findings],
   };
 }
 
 // ---------------------------------------------------------------------------
 // Utility helpers
 // ---------------------------------------------------------------------------
-
-/**
- * Infer capability name from a claim identifier by taking the first two segments.
- *
- * @param identifier - canonical claim identifier (e.g., "CAT-PARSE-EARS")
- * @returns inferred capability name (e.g., "cat-parse")
- *
- * @remarks
- * Postcondition: returned string is lowercase kebab-case with at most two segments.
- */
-function inferCapability(identifier: string): string {
-  const parts = identifier.toLowerCase().split("-");
-  return parts.length <= 1 ? parts[0] ?? identifier.toLowerCase() : parts.slice(0, 2).join("-");
-}
 
 /**
  * Compute which phases were skipped based on the actual run configuration.

@@ -16,6 +16,7 @@ export interface CliArgs {
   readonly z3?: string;
   readonly model?: string;
   readonly config?: string;
+  readonly pairBudget?: string;
   readonly help: boolean;
   readonly version: boolean;
 }
@@ -24,7 +25,7 @@ type ArgError =
   | { readonly kind: "unknown_flag"; readonly flag: string }
   | { readonly kind: "missing_flag_value"; readonly flag: string };
 
-const FLAG_KEYS = new Set(["--output", "--src", "--caps", "--z3", "--model", "--config"]);
+const FLAG_KEYS = new Set(["--output", "--src", "--caps", "--z3", "--model", "--config", "--pair-budget"]);
 
 /**
  * Parse CLI argv into typed options.
@@ -40,6 +41,7 @@ export function parseArgv(argv: readonly string[]): Result<CliArgs, ArgError> {
   let z3: string | undefined;
   let model: string | undefined;
   let config: string | undefined;
+  let pairBudget: string | undefined;
   let help = false;
   let version = false;
 
@@ -87,6 +89,9 @@ export function parseArgv(argv: readonly string[]): Result<CliArgs, ArgError> {
         case "--config":
           config = value;
           break;
+        case "--pair-budget":
+          pairBudget = value;
+          break;
         default:
           return err({ kind: "unknown_flag", flag });
       }
@@ -122,6 +127,9 @@ export function parseArgv(argv: readonly string[]): Result<CliArgs, ArgError> {
       case "--config":
         config = value;
         break;
+      case "--pair-budget":
+        pairBudget = value;
+        break;
       default:
         return err({ kind: "unknown_flag", flag: token });
     }
@@ -137,5 +145,6 @@ export function parseArgv(argv: readonly string[]): Result<CliArgs, ArgError> {
     ...(z3 === undefined ? {} : { z3 }),
     ...(model === undefined ? {} : { model }),
     ...(config === undefined ? {} : { config }),
+    ...(pairBudget === undefined ? {} : { pairBudget }),
   });
 }

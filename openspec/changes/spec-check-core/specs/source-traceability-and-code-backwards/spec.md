@@ -159,7 +159,7 @@ IF the solver returns timeout or unknown for a code-derived query, THEN THE spec
 **Postcondition:** A single slow query does not block code-derived solver analysis.
 
 ### Requirement: Cross-Side Implication Analysis [STC-CROSS-IMPLY]
-WHEN both original formalizations (from specs-forward) and code-derived formalizations (from source analysis) exist for the same capability, THE spec-check tool SHALL run bidirectional solver-backed implication checks between corresponding claims and SHALL use the implication results as the primary strength classification mechanism.
+WHEN both original formalizations (from specs-forward) and code-derived formalizations (from source analysis) exist, THE spec-check tool SHALL run a two-tiered comparison: first a capability-level aggregate bidirectional implication check per matched capability, then bounded pairwise bidirectional implication checks with greedy bipartite matching within each capability, and SHALL use the implication results as the primary strength classification mechanism.
 
 **References:**
 - `proposal.md#Motivation`
@@ -200,6 +200,31 @@ WHEN cross-side implication checks complete, THE spec-check tool SHALL persist a
 WHEN the spec-check tool constructs a cross-side implication query to test whether original claim A entails code-derived claim B, THE query SHALL include declarations from both sides for shared context, SHALL assert A's assertions as the premise, SHALL assert the negation of B's assertions as the consequent test, and SHALL contain exactly one `(check-sat)` command at the end.
 
 **Postcondition:** Each cross-side implication query produces exactly one solver result; multiple `(check-sat)` commands cannot produce ambiguous or contradictory output within a single query.
+
+#### Scenario: Capability-Level Aggregate Comparison [STC-IMPLY-AGGREGATE]
+WHEN a capability is present on both the original and code-derived sides, THE spec-check tool SHALL combine all SMT assertions from each side into a single conjunction per side and SHALL run a bidirectional implication check (2 Z3 calls) to produce a capability-level aggregate classification.
+
+**Postcondition:** Each matched capability receives an aggregate strength classification before pairwise detail is attempted.
+
+#### Scenario: Pair Budget Controls Pairwise Scope [STC-IMPLY-BUDGET]
+WHEN the number of pairwise combinations (N original claims times M generated claims) within a capability exceeds the configured `--pair-budget`, THE spec-check tool SHALL emit a `pairwise_skipped` finding for that capability and SHALL NOT run detailed pairwise comparison for it.
+
+**Postcondition:** Pairwise analysis is bounded by configurable budget; over-budget capabilities are honestly reported rather than silently truncated.
+
+#### Scenario: Greedy Bipartite Matching Within Budget [STC-IMPLY-GREEDY]
+WHEN pairwise comparison runs within budget for a capability, THE spec-check tool SHALL run all N times M bidirectional implication pairs and SHALL assign best matches using greedy bipartite matching sorted by classification score (same > stronger > uncertain > weaker > different), producing at most one matched pair per original claim and per generated claim.
+
+**Postcondition:** Greedy matching is deterministic given the same inputs and produces the highest-quality cross-side pairings available within the capability.
+
+#### Scenario: Report Unmatched Capabilities [STC-IMPLY-UNMATCHED-CAP]
+WHEN a capability exists only on the generated side, THE spec-check tool SHALL emit a `novel_capability` finding. WHEN a capability exists only on the original side, THE spec-check tool SHALL emit an `unimplemented_capability` finding.
+
+**Postcondition:** Capabilities present on only one side are surfaced with explanatory context noting possible causes (code gap, context budget limitation, or naming mismatch).
+
+#### Scenario: Report Unmatched Claims Within Capability [STC-IMPLY-UNMATCHED-CLAIM]
+WHEN greedy matching within a capability leaves original claims unpaired, THE spec-check tool SHALL emit `unmatched_original` findings. WHEN generated claims remain unpaired, THE spec-check tool SHALL emit `unmatched_generated` findings.
+
+**Postcondition:** Claim-level pairing gaps within a capability are visible to reviewers.
 
 ### Requirement: Surface Semantic Divergence As First-Class Evidence [STC-DIVERGE-EVIDENCE]
 WHEN cross-side implication analysis reveals divergence between original and code-derived formalizations, THE spec-check tool SHALL surface this divergence as first-class evidence in the comparison report with a per-capability summary that identifies the nature and extent of the divergence.

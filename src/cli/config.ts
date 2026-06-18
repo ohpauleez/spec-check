@@ -20,6 +20,7 @@ export interface RunConfig {
   readonly caps: string | undefined;
   readonly z3: string | undefined;
   readonly model: ModelName;
+  readonly pairBudget: number;
 }
 
 interface ConfigFileShape {
@@ -29,6 +30,7 @@ interface ConfigFileShape {
   readonly caps?: string;
   readonly z3?: string;
   readonly model?: string;
+  readonly pairBudget?: number;
 }
 
 type ConfigError =
@@ -36,6 +38,9 @@ type ConfigError =
   | { readonly kind: "config_parse_error"; readonly path: string }
   | { readonly kind: "config_validation_error"; readonly path: string; readonly message: string }
   | { readonly kind: "missing_inputs" };
+
+/** Default pair budget for bounded pairwise cross-implication. */
+const DEFAULT_PAIR_BUDGET = 200;
 
 /** Default LLM model used when no --model flag or config is provided. */
 const DEFAULT_MODEL = "github-copilot/gpt-5.4";
@@ -69,6 +74,7 @@ export async function resolveRunConfig(args: CliArgs): Promise<Result<RunConfig,
     caps: args.caps ?? fromFile.value.caps,
     z3: args.z3 ?? fromFile.value.z3,
     model: toModelName(args.model ?? fromFile.value.model ?? DEFAULT_MODEL),
+    pairBudget: parsePairBudget(args.pairBudget, fromFile.value.pairBudget),
   });
 }
 
@@ -115,6 +121,7 @@ function isConfigFileShape(value: unknown): value is ConfigFileShape {
     readonly caps?: unknown;
     readonly z3?: unknown;
     readonly model?: unknown;
+    readonly pairBudget?: unknown;
   };
 
   if (candidate.inputs !== undefined) {
@@ -132,5 +139,24 @@ function isConfigFileShape(value: unknown): value is ConfigFileShape {
     && (candidate.caps === undefined || typeof candidate.caps === "string")
     && (candidate.z3 === undefined || typeof candidate.z3 === "string")
     && (candidate.model === undefined || typeof candidate.model === "string")
+    && (candidate.pairBudget === undefined || typeof candidate.pairBudget === "number")
   );
+}
+
+/**
+ * Parse the pair budget from CLI string or config file number.
+ *
+ * @param cliValue - string from CLI flag (e.g., "200")
+ * @param configValue - number from config file
+ * @returns resolved pair budget (positive integer)
+ */
+function parsePairBudget(cliValue: string | undefined, configValue: number | undefined): number {
+  if (cliValue !== undefined) {
+    const parsed = Number.parseInt(cliValue, 10);
+    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_PAIR_BUDGET;
+  }
+  if (configValue !== undefined && Number.isFinite(configValue) && configValue > 0) {
+    return configValue;
+  }
+  return DEFAULT_PAIR_BUDGET;
 }

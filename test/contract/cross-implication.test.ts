@@ -3,6 +3,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { traceSpec } from "../support/spec-trace.js";
 import {
   runCrossImplication,
+  runCapabilityAggregateComparison,
+  runBoundedPairwiseComparison,
 } from "../../src/domain/code-backwards/cross-implication.js";
 import { toOutputDirPath, toRelativePath } from "../../src/domain/branded.js";
 
@@ -206,5 +208,129 @@ describe("cross-implication contract", () => {
     expect(divergenceFinding).toBeDefined();
     expect(divergenceFinding!.severity).toBe("info");
     expect(divergenceFinding!.description).toContain("low_divergence");
+  });
+
+  it("aggregate comparison combines per-capability assertions", async () => {
+    traceSpec("STC-IMPLY-AGGREGATE");
+    const { runZ3Query } = await import("../../src/adapters/z3.js");
+    vi.mocked(runZ3Query).mockResolvedValue({
+      kind: "unsat",
+      stdout: "unsat\n",
+      stderr: "",
+      exitCode: 0,
+    });
+
+    const output = await runCapabilityAggregateComparison({
+      outputDir: toOutputDirPath("/tmp/test-output"),
+      originalByCapability: new Map([["cat", [{ claimId: "R1", smtlibPath: toRelativePath("smt/cat/R1.smt2") }]]]),
+      generatedByCapability: new Map([["cat", [{ claimId: "G1", smtlibPath: toRelativePath("gen_smt/cat/G1.smt2") }]]]),
+    });
+
+    const agg = output.findings.find((f) => f.category === "code_backwards.capability_aggregate");
+    expect(agg).toBeDefined();
+    expect(agg!.description).toContain("same");
+  });
+
+  it("aggregate reports unmatched capabilities on each side", async () => {
+    traceSpec("STC-IMPLY-UNMATCHED-CAP");
+    const output = await runCapabilityAggregateComparison({
+      outputDir: toOutputDirPath("/tmp/test-output"),
+      originalByCapability: new Map([["only-orig", [{ claimId: "R1", smtlibPath: toRelativePath("smt/only-orig/R1.smt2") }]]]),
+      generatedByCapability: new Map([["only-gen", [{ claimId: "G1", smtlibPath: toRelativePath("gen_smt/only-gen/G1.smt2") }]]]),
+    });
+
+    const novel = output.findings.find((f) => f.category === "code_backwards.novel_capability");
+    const unimpl = output.findings.find((f) => f.category === "code_backwards.unimplemented_capability");
+    expect(novel).toBeDefined();
+    expect(novel!.description).toContain("only-gen");
+    expect(unimpl).toBeDefined();
+    expect(unimpl!.description).toContain("only-orig");
+  });
+
+  it("pairwise skips when pair count exceeds budget", async () => {
+    traceSpec("STC-IMPLY-BUDGET");
+    const output = await runBoundedPairwiseComparison({
+      outputDir: toOutputDirPath("/tmp/test-output"),
+      originalByCapability: new Map([["cat", [
+        { claimId: "R1", smtlibPath: toRelativePath("smt/cat/R1.smt2") },
+        { claimId: "R2", smtlibPath: toRelativePath("smt/cat/R2.smt2") },
+        { claimId: "R3", smtlibPath: toRelativePath("smt/cat/R3.smt2") },
+      ]]]),
+      generatedByCapability: new Map([["cat", [
+        { claimId: "G1", smtlibPath: toRelativePath("gen_smt/cat/G1.smt2") },
+        { claimId: "G2", smtlibPath: toRelativePath("gen_smt/cat/G2.smt2") },
+        { claimId: "G3", smtlibPath: toRelativePath("gen_smt/cat/G3.smt2") },
+      ]]]),
+      pairBudget: 2, // 3×3=9 exceeds budget of 2
+    });
+
+    const skipped = output.findings.find((f) => f.category === "code_backwards.pairwise_skipped");
+    expect(skipped).toBeDefined();
+    expect(skipped!.description).toContain("exceeds budget");
+    expect(output.results.length).toBe(0);
+  });
+
+  it("pairwise uses greedy matching to assign best pairs", async () => {
+    traceSpec("STC-IMPLY-GREEDY");
+    const { runZ3Query } = await import("../../src/adapters/z3.js");
+    const mocked = vi.mocked(runZ3Query);
+    // 2 original × 1 generated: R1 vs G1 and R2 vs G1
+    // Make R1 vs G1 = same (both unsat), R2 vs G1 = different (both sat)
+    // Greedy should pick R1-G1 (score 4) leaving R2 unmatched
+    mocked
+      .mockResolvedValueOnce({ kind: "unsat", stdout: "unsat\n", stderr: "", exitCode: 0 }) // R1→G1 forward
+      .mockResolvedValueOnce({ kind: "unsat", stdout: "unsat\n", stderr: "", exitCode: 0 }) // R1→G1 reverse
+      .mockResolvedValueOnce({ kind: "sat", stdout: "sat\n", stderr: "", exitCode: 0 })     // R2→G1 forward
+      .mockResolvedValueOnce({ kind: "sat", stdout: "sat\n", stderr: "", exitCode: 0 });    // R2→G1 reverse
+
+    const output = await runBoundedPairwiseComparison({
+      outputDir: toOutputDirPath("/tmp/test-output"),
+      originalByCapability: new Map([["cat", [
+        { claimId: "R1", smtlibPath: toRelativePath("smt/cat/R1.smt2") },
+        { claimId: "R2", smtlibPath: toRelativePath("smt/cat/R2.smt2") },
+      ]]]),
+      generatedByCapability: new Map([["cat", [
+        { claimId: "G1", smtlibPath: toRelativePath("gen_smt/cat/G1.smt2") },
+      ]]]),
+      pairBudget: 200,
+    });
+
+    // R1 should be matched (same), R2 should be unmatched
+    expect(output.results.length).toBe(1);
+    expect(output.results[0]!.claimId).toBe("R1");
+    expect(output.results[0]!.classification).toBe("same");
+
+    const unmatched = output.findings.find((f) => f.category === "code_backwards.unmatched_original");
+    expect(unmatched).toBeDefined();
+    expect(unmatched!.description).toContain("R2");
+  });
+
+  it("pairwise reports unmatched claims on both sides", async () => {
+    traceSpec("STC-IMPLY-UNMATCHED-CLAIM");
+    const { runZ3Query } = await import("../../src/adapters/z3.js");
+    vi.mocked(runZ3Query).mockResolvedValue({
+      kind: "unsat",
+      stdout: "unsat\n",
+      stderr: "",
+      exitCode: 0,
+    });
+
+    // 1 original, 2 generated — after matching, 1 generated is unmatched
+    const output = await runBoundedPairwiseComparison({
+      outputDir: toOutputDirPath("/tmp/test-output"),
+      originalByCapability: new Map([["cat", [
+        { claimId: "R1", smtlibPath: toRelativePath("smt/cat/R1.smt2") },
+      ]]]),
+      generatedByCapability: new Map([["cat", [
+        { claimId: "G1", smtlibPath: toRelativePath("gen_smt/cat/G1.smt2") },
+        { claimId: "G2", smtlibPath: toRelativePath("gen_smt/cat/G2.smt2") },
+      ]]]),
+      pairBudget: 200,
+    });
+
+    // R1 matched to G1 (both "same", greedy picks first alphabetically)
+    expect(output.results.length).toBe(1);
+    const unmatchedGen = output.findings.find((f) => f.category === "code_backwards.unmatched_generated");
+    expect(unmatchedGen).toBeDefined();
   });
 });

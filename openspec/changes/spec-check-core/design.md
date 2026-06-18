@@ -673,30 +673,33 @@ Primary modules: `src/domain/code-backwards/cross-implication.ts`, `src/adapters
 
 ```mermaid
 flowchart TD
-    A[Receive original formalizations from smt/ and code-derived from gen_specs_smt/] --> B[Match claims by capability]
-    B --> C[Select next matched claim pair]
-    C --> D[Generate implication query: original implies code-derived]
-    D --> E[Submit to z3 with per-query timeout]
-    E --> F{Result?}
-    F -- sat/unsat --> G[Record forward implication result]
-    F -- timeout/unknown --> H[Record inconclusive forward]
-    G --> I[Generate implication query: code-derived implies original]
-    H --> I
-    I --> J[Submit to z3 with per-query timeout]
-    J --> K{Result?}
-    K -- sat/unsat --> L[Record reverse implication result]
-    K -- timeout/unknown --> M[Record inconclusive reverse]
-    L --> N[Classify: same/stronger/weaker/different/uncertain]
-    M --> N
-    N --> O[Persist implication queries and results]
-    O --> P{More claim pairs?}
-    P -- yes --> C
-    P -- no --> Q[Produce per-capability divergence summary]
-    Q --> R[Return cross-side implication classifications]
+    A[Receive original formalizations from smt/ and code-derived from gen_specs_smt/] --> B[Group claims by capability]
+    B --> C{Capability on both sides?}
+    C -- only generated --> D[Emit novel_capability finding]
+    C -- only original --> E[Emit unimplemented_capability finding]
+    C -- both --> F[Tier 1: Combine all SMT per side into single conjunction]
+    F --> G[Run aggregate bidirectional implication: 2 Z3 calls]
+    G --> H[Record capability_aggregate classification]
+    H --> I{N×M within pair budget?}
+    I -- no --> J[Emit pairwise_skipped finding]
+    I -- yes --> K[Tier 2: Run all N×M bidirectional pairs with bounded concurrency]
+    K --> L[Sort pairs by classification score]
+    L --> M[Greedy bipartite assignment: best-first, one match per claim]
+    M --> N[Persist matched pair queries and results]
+    N --> O[Emit cross_implication findings for matched pairs]
+    O --> P[Emit unmatched_original and unmatched_generated findings]
+    P --> Q[Produce per-capability divergence summary]
+    D --> Q
+    E --> Q
+    J --> Q
+    Q --> R[Return tiered cross-side implication classifications]
 ```
 
 Contract notes:
 - Classification rules: both directions hold = same; only code→original = stronger; only original→code = weaker; neither = different; any inconclusive = uncertain.
+- Tier 1 (aggregate) always runs for matched capabilities; cost is 2 Z3 calls per matched capability.
+- Tier 2 (pairwise) runs only when N×M is within the configured `--pair-budget` (default 200).
+- Greedy matching is deterministic: sorted by classification score (same=4, stronger=3, uncertain=2, weaker=1, different=0), with lexicographic claim ID as tiebreaker.
 - All implication queries and results are persisted verbatim.
 - Cross-side implication is the primary classifier; blind comparison adds rationale.
 
@@ -776,7 +779,7 @@ Contract notes:
 
 ### Interface Contracts
 
-- **CLI contract**: Accepts positional input files and optional `--output`, `--src`, `--caps`, `--z3`, `--config`, `--help`, and `--version` flags.
+- **CLI contract**: Accepts positional input files and optional `--output`, `--src`, `--caps`, `--z3`, `--config`, `--pair-budget`, `--help`, and `--version` flags.
 - **CLI exit codes**:
   - `0`: Analysis completed without findings.
   - `1`: Analysis completed and surfaced one or more findings.
@@ -856,7 +859,7 @@ test/
 Code/component responsibilities:
 
 - **`src/index.ts`**: CLI entrypoint and top-level process exit mapping. Maps domain results to exit codes `0`, `1`, `2`.
-- **`src/cli/parse-argv.ts`**: Validates raw CLI inputs including positional paths, `--output`, `--src`, `--caps`, `--z3`, `--config`, `--help`, and `--version` flags. Returns typed configuration or fatal error.
+- **`src/cli/parse-argv.ts`**: Validates raw CLI inputs including positional paths, `--output`, `--src`, `--caps`, `--z3`, `--config`, `--pair-budget`, `--help`, and `--version` flags. Returns typed configuration or fatal error.
 - **`src/cli/config.ts`**: Loads and validates optional JSON config file. Merges config values with CLI flags (CLI flags take precedence).
 - **`src/cli/run-cli.ts`**: Orchestrates the full pipeline run: catalog, parse, claim graph, analysis phases, reporting, and manifest. Decomposed into `runIngestionPhases`, `runAnalysisPhases`, and `runReportingPhase` for phase-group isolation. Uses `PipelineAbortError` for typed error propagation between phase groups. Coordinates exit behavior and progress event emission.
 - **`src/domain/model.ts`**: Core type definitions for documents, parsed structures, document classifications, and section metadata.
@@ -885,7 +888,7 @@ Code/component responsibilities:
 - **`src/domain/code-backwards/derive.ts`**: Generates EARS-preferring code-derived specifications per capability from source evidence. Accepts optional capability name suggestions from the active catalog to improve naming alignment. Operates blind to original requirement text. Persists output as Markdown files in `gen_specs/` under the output directory.
 - **`src/domain/code-backwards/gen-formal.ts`**: Applies the formalization pipeline (LLM sampling, schema validation, equivalence clustering) to code-derived specifications. Persists SMT-LIB artifacts in `gen_specs_smt/` under the output directory.
 - **`src/domain/code-backwards/gen-logic.ts`**: Groups code-derived claims by capability into `SpecClaimGroup` arrays and delegates to `runLogicAnalysis` for per-capability combined solver analysis. Produces `report_2.logic.md`.
-- **`src/domain/code-backwards/cross-implication.ts`**: Bidirectional solver-backed implication checks between original (`smt/`) and code-derived (`gen_specs_smt/`) formalizations. Classifies each claim pair as same, stronger, weaker, different, or uncertain. Persists all implication queries and results. Produces per-capability divergence summary.
+- **`src/domain/code-backwards/cross-implication.ts`**: Two-tiered bidirectional solver-backed implication between original (`smt/`) and code-derived (`gen_specs_smt/`) formalizations. Tier 1 (`runCapabilityAggregateComparison`): combines all SMT per capability into a single conjunction per side and runs 2 Z3 calls for aggregate classification; reports `capability_aggregate`, `novel_capability`, and `unimplemented_capability` findings. Tier 2 (`runBoundedPairwiseComparison`): runs all N×M bidirectional pairs within each matched capability when under the configured `--pair-budget`, applies greedy bipartite matching sorted by classification score to assign best pairs, and reports `cross_implication`, `unmatched_original`, `unmatched_generated`, and `pairwise_skipped` findings. Both tiers produce per-capability divergence summaries. Persists all implication queries and results verbatim.
 - **`src/domain/code-backwards/blind-compare.ts`**: Maintains the no-requirement-text boundary. Prepares blind comparison inputs where code-derived side receives only code artifacts. Provides explanatory rationale for cross-side implication classifications. Serves as fallback classifier when solver implication is inconclusive.
 - **`src/domain/tasks-analysis.ts`**: Task-summary extraction, completed-task evidence analysis, and consistency checking against the claim graph.
 - **`src/domain/reporting/render.ts`**: Renders phase-specific Markdown reports (`report_1.1.md` through `report_2.*`) and synthesized summary reports. Includes skipped-scope explanations for optional phases not enabled.
@@ -1041,18 +1044,24 @@ Overview:
 53. Cross-side implication classifies neither direction as different
 54. Cross-side implication classifies solver timeout/unknown as uncertain
 55. Cross-side implication persists all queries and results verbatim
-56. Blind comparison provides explanatory rationale for formal classification
-57. Blind comparison serves as fallback classifier when implication is uncertain
-58. Blind comparison prevents original requirement text from reaching code-derived side
-59. Report rendering includes skipped-scope explanations for disabled optional phases
-60. Report rendering suppresses findings without provenance as defects
-61. Manifest lists all produced files with checksums
-62. Manifest is written after all other output files
-63. Interrupted run leaves no manifest
-64. Stdout progress events include phase, status, and timestamp fields
-65. Exit code `0` when no findings, `1` when findings present, `2` on fatal error
-66. Package metadata supports standard `npm` installation of the CLI
-67. Bundled `dist/spec-check.js` begins with `#!/usr/bin/env node` shebang
+56. Capability-level aggregate comparison combines all SMT per side and produces aggregate classification
+57. Pair budget enforcement skips pairwise comparison when N×M exceeds configured limit
+58. Greedy bipartite matching assigns best-score-first pairs deterministically
+59. Unmatched capabilities on generated-only side produce novel_capability findings
+60. Unmatched capabilities on original-only side produce unimplemented_capability findings
+61. Unmatched claims within matched capabilities produce unmatched_original and unmatched_generated findings
+62. Blind comparison provides explanatory rationale for formal classification
+63. Blind comparison serves as fallback classifier when implication is uncertain
+64. Blind comparison prevents original requirement text from reaching code-derived side
+65. Report rendering includes skipped-scope explanations for disabled optional phases
+66. Report rendering suppresses findings without provenance as defects
+67. Manifest lists all produced files with checksums
+68. Manifest is written after all other output files
+69. Interrupted run leaves no manifest
+70. Stdout progress events include phase, status, and timestamp fields
+71. Exit code `0` when no findings, `1` when findings present, `2` on fatal error
+72. Package metadata supports standard `npm` installation of the CLI
+73. Bundled `dist/spec-check.js` begins with `#!/usr/bin/env node` shebang
 
 ### Property-Based Tests
 
@@ -1068,8 +1077,9 @@ Overview:
 10. Run-state accumulation: generated phase completion sequences preserve the invariant that findings are never removed by later phases
 11. Blind comparison boundary: generated comparison inputs never expose original requirement text to the code-derived side
 12. Cross-side implication classification: given same solver results, classification is deterministic and symmetric (swapping directions produces the inverse strength label)
-13. Code-derived formalization determinism: the same code-derived specs with the same clustering results produce identical representative selections
-14. Code-derived generation boundary: generated prompts for code-derived spec generation never include original requirement, proposal, or design text
+13. Greedy bipartite matching determinism: given the same N×M classification scores, greedy assignment always produces the same pairing
+14. Code-derived formalization determinism: the same code-derived specs with the same clustering results produce identical representative selections
+15. Code-derived generation boundary: generated prompts for code-derived spec generation never include original requirement, proposal, or design text
 
 ### Global Invariant and Property Checks
 
@@ -1121,11 +1131,15 @@ Overview:
 11. End-to-end code-derived solver analysis produces report_2.logic.md with fake `z3` adapter
 12. End-to-end cross-side implication with fixture producing same/stronger/weaker/different classifications using fake `z3` adapter
 13. End-to-end two-layer comparison: solver implication classification with blind comparison rationale attached
-14. End-to-end run with missing `opencode` binary fails with exit code `2` and no manifest
-15. End-to-end run with missing `z3` binary when formalization is required fails with exit code `2` and no manifest
-16. End-to-end run with invalid `opencode` responses after all retries fails with exit code `2`
-17. Interrupted run (simulated kill during report writing) leaves no manifest
-18. Manifest checksums match actual file content for completed runs
+14. End-to-end capability-level aggregate comparison producing aggregate classifications for matched capabilities
+15. End-to-end pairwise comparison with pair budget enforcement: over-budget capability emits pairwise_skipped finding
+16. End-to-end greedy matching assigns correct pairs when N×M > min(N, M) (surplus claims reported as unmatched)
+17. End-to-end unmatched capabilities: novel_capability and unimplemented_capability findings emitted for one-sided capabilities
+18. End-to-end run with missing `opencode` binary fails with exit code `2` and no manifest
+19. End-to-end run with missing `z3` binary when formalization is required fails with exit code `2` and no manifest
+20. End-to-end run with invalid `opencode` responses after all retries fails with exit code `2`
+21. Interrupted run (simulated kill during report writing) leaves no manifest
+22. Manifest checksums match actual file content for completed runs
 
 ### Determinism Tests
 
@@ -1137,6 +1151,8 @@ Overview:
 6. Code-derived spec generation produces identical gen_specs/ content across runs with cached `opencode` responses
 7. Code-derived formalization produces identical gen_specs_smt/ content across runs with cached responses
 8. Cross-side implication produces identical classifications across runs with cached `z3` responses
+9. Capability-level aggregate comparison produces identical findings across runs with cached `z3` responses
+10. Greedy bipartite matching produces identical pairings across runs with same classification scores
 
 ### Regression Fixtures
 

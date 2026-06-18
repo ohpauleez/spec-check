@@ -87,6 +87,11 @@ WHEN the source tree contains sufficient evidence relevant to a declared capabil
 
 **Postcondition:** A generated spec file exists in `gen_specs/` for each capability with sufficient source evidence.
 
+#### Scenario: Capability Name Suggestions From Catalog [STC-GEN-SUGGEST]
+WHEN generating code-derived specifications, THE spec-check tool SHALL provide the LLM with the list of known capability names derived from active catalog paths as soft suggestions for capability naming. THE spec-check tool SHALL NOT include requirement text, identifier lists, or spec content in the suggestions.
+
+**Postcondition:** The LLM receives structural metadata (capability names only) that improves naming alignment without violating the blind boundary.
+
 #### Scenario: EARS Preference With Structured Fallback [STC-GEN-EARS]
 WHEN code semantics support EARS decomposition, THE spec-check tool SHALL generate requirements using EARS patterns. WHERE code semantics resist EARS decomposition, THE spec-check tool SHALL use structured behavioral prose and SHALL note the deviation.
 

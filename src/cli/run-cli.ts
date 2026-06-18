@@ -82,7 +82,7 @@ interface PipelineContext {
  */
 interface IngestionResult {
   readonly state: RunState;
-  readonly catalogResult: { readonly catalog: { readonly documents: readonly { readonly path: string; readonly type: string }[] }; readonly findings: readonly Finding[] };
+  readonly catalogResult: { readonly catalog: { readonly documents: readonly { readonly path: string; readonly type: string; readonly capability?: string }[] }; readonly findings: readonly Finding[] };
   readonly ctx: PipelineContext;
 }
 
@@ -130,11 +130,21 @@ export async function runCli(config: RunConfig): Promise<RunState> {
   let compareFindings: readonly Finding[] | undefined;
 
   if (config.src !== undefined) {
+    // Extract known capability names from catalog for informalization suggestions.
+    const knownCapabilities = [
+      ...new Set(
+        ingestion.catalogResult.catalog.documents
+          .filter((d) => d.capability !== undefined)
+          .map((d) => d.capability as string),
+      ),
+    ].sort();
+
     const srcResult = await runSourcePhases(
       config,
       state,
       analysis.claimGraphResult,
       analysis.clusterResult.representatives,
+      knownCapabilities,
     );
     state = srcResult.state;
     srcTraceFindings = srcResult.srcTraceFindings;
@@ -548,6 +558,7 @@ async function runSourcePhases(
   initialState: RunState,
   claimGraphResult: { readonly graph: ClaimGraphOutput["graph"] },
   representativeClaims: readonly LogicIrClaim[],
+  knownCapabilities: readonly string[],
 ): Promise<{
   readonly state: RunState;
   readonly srcTraceFindings: readonly Finding[];
@@ -577,6 +588,7 @@ async function runSourcePhases(
       config,
       traceResult.value.traceOutput,
       representativeClaims,
+      knownCapabilities,
     );
   });
   state = addFindings(codeResult.state, codeResult.value.allFindings);
@@ -605,6 +617,7 @@ async function runCodeBackwardsWork(
   config: RunConfig,
   traceOutput: { readonly findings: readonly Finding[]; readonly traces: readonly SourceTrace[] },
   representativeClaims: readonly LogicIrClaim[],
+  knownCapabilities: readonly string[],
 ): Promise<{
   readonly allFindings: readonly Finding[];
   readonly logicFindings: readonly Finding[];
@@ -617,6 +630,7 @@ async function runCodeBackwardsWork(
     srcDir: config.src!,
     model: config.model,
     traces: traceOutput.traces,
+    suggestedCapabilities: knownCapabilities,
   });
   allFindings.push(...derivedSpecs.findings);
 

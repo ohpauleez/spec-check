@@ -6,6 +6,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { traceSpec } from "../support/spec-trace.js";
 import { deriveSpecsFromSource, inferCapability } from "../../src/domain/code-backwards/derive.js";
+import { buildCapabilitySuggestionsSection } from "../../src/domain/prompts/informalize.js";
 import type { SourceTrace } from "../../src/domain/code-backwards/trace.js";
 import { toOutputDirPath } from "../../src/domain/branded.js";
 
@@ -228,5 +229,112 @@ describe("derive contract", () => {
     });
 
     expect(output.specs[0]!.sourceIdentifiers).toContain("CAT-PIPELINE-REQ");
+  });
+
+  it("includes suggested capability names in LLM prompt when provided", async () => {
+    traceSpec("STC-GEN-CAPABILITY");
+    const { callOpencode } = await import("../../src/adapters/opencode.js");
+    vi.mocked(callOpencode).mockResolvedValue(makeInformalizationResponse([
+      {
+        name: "catalog-and-parse",
+        requirements: [
+          { id: "CAT-PARSE-001", text: "WHEN files are discovered, THE system SHALL classify them." },
+        ],
+      },
+    ]));
+
+    await deriveSpecsFromSource({
+      outputDir: toOutputDirPath("/tmp/test-output"),
+      srcDir,
+      model: "test-model",
+      traces: [],
+      suggestedCapabilities: ["catalog-and-parse", "formalization-and-logic-analysis"],
+    });
+
+    const writeCall = vi.mocked(callOpencode);
+    expect(writeCall).toHaveBeenCalledOnce();
+    const prompt = writeCall.mock.calls[0]![0].prompt;
+    expect(prompt).toContain("catalog-and-parse");
+    expect(prompt).toContain("formalization-and-logic-analysis");
+    expect(prompt).toContain("Known capability names");
+  });
+
+  it("omits capability suggestions section when suggestedCapabilities is empty", async () => {
+    traceSpec("STC-GEN-CAPABILITY");
+    const { callOpencode } = await import("../../src/adapters/opencode.js");
+    vi.mocked(callOpencode).mockResolvedValue(makeInformalizationResponse([
+      {
+        name: "cat-pipeline",
+        requirements: [
+          { id: "CAT-PIPELINE-001", text: "WHEN files are parsed, THE system SHALL build graph." },
+        ],
+      },
+    ]));
+
+    await deriveSpecsFromSource({
+      outputDir: toOutputDirPath("/tmp/test-output"),
+      srcDir,
+      model: "test-model",
+      traces: [],
+      suggestedCapabilities: [],
+    });
+
+    const writeCall = vi.mocked(callOpencode);
+    const prompt = writeCall.mock.calls[0]![0].prompt;
+    expect(prompt).not.toContain("Known capability names");
+  });
+
+  it("omits capability suggestions section when suggestedCapabilities is undefined", async () => {
+    traceSpec("STC-GEN-CAPABILITY");
+    const { callOpencode } = await import("../../src/adapters/opencode.js");
+    vi.mocked(callOpencode).mockResolvedValue(makeInformalizationResponse([
+      {
+        name: "cat-pipeline",
+        requirements: [
+          { id: "CAT-PIPELINE-001", text: "WHEN files are parsed, THE system SHALL build graph." },
+        ],
+      },
+    ]));
+
+    await deriveSpecsFromSource({
+      outputDir: toOutputDirPath("/tmp/test-output"),
+      srcDir,
+      model: "test-model",
+      traces: [],
+    });
+
+    const writeCall = vi.mocked(callOpencode);
+    const prompt = writeCall.mock.calls[0]![0].prompt;
+    expect(prompt).not.toContain("Known capability names");
+  });
+});
+
+describe("buildCapabilitySuggestionsSection", () => {
+  it("returns empty string for empty names array", () => {
+    expect(buildCapabilitySuggestionsSection([])).toBe("");
+  });
+
+  it("formats capability names as a bulleted list with instructions", () => {
+    const result = buildCapabilitySuggestionsSection([
+      "catalog-and-parse",
+      "formalization-and-logic-analysis",
+      "spec-traceability",
+    ]);
+
+    expect(result).toContain("## Known capability names");
+    expect(result).toContain("USE THAT EXACT NAME");
+    expect(result).toContain("- catalog-and-parse");
+    expect(result).toContain("- formalization-and-logic-analysis");
+    expect(result).toContain("- spec-traceability");
+    expect(result).toContain("create new capability names");
+  });
+
+  it("does not include any requirement text or spec content", () => {
+    const result = buildCapabilitySuggestionsSection(["catalog-and-parse"]);
+
+    // Only structural metadata (the name), not requirement text
+    expect(result).not.toContain("SHALL");
+    expect(result).not.toContain("WHEN");
+    expect(result).not.toContain("requirement");
   });
 });

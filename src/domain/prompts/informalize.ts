@@ -80,6 +80,39 @@ implements.
 - Return ONLY the JSON object. No explanation or commentary.`;
 
 /**
+ * Build a prompt section listing known capability names as suggestions for the LLM.
+ *
+ * The LLM should prefer these names when the code it is analyzing maps to an
+ * existing capability, but may still create novel names for genuinely new
+ * functionality not covered by the suggestions.
+ *
+ * @param names - known capability names derived from catalog paths
+ * @returns formatted prompt section, or empty string if no names are provided
+ *
+ * @remarks
+ * Precondition: each entry in `names` is a non-empty kebab-case string.
+ * Postcondition: the returned section contains ONLY capability names — no
+ * requirement text, identifiers, or spec content (preserving the blind boundary).
+ */
+export function buildCapabilitySuggestionsSection(names: readonly string[]): string {
+  if (names.length === 0) return "";
+
+  const listing = names.map((name) => `- ${name}`).join("\n");
+
+  return [
+    "## Known capability names (prefer these when applicable)",
+    "",
+    "The following capability names already exist in this project's specification",
+    "structure. When the code you are analyzing clearly maps to one of these",
+    "capabilities, USE THAT EXACT NAME as the capability name in your output.",
+    "You may still create new capability names for functionality not covered by",
+    "this list.",
+    "",
+    listing,
+  ].join("\n");
+}
+
+/**
  * Build the source context section for the informalization prompt.
  *
  * @param sourceContext - structured representation of source files

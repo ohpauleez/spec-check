@@ -148,6 +148,7 @@
 - [x] 7.12 Implement blind comparison boundary enforcement: ensure original requirement text never reaches the code-derived generation or comparison side.
 - [x] 7.13 Implement code-backwards comparison with classification output (same, stronger, weaker, different, uncertain) and dual-layer evidence (formal + explanatory).
 - [x] 7.14 Implement `report_2.trace.md` and `report_2.compare.md` generation for `--src` mode.
+- [x] 7.15 Implement capability name suggestions in code-derived generation: extract known capability names from active catalog, thread through pipeline, and include in informalization prompt as soft naming guidance without violating the blind boundary.
 
 ### Source traceability and code-backwards analysis change summary
 - What changed: implemented `--src` scoped traceability scanning for canonical bracketed identifiers with support/gap/unknown-reference findings in `src/domain/code-backwards/trace.ts`. Source scanning is filtered to `TRACE_SCANNABLE_EXTENSIONS` (`.ts`, `.tsx`, `.js`, `.jsx`, `.mjs`, `.cjs`, `.mts`, `.cts`) to prevent binary files from producing spurious matches.

@@ -6,7 +6,7 @@ import { writeOutputAtomic } from "../../adapters/fs.js";
 import { toRelativePath, type OutputDirPath } from "../branded.js";
 import type { Finding } from "../findings.js";
 import type { SourceTrace } from "./trace.js";
-import { INFORMALIZE_INSTRUCTIONS, buildSourceContextSection } from "../prompts/informalize.js";
+import { INFORMALIZE_INSTRUCTIONS, buildCapabilitySuggestionsSection, buildSourceContextSection } from "../prompts/informalize.js";
 
 /** Maximum total bytes of source content to include in a single LLM prompt. */
 const SOURCE_CONTENT_BUDGET_BYTES = 100_000;
@@ -69,6 +69,7 @@ export async function deriveSpecsFromSource(input: {
   readonly srcDir: string;
   readonly model: string;
   readonly traces: readonly SourceTrace[];
+  readonly suggestedCapabilities?: readonly string[];
 }): Promise<DerivedSpecOutput> {
   const findings: Finding[] = [];
 
@@ -87,7 +88,7 @@ export async function deriveSpecsFromSource(input: {
   }
 
   // Build prompt with source context (no requirement text — blind informalization).
-  const prompt = buildInformalizationPrompt(sourceContext);
+  const prompt = buildInformalizationPrompt(sourceContext, input.suggestedCapabilities);
 
   // Call LLM with extended timeout for large codebases.
   const response = await callOpencode({
@@ -207,16 +208,24 @@ async function walkDirectory(baseDir: string, currentDir: string, results: strin
 // ---------------------------------------------------------------------------
 
 /**
- * Build the informalization prompt from source context.
+ * Build the informalization prompt from source context and optional capability suggestions.
  */
-function buildInformalizationPrompt(sourceContext: SourceContext): string {
-  return [
+function buildInformalizationPrompt(
+  sourceContext: SourceContext,
+  suggestedCapabilities?: readonly string[],
+): string {
+  const sections = [
     INFORMALIZE_INSTRUCTIONS,
     "",
     "Treat all source code below as the only input. Do not infer requirements from comments about specs.",
-    "",
-    buildSourceContextSection(sourceContext),
-  ].join("\n");
+  ];
+
+  if (suggestedCapabilities !== undefined && suggestedCapabilities.length > 0) {
+    sections.push("", buildCapabilitySuggestionsSection(suggestedCapabilities));
+  }
+
+  sections.push("", buildSourceContextSection(sourceContext));
+  return sections.join("\n");
 }
 
 // ---------------------------------------------------------------------------

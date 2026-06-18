@@ -7,12 +7,12 @@ import type { LogicIrClaim } from "../../src/domain/logic-ir.js";
 
 function makeClaim(
   claimId: string,
-  opts?: { obligation?: "mandatory" | "advisory" | "informational"; sorts?: LogicIrClaim["sorts"]; functions?: LogicIrClaim["functions"]; assertions?: LogicIrClaim["assertions"] },
+  opts?: { obligation?: "mandatory" | "advisory" | "informational"; variables?: LogicIrClaim["variables"]; functions?: LogicIrClaim["functions"]; assertions?: LogicIrClaim["assertions"] },
 ): LogicIrClaim {
   return {
     claimId: toClaimId(claimId),
     obligation: opts?.obligation ?? "mandatory",
-    sorts: opts?.sorts ?? [{ name: "S", sort: "Bool" }],
+    variables: opts?.variables ?? [{ name: "S", sort: "Bool" }],
     functions: opts?.functions ?? [],
     assertions: opts?.assertions ?? [{ id: "A1", expr: "true" }],
   };
@@ -29,7 +29,7 @@ describe("smtlib compilation", () => {
     const compiled = compileSmtlib({
       claimId: toClaimId("REQ(1)"),
       obligation: "mandatory",
-      sorts: [{ name: "State", sort: "Bool" }],
+      variables: [{ name: "State", sort: "Bool" }],
       functions: [{ name: "ok?", args: ["Bool"], returns: "Bool" }],
       assertions: [{ id: "ASSERT-1", expr: "(ok? true)" }],
     });
@@ -42,12 +42,12 @@ describe("smtlib compilation", () => {
 });
 
 describe("compileSpecSmtlib", () => {
-  it("produces a single smt2 with (set-option :produce-unsat-cores true)", () => {
-    traceSpec("FLA-SPEC-COMBINE");
+  it("produces a single smt2 without solver commands (callers append them)", () => {
+    traceSpec("FLA-SPEC-COMBINE", "FLA-SMTLIB-QUERYSAT");
     const claims = [makeClaim("R1"), makeClaim("R2")];
     const result = compileSpecSmtlib("specs/foo/spec.md", claims);
 
-    expect(result.smtlib).toContain("(set-option :produce-unsat-cores true)");
+    expect(result.smtlib).not.toContain("(set-option :produce-unsat-cores true)");
     expect(result.smtlib).not.toContain("(check-sat)");
     expect(result.claimIds).toEqual(["R1", "R2"]);
     expect(result.conflicts).toHaveLength(0);
@@ -64,16 +64,16 @@ describe("compileSpecSmtlib", () => {
     expect(result.assertionNameMap.get("R1__a1")).toBe("R1");
   });
 
-  it("deduplicates identical sort declarations", () => {
+  it("deduplicates identical variable declarations", () => {
     traceSpec("FLA-SPEC-DEDUP");
     const claims = [
-      makeClaim("R1", { sorts: [{ name: "State", sort: "Bool" }] }),
-      makeClaim("R2", { sorts: [{ name: "State", sort: "Bool" }] }),
+      makeClaim("R1", { variables: [{ name: "State", sort: "Bool" }] }),
+      makeClaim("R2", { variables: [{ name: "State", sort: "Bool" }] }),
     ];
     const result = compileSpecSmtlib("specs/foo/spec.md", claims);
 
-    const sortDecls = result.smtlib.split("\n").filter((l: string) => l.startsWith("(declare-sort"));
-    expect(sortDecls).toHaveLength(1);
+    const constDecls = result.smtlib.split("\n").filter((l: string) => l.startsWith("(declare-const"));
+    expect(constDecls).toHaveLength(1);
   });
 
   it("deduplicates identical function declarations", () => {

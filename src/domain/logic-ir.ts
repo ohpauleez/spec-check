@@ -12,15 +12,21 @@ import type { ClaimId } from "./branded.js";
 export type LogicSort = "Bool" | "Int" | "Real" | "String";
 
 /**
- * A named sort declaration binding an identifier to a logic sort.
+ * A typed variable (constant) declaration for use in SMT-LIB assertions.
  *
  * @remarks
  * Invariant: `name` is a non-empty identifier unique within the containing {@link LogicIrClaim}.
+ * Each variable is compiled to `(declare-const <name> <sort>)` in SMT-LIB.
  */
-export interface LogicSortDeclaration {
+export interface LogicVariableDeclaration {
   readonly name: string;
   readonly sort: LogicSort;
 }
+
+/**
+ * @deprecated Use {@link LogicVariableDeclaration} instead.
+ */
+export type LogicSortDeclaration = LogicVariableDeclaration;
 
 /**
  * An uninterpreted function symbol with typed argument list and return sort.
@@ -62,12 +68,12 @@ export type LogicObligation = "mandatory" | "advisory" | "informational";
  *
  * @remarks
  * Invariant: `claimId` references an existing claim in the claim graph.
- * Invariant: all sort names referenced in `functions` and `assertions` are declared in `sorts`.
+ * Invariant: all variable names referenced in `functions` and `assertions` are declared in `variables`.
  */
 export interface LogicIrClaim {
   readonly claimId: ClaimId;
   readonly obligation: LogicObligation;
-  readonly sorts: readonly LogicSortDeclaration[];
+  readonly variables: readonly LogicVariableDeclaration[];
   readonly functions: readonly LogicFunctionSymbol[];
   readonly assertions: readonly LogicAssertion[];
 }

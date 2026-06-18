@@ -24,7 +24,7 @@ function makeValidSample(claimId: string) {
       sample: {
         claimId,
         obligation: "mandatory",
-        sorts: [{ name: "S", sort: "Bool" }],
+        variables: [{ name: "S", sort: "Bool" }],
         functions: [{ name: "f", args: ["Bool"], returns: "Bool" }],
         assertions: [{ id: "A1", expr: "(f true)" }],
       },

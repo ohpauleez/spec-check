@@ -63,7 +63,7 @@ WHEN a claim identifier contains only SMT-LIB-safe characters, THE spec-check to
 **Postcondition:** No unnecessary transformation is applied to safe identifiers.
 
 #### Scenario: Compiled Output Excludes Solver Commands [FLA-SMTLIB-QUERYSAT]
-WHEN the spec-check tool compiles logic IR into SMT-LIB text, THE compiled output SHALL contain declarations (`declare-sort`, `declare-fun`) and assertions (`assert`) but SHALL NOT include `(check-sat)`. Callers SHALL append `(check-sat)` at query execution time.
+WHEN the spec-check tool compiles logic IR into SMT-LIB text, THE compiled output SHALL contain variable declarations (`declare-const`), function declarations (`declare-fun`), and assertions (`assert`) but SHALL NOT include `(check-sat)`. Callers SHALL append `(check-sat)` at query execution time.
 
 **Postcondition:** Compiled SMT-LIB is a reusable component that can be composed into different query types (satisfiability, implication) without stripping embedded solver commands.
 
@@ -73,15 +73,15 @@ WHEN the spec-check tool compiles logic IR into SMT-LIB, THE compiled output SHA
 **Postcondition:** Downstream consumers can construct negated or combined assertions from the compiled output without re-parsing the SMT-LIB text.
 
 ### Requirement: Per-Spec Combined SMT-LIB Compilation [FLA-SPEC-COMBINE]
-WHEN the spec-check tool performs logic analysis, THE spec-check tool SHALL combine all formalized claims from a single spec file into exactly one SMT-LIB file, SHALL deduplicate sort and function declarations across claims, SHALL use named assertions (`(assert (! expr :named label))`) to enable unsat-core identification, and SHALL include `(set-option :produce-unsat-cores true)` as the first solver command.
+WHEN the spec-check tool performs logic analysis, THE spec-check tool SHALL combine all formalized claims from a single spec file into exactly one SMT-LIB file, SHALL deduplicate variable and function declarations across claims, and SHALL use named assertions (`(assert (! expr :named label))`) to enable unsat-core identification. The compiled output SHALL NOT include solver commands (`check-sat`, `set-option`, `get-unsat-core`) — the logic analysis orchestrator appends these at query time using a two-phase approach (Phase 1: satisfiability check only; Phase 2: re-run with `(set-option :produce-unsat-cores true)` and `(get-unsat-core)` only when UNSAT is detected).
 
 **References:**
 - `proposal.md#Scope`
 - `proposal.md#Preconditions, Postconditions, and Invariants`
 - `proposal.md#Quality Attributes`
 
-#### Scenario: Sort And Function Deduplication [FLA-SPEC-DEDUP]
-WHEN multiple claims from the same spec declare identical sort or function names with identical signatures, THE spec-check tool SHALL emit only one declaration in the combined output.
+#### Scenario: Variable And Function Deduplication [FLA-SPEC-DEDUP]
+WHEN multiple claims from the same spec declare identical variable or function names with identical sorts or signatures, THE spec-check tool SHALL emit only one declaration in the combined output.
 
 **Postcondition:** The combined SMT-LIB file has no duplicate declarations from compatible claims.
 
@@ -141,7 +141,7 @@ WHEN the same formalization samples and solver results are processed on two sepa
 **Postcondition:** Clustering is a deterministic function of its inputs.
 
 ### Requirement: Run Per-Spec Combined Solver Analysis [FLA-RUN-LOGIC]
-WHEN formal artifacts are available, THE spec-check tool SHALL group representative claims by source spec file, SHALL compile each group into a single combined SMT-LIB file with named assertions, SHALL invoke Z3 once per spec group with unsat-core support, and SHALL classify contradictions with severity derived from the highest-obligation claim in the unsat core.
+WHEN formal artifacts are available, THE spec-check tool SHALL group representative claims by source spec file, SHALL compile each group into a single combined SMT-LIB file with named assertions, SHALL invoke Z3 per spec group using a two-phase approach (Phase 1: satisfiability check only; Phase 2: re-invoke with unsat-core support only when contradiction is detected), and SHALL classify contradictions with severity derived from the highest-obligation claim in the unsat core.
 
 **References:**
 - `proposal.md#Scope`
@@ -163,10 +163,66 @@ IF the solver returns timeout or unknown for a per-spec query, THEN THE spec-che
 
 **Postcondition:** Inconclusive logic results remain visible to reviewers and do not masquerade as success.
 
-#### Scenario: Sat Result Indicates Mutual Consistency [FLA-LOGIC-SAT]
-WHEN a per-spec combined query returns sat, THE spec-check tool SHALL NOT emit a contradiction finding for that spec, indicating that all claims within the spec are mutually satisfiable.
+#### Scenario: Sat Result Triggers Deeper Analysis [FLA-LOGIC-SAT]
+WHEN a per-spec combined query returns sat, THE spec-check tool SHALL NOT emit a global contradiction finding for that spec, but SHALL proceed with pairwise guard-activation contradiction checks and completeness gap detection to identify conditional contradictions and unspecified states that the global satisfiability check cannot surface.
 
-**Postcondition:** Consistent specs produce no logic findings.
+**Postcondition:** A globally satisfiable spec is not assumed free of all issues; deeper conditional analysis follows.
+
+#### Scenario: Solver Error Produces Finding [FLA-LOGIC-ERROR]
+IF the solver emits error diagnostics (such as `(error ...)` lines in stdout) indicating malformed input, THEN THE spec-check tool SHALL emit a `logic.solver_error` finding at error severity referencing all claims in the affected spec group, and SHALL persist the solver input and output as evidence.
+
+**Postcondition:** Solver errors are surfaced as explicit findings rather than silently treated as successful analysis.
+
+### Requirement: Pairwise Guard-Activation Contradiction Checking [FLA-PAIRWISE]
+WHEN the global satisfiability check for a spec group returns sat, THE spec-check tool SHALL extract conditional assertions (implications of the form `(=> guard consequent)`), SHALL identify pairs from different claims, SHALL check each pair by forcing both guards active and asserting both consequents simultaneously, and SHALL emit a `logic.conditional_contradiction` finding when the resulting query is unsatisfiable (indicating the consequents genuinely conflict when both guards hold).
+
+**References:**
+- `proposal.md#Scope`
+- `proposal.md#Preconditions, Postconditions, and Invariants`
+- `proposal.md#Failure Modes`
+
+#### Scenario: Conditional Contradiction Detected [FLA-PAIRWISE-CONTRA]
+WHEN two claims from the same spec have conditional assertions whose guards can coexist but whose consequents conflict (the combined query of both guards and both consequents is unsatisfiable), THE spec-check tool SHALL emit a `logic.conditional_contradiction` finding identifying both claims and their respective guards.
+
+**Postcondition:** Contradictions hidden by vacuous truth in the global check are surfaced with specific guard and claim evidence.
+
+#### Scenario: Compatible Conditional Assertions Produce No Finding [FLA-PAIRWISE-COMPAT]
+WHEN two conditional assertions have guards that can coexist and consequents that are mutually satisfiable, THE spec-check tool SHALL NOT emit a pairwise contradiction finding for that pair.
+
+**Postcondition:** Compatible conditional rules do not produce false-positive contradiction findings.
+
+#### Scenario: Pairwise Check Bounded By Pair Count [FLA-PAIRWISE-BOUND]
+WHEN the number of candidate pairs exceeds the configured limit, THE spec-check tool SHALL check only up to the limit and SHALL NOT block indefinitely on quadratic pair explosion.
+
+**Postcondition:** Pairwise analysis completes in bounded time regardless of claim count.
+
+#### Scenario: Severity Derived From Paired Claims [FLA-PAIRWISE-SEV]
+WHEN the spec-check tool emits a pairwise contradiction finding, THE severity SHALL be derived from the highest obligation level among the two conflicting claims (mandatory → error, advisory → warning, informational → info).
+
+**Postcondition:** Pairwise contradiction severity is consistent with the obligation-aware severity model used by the global contradiction check.
+
+### Requirement: Completeness Gap Detection [FLA-COMPLETENESS]
+WHEN the global satisfiability check for a spec group returns sat AND all assertions in the spec group are conditional (implications), THE spec-check tool SHALL negate all guards simultaneously and check satisfiability. IF the result is sat, THE tool SHALL emit a `logic.completeness_gap` warning finding indicating that there exist reachable states where no conditional rule applies and behavior is unspecified.
+
+**References:**
+- `proposal.md#Scope`
+- `proposal.md#Preconditions, Postconditions, and Invariants`
+- `proposal.md#Quality Attributes`
+
+#### Scenario: Gap Detected In All-Conditional Spec [FLA-COMPLETENESS-GAP]
+WHEN all assertions in a spec group are conditional implications and there exists a satisfying assignment where no guard holds, THE spec-check tool SHALL emit a `logic.completeness_gap` warning finding identifying the number of guards and the affected claim identifiers.
+
+**Postcondition:** Specifications with unguarded state gaps are surfaced for reviewer attention.
+
+#### Scenario: No Gap When Ubiquitous Assertions Exist [FLA-COMPLETENESS-UBIQ]
+WHEN a spec group contains at least one unconditional (ubiquitous) assertion, THE spec-check tool SHALL skip the completeness gap check for that group.
+
+**Postcondition:** Specs with ubiquitous rules that provide baseline coverage in all states do not produce spurious completeness gap findings.
+
+#### Scenario: Exhaustive Guards Produce No Gap Finding [FLA-COMPLETENESS-EXHAUST]
+WHEN the negation of all guards is unsatisfiable (the guards are exhaustive), THE spec-check tool SHALL NOT emit a completeness gap finding.
+
+**Postcondition:** Specifications whose conditional rules cover all reachable states are confirmed complete without false positives.
 
 ### Requirement: Bounded Solver Timeouts [FLA-SOLVER-TIMEOUT]
 WHEN the spec-check tool submits a query to `z3`, THE spec-check tool SHALL enforce a per-query timeout (default 30 seconds) and SHALL classify timeout results as inconclusive rather than as success or failure.

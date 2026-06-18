@@ -86,15 +86,15 @@
 
 ## 5. Formalization Pipeline
 
-- [x] 5.1 Implement logic IR types with sort declarations, function symbols, assertions, and obligation metadata.
+- [x] 5.1 Implement logic IR types with variable declarations (each carrying a name and SMT-LIB sort), function symbols, assertions, and obligation metadata.
 - [x] 5.2 Implement claim-to-formalization request packaging and `opencode`-backed sampling with bounded retries per claim.
-- [x] 5.3 Implement formalization sample schema validation: sort consistency, assertion well-formedness, and identifier format checks.
+- [x] 5.3 Implement formalization sample schema validation: variable sort consistency, assertion well-formedness, and identifier format checks.
 - [x] 5.4 Implement SMT-LIB compilation with identifier sanitization (underscore plus hex escape for unsafe characters) and reversible mapping comments.
 
 ### Formalization pipeline change summary
-- What changed: added typed logic IR (`src/domain/logic-ir.ts`) for sort declarations, function symbols, assertions, and obligation metadata. `LogicIrClaim.claimId` is now branded as `ClaimId`.
+- What changed: added typed logic IR (`src/domain/logic-ir.ts`) for variable declarations (formerly `sorts`, now `variables` field with each entry carrying `name` and `sort`), function symbols, assertions, and obligation metadata. `LogicIrClaim.claimId` is now branded as `ClaimId`. Variables are compiled to `(declare-const <name> <sort>)` in SMT-LIB output.
 - Formalization requests: implemented claim-to-formalization packaging and bounded sample acquisition through `opencode` with retry/error handling in `src/domain/formal/formalize.ts`.
-- Sample validation: `validateFormalizationSample()` in `src/domain/formal/validate.ts` is decomposed into `validateSorts`, `validateFunctions`, and `validateAssertions` for focused, independently testable validation steps. Invalid samples are preserved as findings using `Result.err()` — no exceptions are thrown during validation.
+- Sample validation: `validateFormalizationSample()` in `src/domain/formal/validate.ts` is decomposed into `validateSorts`, `validateFunctions`, and `validateAssertions` for focused, independently testable validation steps. Invalid samples are preserved as findings using `Result.err()` — no exceptions are thrown during validation. Validation accepts both `variables` (preferred) and `sorts` (legacy) field names for backward compatibility with LLM responses.
 - SMT-LIB compilation: implemented deterministic SMT output generation with identifier sanitization (`_` + hex escapes) and reversible mapping comments in `src/domain/formal/smtlib.ts`. `sanitizeIdentifier` produces `SanitizedClaimId` branded output, `compileSmtlib` produces `SmtlibContent` branded output.
 - Under-specified decision: assertion well-formedness uses balanced-parentheses and token-shape checks as a lightweight guardrail before solver submission; this keeps validation deterministic and fast while rejecting obviously broken outputs.
 - Developer handoff notes: `sanitizeIdentifier` is hardened against adversarial inputs including `(check-sat)`, `(exit)`, nested parentheses, null bytes, emoji, CJK characters, and leading digits — all produce valid SMT-LIB identifiers matching `/^[A-Za-z_][A-Za-z0-9_]*$/`. The empty string produces `"_"`.
@@ -107,18 +107,22 @@
 - [x] 6.2 Implement pairwise implication query generation for formalization sample clustering.
 - [x] 6.3 Implement equivalence cluster construction, stability threshold evaluation, and representative sample selection.
 - [x] 6.4 Implement ambiguity finding emission when no cluster meets the stability threshold.
-- [x] 6.5 Implement per-spec combined solver analysis: group representative claims by source spec file, compile each group into one SMT-LIB with named assertions and unsat-core support, invoke Z3 once per spec.
+- [x] 6.5 Implement per-spec combined solver analysis: group representative claims by source spec file, compile each group into one SMT-LIB with named assertions, invoke Z3 per spec using two-phase approach (satisfiability first, unsat-core extraction only on contradiction).
 - [x] 6.6 Implement solver evidence persistence: persist all combined per-spec SMT-LIB inputs, solver stdout (including unsat core), stderr, and inconclusive results verbatim under the output directory.
 - [x] 6.7 Implement `report_1.logic.md` generation with preserved solver evidence references.
 - [x] 6.8 Implement `compileSpecSmtlib()` for per-spec compilation with declaration deduplication, named assertions, function signature conflict detection, and `parseUnsatCore()` for unsat-core parsing.
 - [x] 6.9 Implement `groupRepresentativesBySpec()` to map clustered representatives back to their source spec files via formalization candidate provenance.
 
 ### Clustering and logic analysis change summary
-- What changed: implemented `z3` adapter (`src/adapters/z3.ts`) with stdin SMT piping, stdout/stderr capture, timeout handling, and explicit result classification (`sat`/`unsat`/`timeout`/`unknown`/`error`). The `runZ3Query` function accepts `SmtlibContent` branded input.
+- What changed: implemented `z3` adapter (`src/adapters/z3.ts`) with stdin SMT piping, stdout/stderr capture, timeout handling, and explicit result classification (`sat`/`unsat`/`timeout`/`unknown`/`error`). The `runZ3Query` function accepts `SmtlibContent` branded input. The adapter detects `(error ...)` lines in Z3 stdout and classifies the result as `error` with an `errorCount` field when any error diagnostics are present.
 - Clustering pipeline: added pairwise implication query generation, equivalence graph construction, deterministic cluster building, stability-threshold representative selection, and ambiguity emission in `src/domain/formal/clustering.ts`. Uses `precondition()` assertions for internal invariants (non-empty sample arrays, valid cluster indices).
-- Per-spec combined logic analysis: replaced per-claim solver analysis with per-spec combined analysis. All representative claims from one spec file are merged into a single `.smt2` file (`compileSpecSmtlib()` in `src/domain/formal/smtlib.ts`). This detects both self-contradictions and inter-claim contradictions within the same spec. The combined file uses `(set-option :produce-unsat-cores true)` and named assertions (`(assert (! expr :named label))`) so that Z3's `(get-unsat-core)` output can be parsed back to specific conflicting claim IDs.
-- Declaration merging: sort and function declarations are deduplicated across claims in the same spec. When two claims declare the same function name with incompatible signatures, a `logic.merge_conflict` finding is emitted and the conflicting claim is excluded from the combined file.
+- Per-spec combined logic analysis: replaced per-claim solver analysis with per-spec combined analysis. All representative claims from one spec file are merged into a single `.smt2` file (`compileSpecSmtlib()` in `src/domain/formal/smtlib.ts`). This detects both self-contradictions and inter-claim contradictions within the same spec. The compiled file contains only declarations and named assertions (`(assert (! expr :named label))`); the logic analysis orchestrator appends solver commands at query time using a two-phase approach: Phase 1 appends `(check-sat)` for a lightweight satisfiability check; Phase 2 (only on UNSAT) prepends `(set-option :produce-unsat-cores true)` and appends `(check-sat)` + `(get-unsat-core)` so that Z3's unsat-core output can be parsed back to specific conflicting claim IDs.
+- Declaration merging: variable and function declarations are deduplicated across claims in the same spec. Variables are compiled to `(declare-const <name> <sort>)`. When two claims declare the same function name with incompatible signatures, a `logic.merge_conflict` finding is emitted and the conflicting claim is excluded from the combined file.
 - Severity derivation: finding severity is derived from the highest-obligation claim in the unsat core (mandatory → error, advisory → warning, informational → info), replacing the previous mandatory-first/advisory-second two-pass model.
+- Z3 error handling: when Z3 emits error diagnostics (e.g., malformed SMT-LIB input), the analysis emits a `logic.solver_error` finding at error severity rather than silently treating the result as success.
+- Deeper post-SAT analysis: when the global satisfiability check returns SAT, the system performs two additional analyses:
+  - Pairwise guard-activation contradiction checking: extracts conditional assertions (implications of form `(=> guard consequent)`), pairs them across claims (bounded by configurable limit), forces both guards active, and checks consequent satisfiability. UNSAT result indicates a conditional contradiction hidden by vacuous truth. Emits `logic.conditional_contradiction` findings.
+  - Completeness gap detection: when all assertions are conditional, negates all guards and checks satisfiability. SAT result indicates reachable states where no rule applies. Emits `logic.completeness_gap` warning findings. Skipped when any ubiquitous (unconditional) assertions exist.
 - Pipeline grouping: `groupRepresentativesBySpec()` in `src/cli/run-cli.ts` maps each representative's `claimId` back to its candidate's `provenance.file` and builds `SpecClaimGroup[]` for the logic analysis phase.
 - Code-derived logic: `gen-logic.ts` groups claims by capability into `SpecClaimGroup[]` and delegates to the same `runLogicAnalysis` for per-capability combined analysis.
 - Evidence persistence: solver inputs/outputs are written as first-class artifacts under output paths (`smt/<sanitizedSpecId>.smt2`, `.stdout.txt`, `.stderr.txt`), then referenced from findings and reports.
@@ -126,7 +130,7 @@
 - Under-specified decision: inconclusive pairwise implication results (during clustering) are treated as non-equivalent edges (not auto-merged or auto-split), preserving uncertainty explicitly.
 - Developer handoff notes: fault injection testing confirms Z3 timeout (SIGTERM signal), crash (non-zero exit with garbage stderr), and spawn failure (ENOENT) are all handled gracefully without propagating untyped exceptions.
 - Developer handoff notes: the original `compileSmtlib()` function (per-claim, no unsat-core) is retained for use by the cross-implication module, which needs individual claim SMT-LIB for pairwise implication queries. `compileSpecSmtlib()` is used only for the main logic analysis phase.
-- Validation evidence: `npx vitest run` passes (52 files, 321 tests, 0 failures); `npx tsc --noEmit` reports zero type errors; esbuild bundle succeeds.
+- Validation evidence: `npx vitest run` passes (54 files, 328 tests, 0 failures); `npx tsc --noEmit` reports zero type errors; esbuild bundle succeeds.
 
 ## 7. Source Traceability and Code-Backwards Analysis
 

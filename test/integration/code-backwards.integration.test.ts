@@ -17,7 +17,7 @@ vi.mock("../../src/adapters/opencode.js", () => ({
       sample: {
         claimId: "CAT-PIPELINE-REQ",
         obligation: "mandatory",
-        sorts: [{ name: "State", sort: "Bool" }],
+        variables: [{ name: "State", sort: "Bool" }],
         functions: [{ name: "supports", args: ["Bool"], returns: "Bool" }],
         assertions: [{ id: "ASSERT_1", expr: "(supports true)" }],
       },
@@ -88,7 +88,7 @@ describe("code-backwards pipeline", () => {
         sample: {
           claimId: "CAT-PIPELINE-001",
           obligation: "mandatory",
-          sorts: [{ name: "State", sort: "Bool" }],
+          variables: [{ name: "State", sort: "Bool" }],
           functions: [{ name: "supports", args: ["Bool"], returns: "Bool" }],
           assertions: [{ id: "ASSERT_1", expr: "(supports true)" }],
         },

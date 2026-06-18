@@ -15,16 +15,19 @@ export type Z3ResultKind = "sat" | "unsat" | "timeout" | "unknown" | "error";
  * Captured outcome of a Z3 solver invocation including raw process output.
  *
  * @remarks
- * Invariant: `kind` is derived from the first non-empty line of stdout when the process
+ * Invariant: `kind` is derived from the first verdict line of stdout when the process
  * completes normally; it is `"timeout"` when the process exceeds the time budget, and
- * `"error"` when the process fails to spawn or produces unrecognized output.
+ * `"error"` when the process fails to spawn, produces unrecognized output, or emits
+ * error diagnostics before the verdict.
  * `exitCode` is `null` only when the process could not be spawned.
+ * `errorCount` reports how many `(error ...)` lines were emitted by Z3 (defaults to 0).
  */
 export interface Z3Result {
   readonly kind: Z3ResultKind;
   readonly stdout: string;
   readonly stderr: string;
   readonly exitCode: number | null;
+  readonly errorCount?: number;
 }
 
 /**
@@ -40,6 +43,9 @@ export interface Z3Result {
  * Precondition: `input.smtlib` is syntactically valid SMT-LIB content (branded type).
  * Postcondition: always resolves (never rejects) — spawn failures are captured as `kind: "error"`.
  * The timeout bound is enforced via SIGKILL on the child process.
+ * When Z3 emits `(error ...)` diagnostic lines, the result is classified as `"error"`
+ * regardless of any subsequent verdict line, since the verdict is unreliable when
+ * assertions failed to parse.
  */
 export async function runZ3Query(input: {
   readonly smtlib: SmtlibContent;
@@ -58,6 +64,7 @@ export async function runZ3Query(input: {
       stdout: "",
       stderr: error instanceof Error ? error.message : "z3 process execution failed",
       exitCode: null,
+      errorCount: 0,
     };
   }
 
@@ -67,22 +74,43 @@ export async function runZ3Query(input: {
       stdout: result.stdout,
       stderr: result.stderr,
       exitCode: result.exitCode,
+      errorCount: 0,
     };
   }
 
-  const firstLine = result.stdout
+  const lines = result.stdout
     .split(/\r?\n/u)
     .map((line) => line.trim())
-    .find((line) => line.length > 0);
+    .filter((line) => line.length > 0);
 
-  if (firstLine === "sat") {
-    return { kind: "sat", stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
+  // Count Z3 error diagnostics — these indicate malformed input.
+  const errorCount = lines.filter((line) => line.startsWith("(error")).length;
+
+  // Find the actual verdict line (skip error diagnostics).
+  const verdictLine = lines.find(
+    (line) => line === "sat" || line === "unsat" || line === "unknown",
+  );
+
+  // If Z3 emitted any errors, classify as "error" regardless of eventual verdict.
+  // A verdict after errors is unreliable (e.g., vacuously "sat" when all assertions failed).
+  if (errorCount > 0) {
+    return {
+      kind: "error",
+      stdout: result.stdout,
+      stderr: result.stderr,
+      exitCode: result.exitCode,
+      errorCount,
+    };
   }
-  if (firstLine === "unsat") {
-    return { kind: "unsat", stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
+
+  if (verdictLine === "sat") {
+    return { kind: "sat", stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, errorCount: 0 };
   }
-  if (firstLine === "unknown") {
-    return { kind: "unknown", stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode };
+  if (verdictLine === "unsat") {
+    return { kind: "unsat", stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, errorCount: 0 };
+  }
+  if (verdictLine === "unknown") {
+    return { kind: "unknown", stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, errorCount: 0 };
   }
 
   return {
@@ -90,5 +118,6 @@ export async function runZ3Query(input: {
     stdout: result.stdout,
     stderr: result.stderr,
     exitCode: result.exitCode,
+    errorCount: 0,
   };
 }

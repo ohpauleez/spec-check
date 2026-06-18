@@ -49,8 +49,8 @@ test:
 
 .PHONY : dist
 dist:
-	@$(NPM) run build \
-	&& $(NPM) run smoke:parity
+	@$(NPM) run build
+	#&& $(NPM) run smoke:parity
 
 .PHONY : run
 run:

@@ -24,7 +24,7 @@ export interface SampleValidationError {
  * Postcondition: on success, the returned `LogicIrClaim` has:
  *   - a non-empty `claimId`
  *   - a valid `obligation` ("mandatory" | "advisory" | "informational")
- *   - well-formed `sorts` with known sort types
+ *   - well-formed `variables` with known sort types
  *   - well-formed `functions` with declared-or-builtin arg/return sorts
  *   - well-formed `assertions` with balanced parentheses and uppercase IDs
  * Invariant: validation is deterministic and side-effect free.
@@ -50,6 +50,7 @@ export function validateFormalizationSample(sample: unknown): Result<LogicIrClai
     readonly claimId?: unknown;
     readonly obligation?: unknown;
     readonly sorts?: unknown;
+    readonly variables?: unknown;
     readonly functions?: unknown;
     readonly assertions?: unknown;
   };
@@ -62,16 +63,19 @@ export function validateFormalizationSample(sample: unknown): Result<LogicIrClai
     return err({ message: "sample obligation must be mandatory, advisory, or informational" });
   }
 
-  if (!Array.isArray(record.sorts) || !Array.isArray(record.functions) || !Array.isArray(record.assertions)) {
-    return err({ message: "sample sorts/functions/assertions must all be arrays" });
+  // Accept both "variables" (preferred) and "sorts" (legacy) field names.
+  const variablesRaw = record.variables ?? record.sorts;
+
+  if (!Array.isArray(variablesRaw) || !Array.isArray(record.functions) || !Array.isArray(record.assertions)) {
+    return err({ message: "sample variables/functions/assertions must all be arrays" });
   }
 
-  const sortsResult = validateSorts(record.sorts);
-  if (!sortsResult.ok) {
-    return sortsResult;
+  const variablesResult = validateVariables(variablesRaw);
+  if (!variablesResult.ok) {
+    return variablesResult;
   }
 
-  const functionsResult = validateFunctions(record.functions, sortsResult.value.declaredSortNames);
+  const functionsResult = validateFunctions(record.functions, variablesResult.value.declaredVariableNames);
   if (!functionsResult.ok) {
     return functionsResult;
   }
@@ -84,46 +88,46 @@ export function validateFormalizationSample(sample: unknown): Result<LogicIrClai
   return ok({
     claimId: toClaimId(record.claimId),
     obligation: record.obligation,
-    sorts: sortsResult.value.sorts,
+    variables: variablesResult.value.variables,
     functions: functionsResult.value,
     assertions: assertionsResult.value,
   });
 }
 
 // ---------------------------------------------------------------------------
-// Sort validation
+// Variable validation
 // ---------------------------------------------------------------------------
 
 /**
- * Validate the `sorts` array of a formalization sample.
+ * Validate the `variables` array of a formalization sample.
  *
- * @param entries - raw sort entries from untrusted input
- * @returns validated sorts plus the set of declared sort names, or validation error
+ * @param entries - raw variable entries from untrusted input
+ * @returns validated variables plus the set of declared variable names, or validation error
  *
  * @remarks
  * Precondition: `entries` is an array (caller validates this).
- * Postcondition: all returned sorts have a string `name` and a valid `LogicSort`.
- * Postcondition: `declaredSortNames` contains exactly the names from validated entries.
+ * Postcondition: all returned variables have a string `name` and a valid `LogicSort`.
+ * Postcondition: `declaredVariableNames` contains exactly the names from validated entries.
  */
-function validateSorts(
+function validateVariables(
   entries: readonly unknown[],
-): Result<{ readonly sorts: { name: string; sort: LogicSort }[]; readonly declaredSortNames: ReadonlySet<string> }, SampleValidationError> {
-  const declaredSortNames = new Set<string>();
-  const sorts: { name: string; sort: LogicSort }[] = [];
+): Result<{ readonly variables: { name: string; sort: LogicSort }[]; readonly declaredVariableNames: ReadonlySet<string> }, SampleValidationError> {
+  const declaredVariableNames = new Set<string>();
+  const variables: { name: string; sort: LogicSort }[] = [];
 
   for (const entry of entries) {
     if (typeof entry !== "object" || entry === null) {
-      return err({ message: "sort entry must be object" });
+      return err({ message: "variable entry must be object" });
     }
     const typed = entry as { readonly name?: unknown; readonly sort?: unknown };
     if (typeof typed.name !== "string" || !isLogicSort(typed.sort)) {
-      return err({ message: "sort entry must include name and known sort" });
+      return err({ message: "variable entry must include name and known sort" });
     }
-    declaredSortNames.add(typed.name);
-    sorts.push({ name: typed.name, sort: typed.sort });
+    declaredVariableNames.add(typed.name);
+    variables.push({ name: typed.name, sort: typed.sort });
   }
 
-  return ok({ sorts, declaredSortNames });
+  return ok({ variables, declaredVariableNames });
 }
 
 // ---------------------------------------------------------------------------
@@ -134,17 +138,17 @@ function validateSorts(
  * Validate the `functions` array and verify sort references.
  *
  * @param entries - raw function entries from untrusted input
- * @param declaredSortNames - set of sort names declared in the sample's sorts array
+ * @param declaredVariableNames - set of variable names declared in the sample's variables array
  * @returns validated function symbols or validation error
  *
  * @remarks
- * Precondition: `entries` is an array; `declaredSortNames` contains all validated sort names.
+ * Precondition: `entries` is an array; `declaredVariableNames` contains all validated variable names.
  * Postcondition: all returned functions have valid names, arg sorts, and return sorts.
  * Postcondition: all referenced sorts are either built-in or declared in the sample.
  */
 function validateFunctions(
   entries: readonly unknown[],
-  declaredSortNames: ReadonlySet<string>,
+  declaredVariableNames: ReadonlySet<string>,
 ): Result<{ name: string; args: LogicSort[]; returns: LogicSort }[], SampleValidationError> {
   const functions: { name: string; args: LogicSort[]; returns: LogicSort }[] = [];
 
@@ -169,11 +173,11 @@ function validateFunctions(
   // Cross-reference: verify all function sorts are declared or built-in.
   for (const functionSymbol of functions) {
     for (const argSort of functionSymbol.args) {
-      if (!usesDeclaredOrBuiltInSort(argSort, declaredSortNames)) {
+      if (!usesDeclaredOrBuiltInSort(argSort, declaredVariableNames)) {
         return err({ message: `function ${functionSymbol.name} uses undeclared sort ${argSort}` });
       }
     }
-    if (!usesDeclaredOrBuiltInSort(functionSymbol.returns, declaredSortNames)) {
+    if (!usesDeclaredOrBuiltInSort(functionSymbol.returns, declaredVariableNames)) {
       return err({ message: `function ${functionSymbol.name} returns undeclared sort ${functionSymbol.returns}` });
     }
   }
@@ -235,18 +239,18 @@ function isLogicSort(value: unknown): value is LogicSort {
 }
 
 /**
- * Check whether a sort is either a built-in SMT sort or one declared in the sample's sort array.
+ * Check whether a sort is either a built-in SMT sort or one declared in the sample's variable array.
  *
  * @param sort - sort name to validate
- * @param declaredSortNames - set of sort names declared in the current sample
+ * @param declaredVariableNames - set of variable names declared in the current sample
  * @returns true when the sort is a recognized built-in or was declared in the sample
  *
  * @remarks
- * Precondition: `declaredSortNames` must contain all names from the sample's `sorts` array.
+ * Precondition: `declaredVariableNames` must contain all names from the sample's `variables` array.
  * Postcondition: returns true only for sorts that will be available in the SMT solver context.
  */
-function usesDeclaredOrBuiltInSort(sort: LogicSort, declaredSortNames: ReadonlySet<string>): boolean {
-  return sort === "Bool" || sort === "Int" || sort === "Real" || sort === "String" || declaredSortNames.has(sort);
+function usesDeclaredOrBuiltInSort(sort: LogicSort, declaredVariableNames: ReadonlySet<string>): boolean {
+  return sort === "Bool" || sort === "Int" || sort === "Real" || sort === "String" || declaredVariableNames.has(sort);
 }
 
 /**

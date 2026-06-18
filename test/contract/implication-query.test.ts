@@ -10,7 +10,7 @@ function makeClaim(id: string, assertionExprs: string[]): LogicIrClaim {
   return {
     claimId: toClaimId(id),
     obligation: "mandatory",
-    sorts: [{ name: "X", sort: "Bool" }],
+    variables: [{ name: "X", sort: "Bool" }],
     functions: [{ name: "f", args: ["Bool"], returns: "Bool" }],
     assertions: assertionExprs.map((expr, index) => ({ id: `A${index}`, expr })),
   };

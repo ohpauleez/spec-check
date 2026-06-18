@@ -147,51 +147,30 @@ Source Code ──────────────────────�
 Traceability Identifier links Claims to tests, reviews, and source evidence.
 Capability groups Claims and their associated Findings by behavioral scope.
 Solver implication is the primary strength classifier;
-  blind LLM comparison is the explanatory layer.
 ```
 
 Conceptually, documents produce claims, claims produce findings and formal artifacts, and findings are synthesized into evidence-preserving reports.
 
-### Branded Domain Types
+### spec.md files
 
-The domain uses compile-time branded types to prevent accidental interchange of semantically distinct values that share the same runtime representation:
+All spec.md files define the system's verifiable behavior using EARS format and RFC 2119 keywords:
 
-- **OutputDirPath**: Absolute directory path used as the root for all artifact output.
-- **RelativePath**: Path relative to an OutputDirPath, confined within the output directory.
-- **SmtlibFilePath**: Relative path to an SMT-LIB artifact file (`.smt2` extension).
-- **ClaimId**: Canonical requirement or scenario identifier (e.g., `CAT-PARSE-EARS`).
-- **CapabilityName**: Lowercase kebab-case capability name (e.g., `catalog-and-parse`).
-- **SanitizedClaimId**: SMT-safe identifier produced by sanitization from a ClaimId.
-- **ModelName**: LLM model identifier passed to the `opencode` adapter.
-- **SmtlibContent**: SMT-LIB formula text content (not a file path).
+| Pattern           | Template                                                               | When to use                    |
+|-------------------|------------------------------------------------------------------------|--------------------------------|
+| Ubiquitous        | `THE <system> SHALL <response>.`                                       | Always active                  |
+| State-driven      | `WHILE <precondition>, THE <system> SHALL <response>.`                 | Active in a continuous state   |
+| Event-driven      | `WHEN <trigger>, THE <system> SHALL <response>.`                       | Discrete event causes behavior |
+| Unwanted-behavior | `IF <trigger>, THEN THE <system> SHALL <response>.`                    | Error/failure mitigation       |
+| Complex           | `WHILE <precondition>, WHEN <trigger>, THE <system> SHALL <response>.` | Both state and event required  |
+| Optional          | `WHERE <feature is included>, THE <system> SHALL <response>.`          | Optional/configurable behavior |
 
-Branded values are constructed only through validated construction functions at trust boundaries. Interior code passes branded values through without casting.
+RFC 2119: SHALL/MUST = absolute requirement, SHOULD = recommended, MAY = optional.
 
-### Error Hierarchy
+Escape hatch: When a requirement has more than 3 preconditions or is mathematical/tabular,
+it MAY use decision tables, lists, or other formats. The requirement MUST include a
+justification for why EARS is insufficient.
 
-The domain defines a structured error hierarchy using a generic `ErrorBase<C>` discriminated union pattern with 10 error categories:
-
-- **ArgumentError**: CLI argument parsing failure.
-- **ConfigError**: Configuration loading or validation failure.
-- **DependencyError**: Missing external binary dependency.
-- **CatalogError**: Input document discovery or reading failure.
-- **ValidationError**: Schema or structure validation failure.
-- **AdapterError**: External process adapter failure (spawn, timeout, invalid response).
-- **QualitativeError**: LLM-backed qualitative review failure.
-- **FormalizationError**: LLM-backed formalization failure.
-- **PipelineError**: Pipeline phase orchestration failure.
-- **OutputError**: File or manifest output failure.
-
-Narrowed boundary unions (`PipelinePhaseError`, `AdapterBoundaryError`, `CliResolutionError`) constrain which categories can appear at specific subsystem boundaries.
-
-### Assertion Utilities
-
-Runtime invariant enforcement uses four assertion functions for programmer errors and broken structural invariants (not for expected domain failures, which use `Result<T, E>`):
-
-- **precondition()**: Asserts caller contract obligations at function boundaries.
-- **invariant()**: Asserts structural invariants within functions or modules.
-- **postcondition()**: Asserts guaranteed outcomes before returning.
-- **assertNever()**: Asserts exhaustive handling in discriminated union switches.
+Specs are all traceable through the code and tests using [spec-traceability](docs/spec_traceability.md).
 
 ## Preconditions, Postconditions, and Invariants
 
@@ -335,8 +314,10 @@ Preconditions:
 
 Postconditions:
 - Obligation-aware solver passes classify contradictions and gaps with severity appropriate to the obligation level (mandatory claims produce higher-severity findings than advisory claims).
-- Counterexamples, models, unsat cores, timeout results, and unknown results are persisted verbatim as evidence.
+- When the global satisfiability check passes, deeper analysis detects conditional contradictions (pairwise guard-activation checks) and completeness gaps (unreachable states where no rule applies).
+- Counterexamples, models, unsat cores, timeout results, unknown results, and solver error diagnostics are persisted verbatim as evidence.
 - Inconclusive solver results (timeout, unknown) are preserved as findings rather than treated as success.
+- Solver errors (malformed input producing diagnostic output) are surfaced as explicit findings rather than silently ignored.
 
 Invariants:
 - Solver inputs and outputs are persisted verbatim under the output directory.
@@ -466,6 +447,8 @@ Invariants:
   - **Rationale**: Solver analysis is a required evidence-producing phase when formalization is enabled; missing solver results would create an incomplete evidence set.
 - **Solver timeout or unknown result**: The solver does not produce a definitive result (sat/unsat) within the per-query timeout.
   - **Rationale**: Inconclusive results must be preserved as evidence and surfaced as findings rather than silently treated as success.
+- **Solver error diagnostic**: The solver emits error lines (e.g., `(error ...)` in stdout) indicating malformed input from the formalization phase.
+  - **Rationale**: Error diagnostics indicate that the compiled SMT-LIB is syntactically or semantically invalid; treating such results as success would hide formalization defects and produce vacuously trusting analysis.
 - **SMT-LIB syntax collision**: User-derived identifiers contain characters that conflict with SMT-LIB syntax.
   - **Rationale**: Unsanitized identifiers could produce malformed solver inputs that yield incorrect or unparseable results.
 
@@ -512,7 +495,7 @@ Invariants:
 | 10 | PipelineError | Pipeline phase orchestration failure |
 | 11 | OutputError | File or manifest output failure |
 
-Exit codes 2–11 correspond to the `ErrorCategory` discriminated union in the error hierarchy. Each category maps to a fixed code via `EXIT_CODE_BY_CATEGORY`. Fatal errors in any category prevent the tool from producing a trustworthy evidence set.
+Exit codes 2–11 correspond to an error hierarchy. Fatal errors in any category prevent the tool from producing a trustworthy evidence set.
 
 ### Stderr Format
 

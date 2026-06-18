@@ -16,7 +16,7 @@ function makeSample(claimId: string, assertionExpr: string): LogicIrClaim {
   return {
     claimId: toClaimId(claimId),
     obligation: "mandatory",
-    sorts: [{ name: "X", sort: "Bool" }],
+    variables: [{ name: "X", sort: "Bool" }],
     functions: [],
     assertions: [{ id: "A1", expr: assertionExpr }],
   };

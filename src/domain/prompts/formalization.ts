@@ -27,7 +27,7 @@ Return a strict JSON object with exactly these fields:
 {
   "claimId": "<canonical identifier of the requirement/scenario>",
   "obligation": "<mandatory | advisory | informational>",
-  "sorts": [
+  "variables": [
     { "name": "<PascalCase identifier>", "sort": "<Bool | Int | Real | String>" }
   ],
   "functions": [
@@ -47,15 +47,16 @@ Return a strict JSON object with exactly these fields:
   - "mandatory" for SHALL or MUST (absolute requirement).
   - "advisory" for SHOULD (recommended).
   - "informational" for MAY (optional) or when no RFC 2119 keyword is present.
-- **sorts**: Named propositions or quantities extracted from the requirement. \
-Each sort declares a typed variable for use in assertions.
+- **variables**: Named propositions or quantities extracted from the requirement. \
+Each variable declares a typed constant for use in assertions. These are \
+compiled to \`(declare-const <name> <sort>)\` in SMT-LIB.
   - "name": PascalCase descriptive identifier derived from the requirement \
 text (e.g., "FormSubmitted", "InMaintenanceMode", "RequestsRejected").
   - "sort": One of "Bool" (for propositions/conditions), "Int" (for integer \
 quantities), "Real" (for real-valued quantities), or "String" (for textual \
-values). Most EARS requirements use "Bool" sorts.
+values). Most EARS requirements use "Bool" variables.
 - **functions**: Uninterpreted function symbols for relationships not \
-expressible with simple sorts. May be empty for simple requirements.
+expressible with simple variables. May be empty for simple requirements.
   - "name": Function identifier.
   - "args": Array of sort names for the function arguments.
   - "returns": Sort name for the return type.
@@ -63,7 +64,7 @@ expressible with simple sorts. May be empty for simple requirements.
 content as SMT-LIB s-expressions.
   - "id": Uppercase kebab-case identifier for the assertion (e.g., \
 "EVENT-DRIVEN-1", "UNWANTED-1").
-  - "expr": An SMT-LIB s-expression using declared sort names, standard \
+  - "expr": An SMT-LIB s-expression using declared variable names, standard \
 logical connectives (=>, and, or, not, =, <, >, <=, >=, +, -, *), and \
 parenthesized prefix notation.
 
@@ -72,15 +73,15 @@ parenthesized prefix notation.
 Each EARS pattern maps to a specific logical structure:
 
 ### Event-driven: WHEN trigger, THE system SHALL response
-- Declare Boolean sorts for the trigger condition and the response.
+- Declare Boolean variables for the trigger condition and the response.
 - Assert implication: (=> Trigger Response)
 
 ### State-driven: WHILE state, THE system SHALL response
-- Declare Boolean sorts for the state condition and the response.
+- Declare Boolean variables for the state condition and the response.
 - Assert implication: (=> State Response)
 
 ### Conditional: IF condition, THEN THE system SHALL response
-- Declare Boolean sorts for the condition and the response.
+- Declare Boolean variables for the condition and the response.
 - Assert implication: (=> Condition Response)
 
 ### Unwanted-behavior: IF failure, THEN THE system SHALL response
@@ -89,14 +90,23 @@ failure condition.
 - Assert implication: (=> FailureCondition Response)
 
 ### Ubiquitous: THE system SHALL response
-- Declare a Boolean sort for the response.
+- Declare a Boolean variable for the response.
 - Assert the response directly as a bare proposition (no implication).
+
+### Complex: WHILE state, WHEN trigger, THE system SHALL response
+- Declare Boolean variables for the state condition, the trigger, and the response.
+- Assert implication with a conjunction of both preconditions in the antecedent: \
+(=> (and State Trigger) Response)
+
+### Optional: WHERE feature is included, THE system SHALL response
+- Declare Boolean variables for the feature inclusion flag and the response.
+- Assert implication: (=> FeatureIncluded Response)
 
 ### Negation: SHALL NOT
 - When the requirement says "SHALL NOT do X", negate the response in the \
 consequent: (=> Trigger (not Response))
 
-### Complex requirements
+### Multi-precondition requirements
 - When a requirement has multiple preconditions or conditions, combine them \
 with (and ...) in the antecedent.
 - When a requirement specifies multiple responses, assert each as a separate \
@@ -110,7 +120,7 @@ Claim: "WHEN the user submits a form, THE system SHALL validate all required fie
 {
   "claimId": "EARS-EVENT-1",
   "obligation": "mandatory",
-  "sorts": [
+  "variables": [
     { "name": "FormSubmitted", "sort": "Bool" },
     { "name": "FieldsValidated", "sort": "Bool" }
   ],
@@ -127,7 +137,7 @@ Claim: "THE system SHOULD log all API responses."
 {
   "claimId": "EARS-UBIQ-1",
   "obligation": "advisory",
-  "sorts": [
+  "variables": [
     { "name": "ApiResponseLogged", "sort": "Bool" }
   ],
   "functions": [],
@@ -143,7 +153,7 @@ Claim: "IF the database connection fails, THE system SHALL NOT expose internal e
 {
   "claimId": "EARS-UNWANTED-1",
   "obligation": "mandatory",
-  "sorts": [
+  "variables": [
     { "name": "DatabaseConnectionFailed", "sort": "Bool" },
     { "name": "InternalErrorExposed", "sort": "Bool" }
   ],
@@ -160,7 +170,7 @@ Claim: "WHILE the system is in maintenance mode, THE system SHALL reject all inc
 {
   "claimId": "EARS-STATE-1",
   "obligation": "mandatory",
-  "sorts": [
+  "variables": [
     { "name": "InMaintenanceMode", "sort": "Bool" },
     { "name": "RequestsRejected", "sort": "Bool" }
   ],
@@ -171,11 +181,46 @@ Claim: "WHILE the system is in maintenance mode, THE system SHALL reject all inc
 }
 \`\`\`
 
+### Complex example
+Claim: "WHILE the system is in maintenance mode, WHEN a user submits a request, THE system SHALL queue the request for later processing."
+\`\`\`json
+{
+  "claimId": "EARS-COMPLEX-1",
+  "obligation": "mandatory",
+  "variables": [
+    { "name": "InMaintenanceMode", "sort": "Bool" },
+    { "name": "RequestSubmitted", "sort": "Bool" },
+    { "name": "RequestQueued", "sort": "Bool" }
+  ],
+  "functions": [],
+  "assertions": [
+    { "id": "COMPLEX-1", "expr": "(=> (and InMaintenanceMode RequestSubmitted) RequestQueued)" }
+  ]
+}
+\`\`\`
+
+### Optional example
+Claim: "WHERE admin features are enabled, THE system SHALL display the admin panel."
+\`\`\`json
+{
+  "claimId": "EARS-OPT-1",
+  "obligation": "mandatory",
+  "variables": [
+    { "name": "AdminFeaturesEnabled", "sort": "Bool" },
+    { "name": "AdminPanelDisplayed", "sort": "Bool" }
+  ],
+  "functions": [],
+  "assertions": [
+    { "id": "OPTIONAL-1", "expr": "(=> AdminFeaturesEnabled AdminPanelDisplayed)" }
+  ]
+}
+\`\`\`
+
 ## Constraints
 
-- Use ONLY the sort names you declared in the "sorts" array within assertions.
-- Every sort name referenced in a "functions" entry or "assertions" entry \
-must appear in the "sorts" array.
+- Use ONLY the variable names you declared in the "variables" array within assertions.
+- Every variable name referenced in a "functions" entry or "assertions" entry \
+must appear in the "variables" array.
 - Assertion IDs must be unique, non-empty, and match the pattern \
 [A-Z][A-Z0-9_-]*.
 - Assertion expressions must be syntactically valid SMT-LIB s-expressions \
@@ -217,7 +262,7 @@ follows the Logic IR schema:
     {
       "claimId": "<canonical identifier>",
       "obligation": "<mandatory | advisory | informational>",
-      "sorts": [{ "name": "<PascalCase>", "sort": "<Bool | Int | Real | String>" }],
+      "variables": [{ "name": "<PascalCase>", "sort": "<Bool | Int | Real | String>" }],
       "functions": [{ "name": "<id>", "args": ["<sort>"], "returns": "<sort>" }],
       "assertions": [{ "id": "<UPPERCASE-KEBAB>", "expr": "<SMT-LIB s-expr>" }]
     }
@@ -229,9 +274,9 @@ ${FORMALIZATION_INSTRUCTIONS.split("## Logic IR schema")[1]?.split("## Constrain
 
 ## Constraints
 
-- Use ONLY the sort names you declared in each entry's "sorts" array.
-- Every sort name referenced in a "functions" or "assertions" entry must appear \
-in that claim's "sorts" array.
+- Use ONLY the variable names you declared in each entry's "variables" array.
+- Every variable name referenced in a "functions" or "assertions" entry must appear \
+in that claim's "variables" array.
 - Assertion IDs must be unique within each claim, non-empty, and match \
 [A-Z][A-Z0-9_-]*.
 - Assertion expressions must be syntactically valid SMT-LIB s-expressions.

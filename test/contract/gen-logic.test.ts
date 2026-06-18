@@ -18,7 +18,7 @@ function makeClaim(claimId: string, obligation: "mandatory" | "advisory" | "info
   return {
     claimId: toClaimId(claimId),
     obligation,
-    sorts: [{ name: "S", sort: "Bool" }],
+    variables: [{ name: "S", sort: "Bool" }],
     functions: [],
     assertions: [{ id: "A1", expr: "true" }],
   };

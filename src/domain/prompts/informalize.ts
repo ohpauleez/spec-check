@@ -36,8 +36,10 @@ EARS (Easy Approach to Requirements Syntax) patterns.
 
 - **Event-driven**: WHEN <trigger>, THE system SHALL <response>
 - **State-driven**: WHILE <state>, THE system SHALL <response>
+- **Complex**: WHILE <state>, WHEN <trigger>, THE system SHALL <response>
 - **Conditional**: IF <condition>, THEN THE system SHALL <response>
 - **Unwanted-behavior**: IF <failure>, THEN THE system SHALL <response>
+- **Optional**: WHERE <feature is included>, THE system SHALL <response>
 - **Ubiquitous**: THE system SHALL <response>
 
 ## Output format

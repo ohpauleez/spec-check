@@ -22,7 +22,7 @@ vi.mock("../../src/adapters/opencode.js", () => ({
       sample: {
         claimId: "CAT-TEST-REQ",
         obligation: "mandatory",
-        sorts: [{ name: "S", sort: "Bool" }],
+        variables: [{ name: "S", sort: "Bool" }],
         functions: [{ name: "f", args: ["Bool"], returns: "Bool" }],
         assertions: [{ id: "A1", expr: "(f true)" }],
       },

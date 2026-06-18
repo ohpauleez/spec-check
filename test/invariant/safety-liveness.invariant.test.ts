@@ -73,11 +73,11 @@ describe("safety properties", () => {
       "not an object",
       42,
       {},
-      { claimId: "R1" }, // missing obligation, sorts, functions, assertions
+      { claimId: "R1" }, // missing obligation, variables, functions, assertions
       { claimId: "R1", obligation: "mandatory" }, // missing arrays
-      { claimId: "R1", obligation: "mandatory", sorts: [], functions: [], assertions: "not-array" },
-      { claimId: "", obligation: "mandatory", sorts: [], functions: [], assertions: [] }, // empty claimId
-      { claimId: "R1", obligation: "bogus", sorts: [], functions: [], assertions: [] }, // bad obligation
+      { claimId: "R1", obligation: "mandatory", variables: [], functions: [], assertions: "not-array" },
+      { claimId: "", obligation: "mandatory", variables: [], functions: [], assertions: [] }, // empty claimId
+      { claimId: "R1", obligation: "bogus", variables: [], functions: [], assertions: [] }, // bad obligation
     ];
 
     for (const sample of invalidSamples) {
@@ -89,7 +89,7 @@ describe("safety properties", () => {
     const valid = validateFormalizationSample({
       claimId: "R1",
       obligation: "mandatory",
-      sorts: [{ name: "S", sort: "Bool" }],
+      variables: [{ name: "S", sort: "Bool" }],
       functions: [],
       assertions: [{ id: "A1", expr: "true" }],
     });
@@ -184,7 +184,7 @@ describe("liveness properties", () => {
         sample: {
           claimId: "R1",
           obligation: "mandatory",
-          sorts: [{ name: "S", sort: "Bool" }],
+          variables: [{ name: "S", sort: "Bool" }],
           functions: [{ name: "f", args: ["Bool"], returns: "Bool" }],
           assertions: [{ id: "A1", expr: "(f true)" }],
         },
@@ -229,7 +229,7 @@ describe("liveness properties", () => {
         claims: [{
           claimId: toClaimId("R1"),
           obligation: "mandatory",
-          sorts: [{ name: "S", sort: "Bool" }],
+          variables: [{ name: "S", sort: "Bool" }],
           functions: [],
           assertions: [{ id: "A1", expr: "true" }],
         }],

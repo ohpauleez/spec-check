@@ -189,9 +189,9 @@ export function buildImplicationQuery(left: LogicIrClaim, right: LogicIrClaim): 
     leftCompiled.smtlib.trimEnd(),
     rightCompiled.smtlib.trimEnd().split("\n").filter((line) => {
       const trimmed = line.trim();
-      // Include only declarations from right side (sorts and functions for shared context).
+      // Include only declarations from right side (constants and functions for shared context).
       // Exclude right's assertions — they only appear in negated form below.
-      return trimmed.startsWith("(declare-sort") || trimmed.startsWith("(declare-fun") || trimmed.startsWith(";");
+      return trimmed.startsWith("(declare-const") || trimmed.startsWith("(declare-fun") || trimmed.startsWith(";");
     }).join("\n"),
     negatedConsequent,
     "(check-sat)",

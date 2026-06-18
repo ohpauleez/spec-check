@@ -5,7 +5,7 @@ import { validateFormalizationSample } from "../../src/domain/formal/validate.js
 const validSample = {
   claimId: "REQ-VALID",
   obligation: "mandatory",
-  sorts: [{ name: "State", sort: "Bool" }],
+  variables: [{ name: "State", sort: "Bool" }],
   functions: [{ name: "ok", args: ["Bool"], returns: "Bool" }],
   assertions: [{ id: "ASSERT-1", expr: "(ok true)" }],
 };

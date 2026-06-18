@@ -136,4 +136,76 @@ describe("parser structural checks", () => {
     ) || nonEars?.earsType === "non-ears";
     expect(hasWarning).toBe(true);
   });
+
+  it("classifies complex (WHILE+WHEN) pattern", async () => {
+    traceSpec("CAT-PARSE-EARS", "CAT-EARS-MATCH");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-parser-"));
+    const file = join(root, "spec.md");
+    const content = [
+      "## ADDED Requirements",
+      "",
+      "### Requirement: Complex pattern [CAT-COMPLEX]",
+      "WHILE the system is in maintenance mode, WHEN a user submits a request, THE system SHALL queue the request.",
+      "",
+      "**References:**",
+      "- proposal.md#Scope",
+    ].join("\n");
+    await writeFile(file, content, "utf8");
+    const parsed = await parseSpec(file);
+    expect(parsed.requirements[0]?.earsType).toBe("complex");
+  });
+
+  it("classifies optional (WHERE) pattern", async () => {
+    traceSpec("CAT-PARSE-EARS", "CAT-EARS-MATCH");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-parser-"));
+    const file = join(root, "spec.md");
+    const content = [
+      "## ADDED Requirements",
+      "",
+      "### Requirement: Optional pattern [CAT-OPTIONAL]",
+      "WHERE admin features are enabled, THE system SHALL display the admin panel.",
+      "",
+      "**References:**",
+      "- proposal.md#Scope",
+    ].join("\n");
+    await writeFile(file, content, "utf8");
+    const parsed = await parseSpec(file);
+    expect(parsed.requirements[0]?.earsType).toBe("optional");
+  });
+
+  it("still classifies WHILE-only as state-driven (not complex)", async () => {
+    traceSpec("CAT-PARSE-EARS", "CAT-EARS-MATCH");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-parser-"));
+    const file = join(root, "spec.md");
+    const content = [
+      "## ADDED Requirements",
+      "",
+      "### Requirement: State pattern [CAT-STATE]",
+      "WHILE the system is in maintenance mode, THE system SHALL reject all incoming requests.",
+      "",
+      "**References:**",
+      "- proposal.md#Scope",
+    ].join("\n");
+    await writeFile(file, content, "utf8");
+    const parsed = await parseSpec(file);
+    expect(parsed.requirements[0]?.earsType).toBe("state-driven");
+  });
+
+  it("still classifies WHEN-only as event-driven (not complex)", async () => {
+    traceSpec("CAT-PARSE-EARS", "CAT-EARS-MATCH");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-parser-"));
+    const file = join(root, "spec.md");
+    const content = [
+      "## ADDED Requirements",
+      "",
+      "### Requirement: Event pattern [CAT-EVENT]",
+      "WHEN a user submits a request, THE system SHALL process it.",
+      "",
+      "**References:**",
+      "- proposal.md#Scope",
+    ].join("\n");
+    await writeFile(file, content, "utf8");
+    const parsed = await parseSpec(file);
+    expect(parsed.requirements[0]?.earsType).toBe("event-driven");
+  });
 });

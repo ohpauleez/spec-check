@@ -45,8 +45,8 @@ export function compileSmtlib(claim: LogicIrClaim): CompiledSmtlib {
   for (const [original, sanitized] of identifierMap) {
     lines.push(`; id-map ${original} -> ${sanitized}`);
   }
-  for (const sort of claim.sorts) {
-    lines.push(`(declare-sort ${sanitize(sort.name)} 0)`);
+  for (const variable of claim.variables) {
+    lines.push(`(declare-const ${sanitize(variable.name)} ${variable.sort})`);
   }
   for (const fn of claim.functions) {
     lines.push(`(declare-fun ${sanitize(fn.name)} (${fn.args.join(" ")}) ${fn.returns})`);
@@ -149,7 +149,7 @@ function sanitizeAssertion(expr: string, sanitize: (value: string) => string): s
  *
  * @remarks
  * Precondition: `content` follows the format produced by `compileSmtlib` (one command per line).
- * Postcondition: `declarations` contains `(declare-sort ...)` and `(declare-fun ...)` lines.
+ * Postcondition: `declarations` contains `(declare-const ...)` and `(declare-fun ...)` lines.
  * Postcondition: `assertionExprs` contains the inner expressions from `(assert expr)` lines.
  * Lines that are comments, `(check-sat)`, or empty are ignored.
  */
@@ -162,7 +162,7 @@ export function parseSmtlibContent(content: string): {
 
   for (const rawLine of content.split("\n")) {
     const line = rawLine.trim();
-    if (line.startsWith("(declare-sort") || line.startsWith("(declare-fun")) {
+    if (line.startsWith("(declare-const") || line.startsWith("(declare-sort") || line.startsWith("(declare-fun")) {
       declarations.push(line);
     } else if (line.startsWith("(assert ")) {
       // Extract inner expression from (assert expr)
@@ -219,7 +219,7 @@ export interface CompiledSpecSmtlib {
  *
  * @remarks
  * Strategy:
- * - Sort declarations are deduplicated by name (first-wins).
+ * - Variable declarations are deduplicated by name (first-wins; same name + same sort → emit once).
  * - Function declarations are deduplicated by name; if a duplicate name has a different
  *   signature, a SpecMergeConflict is recorded and the conflicting claim is excluded.
  * - Each assertion uses `(assert (! expr :named <label>))` where label encodes
@@ -249,7 +249,7 @@ export function compileSpecSmtlib(specFile: string, claims: readonly LogicIrClai
   const includedClaimIds: string[] = [];
   const assertionNameMap = new Map<string, string>(); // label → claimId
 
-  const sortLines: string[] = [];
+  const variableLines: string[] = [];
   const functionLines: string[] = [];
   const assertionLines: string[] = [];
 
@@ -288,7 +288,7 @@ export function compileSpecSmtlib(specFile: string, claims: readonly LogicIrClai
   }
 
   // Second pass: emit declarations and assertions for non-excluded claims.
-  const emittedSorts = new Set<string>();
+  const emittedVariables = new Set<string>();
   const emittedFunctions = new Set<string>();
   for (const claim of claims) {
     if (excludedClaimIds.has(claim.claimId)) {
@@ -296,12 +296,12 @@ export function compileSpecSmtlib(specFile: string, claims: readonly LogicIrClai
     }
     includedClaimIds.push(claim.claimId);
 
-    // Sorts.
-    for (const sort of claim.sorts) {
-      const sanName = sanitize(sort.name);
-      if (!emittedSorts.has(sanName)) {
-        emittedSorts.add(sanName);
-        sortLines.push(`(declare-sort ${sanName} 0)`);
+    // Variables (typed constants).
+    for (const variable of claim.variables) {
+      const sanName = sanitize(variable.name);
+      if (!emittedVariables.has(sanName)) {
+        emittedVariables.add(sanName);
+        variableLines.push(`(declare-const ${sanName} ${variable.sort})`);
       }
     }
 
@@ -327,13 +327,14 @@ export function compileSpecSmtlib(specFile: string, claims: readonly LogicIrClai
   }
 
   // Assemble final SMT-LIB text.
+  // Note: (set-option :produce-unsat-cores true) is NOT included here — callers
+  // prepend it only when they need unsat-core output (two-phase Z3 approach).
   const lines: string[] = [];
   lines.push(`; spec ${specFile}`);
   lines.push(`; claims ${includedClaimIds.length} (${excludedClaimIds.size} excluded due to conflicts)`);
-  lines.push(`(set-option :produce-unsat-cores true)`);
   lines.push("");
-  lines.push("; --- sort declarations ---");
-  lines.push(...sortLines);
+  lines.push("; --- variable declarations ---");
+  lines.push(...variableLines);
   lines.push("");
   lines.push("; --- function declarations ---");
   lines.push(...functionLines);

@@ -21,7 +21,7 @@ vi.mock("../../src/adapters/opencode.js", () => ({
       sample: {
         claimId: "DET-REQ",
         obligation: "mandatory",
-        sorts: [{ name: "S", sort: "Bool" }],
+        variables: [{ name: "S", sort: "Bool" }],
         functions: [{ name: "f", args: ["Bool"], returns: "Bool" }],
         assertions: [{ id: "A1", expr: "(f true)" }],
       },
@@ -64,7 +64,7 @@ describe("determinism - extended", () => {
       claims: [{
         claimId: toClaimId("DET-LOGIC-R1"),
         obligation: "mandatory" as const,
-        sorts: [{ name: "S", sort: "Bool" as const }],
+        variables: [{ name: "S", sort: "Bool" as const }],
         functions: [] as const,
         assertions: [{ id: "A1", expr: "true" }],
       }],
@@ -165,7 +165,7 @@ describe("determinism - extended", () => {
         sample: {
           claimId: "DET-REQ",
           obligation: "mandatory",
-          sorts: [{ name: "S", sort: "Bool" }],
+          variables: [{ name: "S", sort: "Bool" }],
           functions: [{ name: "f", args: ["Bool"], returns: "Bool" }],
           assertions: [{ id: "A1", expr: "(f true)" }],
         },
@@ -194,7 +194,7 @@ describe("determinism - extended", () => {
         sample: {
           claimId: "DET-REQ",
           obligation: "mandatory",
-          sorts: [{ name: "S", sort: "Bool" }],
+          variables: [{ name: "S", sort: "Bool" }],
           functions: [{ name: "f", args: ["Bool"], returns: "Bool" }],
           assertions: [{ id: "A1", expr: "(f true)" }],
         },

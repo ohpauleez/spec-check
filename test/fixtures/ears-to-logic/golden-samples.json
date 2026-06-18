@@ -5,7 +5,7 @@
     "expectedIr": {
       "claimId": "EARS-EVENT-1",
       "obligation": "mandatory",
-      "sorts": [
+      "variables": [
         { "name": "FormSubmitted", "sort": "Bool" },
         { "name": "FieldsValidated", "sort": "Bool" }
       ],
@@ -21,7 +21,7 @@
     "expectedIr": {
       "claimId": "EARS-STATE-1",
       "obligation": "mandatory",
-      "sorts": [
+      "variables": [
         { "name": "InMaintenanceMode", "sort": "Bool" },
         { "name": "RequestsRejected", "sort": "Bool" }
       ],
@@ -37,7 +37,7 @@
     "expectedIr": {
       "claimId": "EARS-UBIQ-1",
       "obligation": "advisory",
-      "sorts": [
+      "variables": [
         { "name": "ApiResponseLogged", "sort": "Bool" }
       ],
       "functions": [],
@@ -47,18 +47,18 @@
     }
   },
   {
-    "name": "option-driven SHALL",
-    "ears": "IF the user has admin privileges, THE system SHALL display the admin panel.",
+    "name": "optional WHERE SHALL",
+    "ears": "WHERE admin features are enabled, THE system SHALL display the admin panel.",
     "expectedIr": {
       "claimId": "EARS-OPT-1",
       "obligation": "mandatory",
-      "sorts": [
-        { "name": "HasAdminPrivileges", "sort": "Bool" },
+      "variables": [
+        { "name": "AdminFeaturesEnabled", "sort": "Bool" },
         { "name": "AdminPanelDisplayed", "sort": "Bool" }
       ],
       "functions": [],
       "assertions": [
-        { "id": "OPTION-DRIVEN-1", "expr": "(=> HasAdminPrivileges AdminPanelDisplayed)" }
+        { "id": "OPTIONAL-1", "expr": "(=> AdminFeaturesEnabled AdminPanelDisplayed)" }
       ]
     }
   },
@@ -68,13 +68,30 @@
     "expectedIr": {
       "claimId": "EARS-UNWANTED-1",
       "obligation": "mandatory",
-      "sorts": [
+      "variables": [
         { "name": "DatabaseConnectionFailed", "sort": "Bool" },
         { "name": "InternalErrorExposed", "sort": "Bool" }
       ],
       "functions": [],
       "assertions": [
         { "id": "UNWANTED-1", "expr": "(=> DatabaseConnectionFailed (not InternalErrorExposed))" }
+      ]
+    }
+  },
+  {
+    "name": "complex WHILE+WHEN SHALL",
+    "ears": "WHILE the system is in maintenance mode, WHEN a user submits a request, THE system SHALL queue the request for later processing.",
+    "expectedIr": {
+      "claimId": "EARS-COMPLEX-1",
+      "obligation": "mandatory",
+      "variables": [
+        { "name": "InMaintenanceMode", "sort": "Bool" },
+        { "name": "RequestSubmitted", "sort": "Bool" },
+        { "name": "RequestQueued", "sort": "Bool" }
+      ],
+      "functions": [],
+      "assertions": [
+        { "id": "COMPLEX-1", "expr": "(=> (and InMaintenanceMode RequestSubmitted) RequestQueued)" }
       ]
     }
   }

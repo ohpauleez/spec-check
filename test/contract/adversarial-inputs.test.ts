@@ -154,7 +154,7 @@ describe("adversarial inputs", () => {
       const r = await parseSpec(fixtures["malformed-ears.md"]!);
       expect(r.requirements.length).toBe(3);
       for (const req of r.requirements) {
-        expect(["event-driven", "state-driven", "conditional", "unwanted-behavior", "ubiquitous", "non-ears"]).toContain(req.earsType);
+        expect(["event-driven", "state-driven", "complex", "conditional", "unwanted-behavior", "optional", "ubiquitous", "non-ears"]).toContain(req.earsType);
       }
     });
 
@@ -296,7 +296,7 @@ describe("adversarial inputs", () => {
     it("validateFormalizationSample rejects unbalanced parentheses", () => {
       const r = validateFormalizationSample({
         claimId: "VALID-ID", obligation: "mandatory",
-        sorts: [{ name: "S", sort: "Bool" }],
+        variables: [{ name: "S", sort: "Bool" }],
         functions: [{ name: "f", args: ["Bool"], returns: "Bool" }],
         assertions: [{ id: "ASSERT-1", expr: "(((((" }],
       });
@@ -307,7 +307,7 @@ describe("adversarial inputs", () => {
     it("validateFormalizationSample handles SMT injection in assertion expr", () => {
       const r = validateFormalizationSample({
         claimId: "REQ-INJECT", obligation: "mandatory",
-        sorts: [{ name: "S", sort: "Bool" }],
+        variables: [{ name: "S", sort: "Bool" }],
         functions: [{ name: "f", args: ["Bool"], returns: "Bool" }],
         assertions: [{ id: "ASSERT-INJECT", expr: "(check-sat)(exit)" }],
       });
@@ -317,7 +317,7 @@ describe("adversarial inputs", () => {
     it("validateFormalizationSample rejects lowercase assertion ID", () => {
       const r = validateFormalizationSample({
         claimId: "REQ-LOWER", obligation: "mandatory",
-        sorts: [{ name: "S", sort: "Bool" }],
+        variables: [{ name: "S", sort: "Bool" }],
         functions: [{ name: "f", args: ["Bool"], returns: "Bool" }],
         assertions: [{ id: "assert-lower", expr: "(f true)" }],
       });
@@ -328,7 +328,7 @@ describe("adversarial inputs", () => {
       const claim = {
         claimId: toClaimId("REQ-INJECT"),
         obligation: "mandatory" as const,
-        sorts: [{ name: "(exit)", sort: "Bool" as const }],
+        variables: [{ name: "(exit)", sort: "Bool" as const }],
         functions: [{ name: "evil()", args: ["Bool" as const], returns: "Bool" as const }],
         assertions: [{ id: "ASSERT-EVIL", expr: "(f true)" }],
       };
@@ -338,11 +338,11 @@ describe("adversarial inputs", () => {
       expect(compiled.smtlib).toContain("(assert");
     });
 
-    it("compileSmtlib handles empty sorts and functions", () => {
+    it("compileSmtlib handles empty variables and functions", () => {
       const claim = {
         claimId: toClaimId("REQ-MINIMAL"),
         obligation: "advisory" as const,
-        sorts: [] as const,
+        variables: [] as const,
         functions: [] as const,
         assertions: [{ id: "ASSERT-ONLY", expr: "true" }],
       };
@@ -351,10 +351,10 @@ describe("adversarial inputs", () => {
       expect(compiled.claimId).toBe("REQ-MINIMAL");
     });
 
-    it("validateFormalizationSample handles special chars in sort name", () => {
+    it("validateFormalizationSample handles special chars in variable name", () => {
       const r = validateFormalizationSample({
         claimId: "REQ-SPECIAL", obligation: "mandatory",
-        sorts: [{ name: "My Sort (evil)", sort: "Bool" }],
+        variables: [{ name: "My Sort (evil)", sort: "Bool" }],
         functions: [{ name: "f", args: ["Bool"], returns: "Bool" }],
         assertions: [{ id: "ASSERT-1", expr: "(f true)" }],
       });

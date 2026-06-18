@@ -80,7 +80,7 @@ The core phases consume typed inputs and produce typed outputs. The `opencode` a
 - **Coverage Module**: Compares proposal and design claims against capability specs and references to detect missing coverage, contradiction, and semantic mismatch.
 - **Formalization Module**: Requests multiple LLM-backed formalization samples, validates them, and compiles accepted logic IR into SMT-LIB artifacts.
 - **Clustering Module**: Compares formalization candidates with solver-backed implication checks to identify stable or divergent interpretations.
-- **Logic Analysis Module**: Groups representative claims by source spec file, compiles each group into a single combined SMT-LIB file with named assertions and unsat-core support, invokes Z3 once per spec, and derives finding severity from the highest-obligation claim in the unsat core.
+- **Logic Analysis Module**: Groups representative claims by source spec file, compiles each group into a single combined SMT-LIB file with named assertions, invokes Z3 per spec using a two-phase approach (satisfiability check first, unsat-core extraction only on contradiction), derives finding severity from the highest-obligation claim in the unsat core when contradictions are found, and performs deeper pairwise guard-activation contradiction checks and completeness gap detection when the global check returns sat.
 - **Source Traceability Module**: Relates claims to source files, traced tests, and verified contracts when `--src` is enabled.
 - **Code-Derived Spec Generator**: Produces EARS-preferring behavioral specifications per capability from source evidence, operating blind to original requirement text. Persists output as Markdown files in `gen_specs/` under the output directory.
 - **Code-Derived Formalization Module**: Applies the same formalization pipeline (LLM sampling, schema validation, equivalence clustering, representative selection) to code-derived specifications. Persists SMT-LIB artifacts in `gen_specs_smt/` under the output directory.
@@ -151,6 +151,49 @@ The design keeps evolution points explicit:
 - **Best-effort partial success when formalization or qualitative phases fail**: Rejected because incomplete evidence could be mistaken for a trustworthy result.
 
 ## Component Design
+
+### Branded Domain Types
+
+The domain uses compile-time branded types to prevent accidental interchange of semantically distinct values that share the same runtime representation:
+
+- **OutputDirPath**: Absolute directory path used as the root for all artifact output.
+- **RelativePath**: Path relative to an OutputDirPath, confined within the output directory.
+- **SmtlibFilePath**: Relative path to an SMT-LIB artifact file (`.smt2` extension).
+- **ClaimId**: Canonical requirement or scenario identifier (e.g., `CAT-PARSE-EARS`).
+- **CapabilityName**: Lowercase kebab-case capability name (e.g., `catalog-and-parse`).
+- **SanitizedClaimId**: SMT-safe identifier produced by sanitization from a ClaimId.
+- **ModelName**: LLM model identifier passed to the `opencode` adapter.
+- **SmtlibContent**: SMT-LIB formula text content (not a file path).
+
+Branded values are constructed only through validated construction functions at trust boundaries. Interior code passes branded values through without casting.
+
+### Error Hierarchy
+
+The domain defines a structured error hierarchy using a generic `ErrorBase<C>` discriminated union pattern with 10 error categories:
+
+- **ArgumentError**: CLI argument parsing failure.
+- **ConfigError**: Configuration loading or validation failure.
+- **DependencyError**: Missing external binary dependency.
+- **CatalogError**: Input document discovery or reading failure.
+- **ValidationError**: Schema or structure validation failure.
+- **AdapterError**: External process adapter failure (spawn, timeout, invalid response).
+- **QualitativeError**: LLM-backed qualitative review failure.
+- **FormalizationError**: LLM-backed formalization failure.
+- **PipelineError**: Pipeline phase orchestration failure.
+- **OutputError**: File or manifest output failure.
+
+Narrowed boundary unions (`PipelinePhaseError`, `AdapterBoundaryError`, `CliResolutionError`) constrain which categories can appear at specific subsystem boundaries.
+
+Exit codes 2–11 correspond to the `ErrorCategory` discriminated union in the error hierarchy. Each category maps to a fixed code via `EXIT_CODE_BY_CATEGORY`. Fatal errors in any category prevent the tool from producing a trustworthy evidence set.
+
+### Assertion Utilities
+
+Runtime invariant enforcement uses four assertion functions for programmer errors and broken structural invariants (not for expected domain failures, which use `Result<T, E>`):
+
+- **precondition()**: Asserts caller contract obligations at function boundaries.
+- **invariant()**: Asserts structural invariants within functions or modules.
+- **postcondition()**: Asserts guaranteed outcomes before returning.
+- **assertNever()**: Asserts exhaustive handling in discriminated union switches.
 
 ### Key Components
 
@@ -469,7 +512,7 @@ Primary modules: `src/domain/formal/logic-analysis.ts`, `src/domain/formal/smtli
 ```mermaid
 flowchart TD
     A[Receive representative formalizations grouped by spec file] --> B[Select next spec group]
-    B --> C[Merge sort and function declarations with deduplication]
+    B --> C[Merge variable and function declarations with deduplication]
     C --> D{Signature conflicts detected?}
     D -- yes --> E[Emit merge-conflict findings and exclude conflicting claims]
     D -- no --> F[Continue]
@@ -481,10 +524,19 @@ flowchart TD
     J -- unsat --> K[Parse unsat core to identify conflicting claims]
     K --> L[Derive severity from highest-obligation claim in core]
     L --> M[Record contradiction with unsat-core evidence]
-    J -- sat --> N[Record mutual consistency - no finding]
+    J -- error --> N2[Emit solver-error finding with full evidence]
+    J -- sat --> N[Proceed to deeper pairwise analysis]
     J -- timeout/unknown --> O[Record inconclusive finding at warning severity]
+    N --> N3[Extract conditional assertions as implications]
+    N3 --> N4[Run pairwise guard-activation checks across claim pairs]
+    N4 --> N5{All assertions conditional?}
+    N5 -- yes --> N6[Run completeness gap detection]
+    N5 -- no --> N7[Skip completeness check]
+    N6 --> N7
+    N7 --> P2[Record pairwise and completeness findings]
     M --> P{More spec groups?}
-    N --> P
+    N2 --> P
+    P2 --> P
     O --> P
     P -- yes --> B
     P -- no --> Q[Persist all solver inputs and outputs verbatim]
@@ -495,9 +547,12 @@ Contract notes:
 - All claims from one spec file are combined into exactly one SMT-LIB file with named assertions.
 - Named assertions use `:named` labels encoding claim ID and assertion index for unsat-core traceability.
 - Contradiction severity is derived from the highest-obligation claim in the unsat core (mandatory → error, advisory → warning, informational → info).
-- Sort and function declarations are deduplicated across claims; signature conflicts produce merge-conflict findings.
+- Variable and function declarations are deduplicated across claims; signature conflicts produce merge-conflict findings.
 - Solver inputs and outputs are persisted verbatim regardless of result.
-- One Z3 invocation per spec file (not per claim) detects both self-contradictions and inter-claim contradictions.
+- The global satisfiability check uses up to two Z3 invocations per spec file (Phase 1: satisfiability check without unsat-core overhead; Phase 2: unsat-core extraction, only when Phase 1 detects contradiction). This two-phase approach avoids the performance/memory cost of `(set-option :produce-unsat-cores true)` in the common SAT case.
+- When the global check returns sat, pairwise guard-activation checks invoke Z3 for each candidate pair (bounded by a configurable pair limit) to detect conditional contradictions hidden by vacuous truth.
+- Completeness gap detection runs only when all assertions are conditional (implications); it negates all guards and checks for uncovered states.
+- Z3 errors (malformed input producing `(error ...)` diagnostics) are surfaced as `logic.solver_error` findings rather than silently treated as success.
 
 #### Source Traceability
 
@@ -806,7 +861,7 @@ Code/component responsibilities:
 - **`src/domain/model.ts`**: Core type definitions for documents, parsed structures, document classifications, and section metadata.
 - **`src/domain/findings.ts`**: Finding type definitions with severity levels (error, warning, info), category taxonomy, provenance shape, and evidence attachment rules.
 - **`src/domain/claim-graph.ts`**: Claim normalization, typed claim records with obligation levels (mandatory, advisory, informational), provenance attachment, and orphaned-claim detection.
-- **`src/domain/logic-ir.ts`**: Typed logic intermediate representation for formalized claims, including sort declarations, function symbols, assertions, and obligation metadata.
+- **`src/domain/logic-ir.ts`**: Typed logic intermediate representation for formalized claims, including variable declarations (each with a name and SMT-LIB sort such as `Bool`, `Int`, `Real`, `String`), function symbols, assertions, and obligation metadata. The `variables` field replaces the former `sorts` field; the deprecated `LogicSortDeclaration` type alias is retained for transitional compatibility.
 - **`src/domain/clustering.ts`**: Equivalence cluster construction from pairwise implication results, stability threshold evaluation, and representative sample selection.
 - **`src/domain/errors.ts`**: Structured error hierarchy using `ErrorBase<C>` generic discriminated union with 10 error categories (`ArgumentError`, `ConfigError`, `DependencyError`, `CatalogError`, `ValidationError`, `AdapterError`, `QualitativeError`, `FormalizationError`, `PipelineError`, `OutputError`). Provides narrowed boundary unions (`PipelinePhaseError`, `AdapterBoundaryError`, `CliResolutionError`), `makeError()` and `makeTypedError()` factories, `exitCodeForError()` for per-category exit code resolution (codes 2–11), and `renderErrorLines()` for stderr output.
 - **`src/domain/assert.ts`**: Runtime invariant enforcement utilities: `precondition()`, `invariant()`, `postcondition()` as assertion functions with TypeScript type narrowing (`asserts condition`), and `assertNever()` for exhaustive discriminated union handling. Reserved for programmer errors and broken structural invariants, not expected domain failures.
@@ -823,8 +878,8 @@ Code/component responsibilities:
 - **`src/domain/formal/formalize.ts`**: Packages claims for LLM-backed formalization sampling. Constructs prompts with claim context and validates returned formalization samples against logic IR schema.
 - **`src/domain/formal/validate.ts`**: Schema validation for formalization samples including sort consistency, assertion well-formedness, and identifier format checks.
 - **`src/domain/formal/clustering.ts`**: Pairwise implication query generation, equivalence cluster construction, stability threshold evaluation, and ambiguity finding emission.
-- **`src/domain/formal/smtlib.ts`**: Compiles logic IR into SMT-LIB artifacts. Handles identifier sanitization (replacing unsafe characters with `_` plus hex escape), reversible mapping comments, and obligation-annotated query generation. Also provides `compileSpecSmtlib()` for per-spec combined compilation with declaration deduplication, named assertions (`(assert (! expr :named label))`), function signature conflict detection, and `parseUnsatCore()` for extracting named assertion labels from Z3 unsat-core output.
-- **`src/domain/formal/logic-analysis.ts`**: Per-spec combined solver analysis. Groups claims by spec file (`SpecClaimGroup`), compiles each group into one SMT-LIB file with `(set-option :produce-unsat-cores true)`, invokes Z3 once per spec with `(check-sat)` and `(get-unsat-core)`, parses unsat cores to identify conflicting claims, and derives finding severity from the highest-obligation claim in the core.
+- **`src/domain/formal/smtlib.ts`**: Compiles logic IR into SMT-LIB artifacts. Emits `(declare-const <name> <sort>)` for variable declarations and `(declare-fun ...)` for function symbols. Handles identifier sanitization (replacing unsafe characters with `_` plus hex escape), reversible mapping comments, and obligation-annotated query generation. Also provides `compileSpecSmtlib()` for per-spec combined compilation with declaration deduplication, named assertions (`(assert (! expr :named label))`), function signature conflict detection, and `parseUnsatCore()` for extracting named assertion labels from Z3 unsat-core output.
+- **`src/domain/formal/logic-analysis.ts`**: Per-spec combined solver analysis. Groups claims by spec file (`SpecClaimGroup`), compiles each group into one SMT-LIB file with named assertions, and invokes Z3 using a two-phase approach: Phase 1 appends only `(check-sat)` for a lightweight satisfiability check; Phase 2 (only on UNSAT) prepends `(set-option :produce-unsat-cores true)` and appends `(check-sat)` + `(get-unsat-core)` to identify conflicting claims. Parses unsat cores to map labels back to claim IDs, and derives finding severity from the highest-obligation claim in the core. When the global check returns sat, performs deeper analysis: pairwise guard-activation contradiction checking (forces conditional assertion guards active to detect conflicts hidden by vacuous truth) and completeness gap detection (negates all guards to find uncovered states). Handles Z3 error results explicitly as `logic.solver_error` findings.
 - **`src/domain/code-backwards/trace.ts`**: Source traceability: scans declared source directory for canonical identifiers in implementation files, test files, and verified contracts. Reports supported and missing traces.
 - **`src/domain/code-backwards/derive.ts`**: Generates EARS-preferring code-derived specifications per capability from source evidence. Operates blind to original requirement text. Persists output as Markdown files in `gen_specs/` under the output directory.
 - **`src/domain/code-backwards/gen-formal.ts`**: Applies the formalization pipeline (LLM sampling, schema validation, equivalence clustering) to code-derived specifications. Persists SMT-LIB artifacts in `gen_specs_smt/` under the output directory.

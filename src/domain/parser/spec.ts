@@ -288,13 +288,22 @@ const UNWANTED_BEHAVIOR_INDICATORS = [
  *
  * @remarks
  * Precondition: `body` is the trimmed, non-empty body text of a parsed requirement.
- * Postcondition: returns one of the five recognized EARS types. The
- * `"unwanted-behavior"` pattern is distinguished from `"conditional"` by the
- * presence of negative-scenario indicators between `IF` and `THEN`.
+ * Postcondition: returns one of the recognized EARS types. The `"complex"` pattern
+ * is checked before `"event-driven"` and `"state-driven"` so that WHILE+WHEN
+ * combinations are not misclassified. The `"optional"` pattern is checked before
+ * `"ubiquitous"` so that WHERE-gated requirements are distinguished from
+ * unconditional obligations. The `"unwanted-behavior"` pattern is distinguished
+ * from `"conditional"` by the presence of negative-scenario indicators between
+ * `IF` and `THEN`.
  * Invariant: classification is purely textual — no external state is consulted.
  */
 function classifyEarsType(body: string): ParsedRequirement["earsType"] {
   const normalized = body.trim().toUpperCase();
+  // Complex: WHILE <precondition>, WHEN <trigger> — must be checked before
+  // individual event-driven (WHEN) or state-driven (WHILE) patterns.
+  if (normalized.includes("WHILE") && normalized.includes("WHEN") && normalized.includes("THE") && normalized.includes("SHALL")) {
+    return "complex";
+  }
   if (normalized.includes("WHEN") && normalized.includes("THE") && normalized.includes("SHALL")) {
     return "event-driven";
   }
@@ -312,6 +321,11 @@ function classifyEarsType(body: string): ParsedRequirement["earsType"] {
       (indicator) => conditionClause.includes(indicator),
     );
     return hasUnwantedIndicator ? "unwanted-behavior" : "conditional";
+  }
+  // Optional: WHERE <feature is included> — must be checked before ubiquitous
+  // so that feature-gated requirements are not classified as unconditional.
+  if (normalized.includes("WHERE") && normalized.includes("THE") && normalized.includes("SHALL")) {
+    return "optional";
   }
   // Ubiquitous: unconditional obligation with no trigger keyword.
   if (normalized.includes("THE") && normalized.includes("SHALL")) {

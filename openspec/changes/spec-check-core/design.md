@@ -80,7 +80,7 @@ The core phases consume typed inputs and produce typed outputs. The `opencode` a
 - **Coverage Module**: Compares proposal and design claims against capability specs and references to detect missing coverage, contradiction, and semantic mismatch.
 - **Formalization Module**: Requests multiple LLM-backed formalization samples, validates them, and compiles accepted logic IR into SMT-LIB artifacts.
 - **Clustering Module**: Compares formalization candidates with solver-backed implication checks to identify stable or divergent interpretations.
-- **Logic Analysis Module**: Runs obligation-aware solver passes, captures contradictions and gaps, and preserves counterexamples and inconclusive results.
+- **Logic Analysis Module**: Groups representative claims by source spec file, compiles each group into a single combined SMT-LIB file with named assertions and unsat-core support, invokes Z3 once per spec, and derives finding severity from the highest-obligation claim in the unsat core.
 - **Source Traceability Module**: Relates claims to source files, traced tests, and verified contracts when `--src` is enabled.
 - **Code-Derived Spec Generator**: Produces EARS-preferring behavioral specifications per capability from source evidence, operating blind to original requirement text. Persists output as Markdown files in `gen_specs/` under the output directory.
 - **Code-Derived Formalization Module**: Applies the same formalization pipeline (LLM sampling, schema validation, equivalence clustering, representative selection) to code-derived specifications. Persists SMT-LIB artifacts in `gen_specs_smt/` under the output directory.
@@ -462,34 +462,42 @@ Contract notes:
 - Stability threshold is configurable.
 - Ambiguity is a finding, not a failure.
 
-#### Obligation-Aware Solver Analysis
+#### Per-Spec Combined Solver Analysis
 
 Primary modules: `src/domain/formal/logic-analysis.ts`, `src/domain/formal/smtlib.ts`, `src/adapters/z3.ts`.
 
 ```mermaid
 flowchart TD
-    A[Receive representative formalizations] --> B[Compile SMT-LIB artifacts with sanitized identifiers]
-    B --> C[Run mandatory-obligation pass]
-    C --> D[Submit queries to z3 with per-query timeout]
-    D --> E{Query result?}
-    E -- unsat --> F[Record contradiction with solver evidence]
-    E -- sat --> G[Record satisfiable result]
-    E -- timeout/unknown --> H[Record inconclusive finding]
-    F --> I{More queries in pass?}
-    G --> I
-    H --> I
-    I -- yes --> D
-    I -- no --> J[Run advisory-obligation pass]
-    J --> K[Submit advisory queries]
-    K --> L[Record advisory findings at lower severity]
-    L --> M[Persist all solver inputs and outputs verbatim]
-    M --> N[Return logic analysis findings]
+    A[Receive representative formalizations grouped by spec file] --> B[Select next spec group]
+    B --> C[Merge sort and function declarations with deduplication]
+    C --> D{Signature conflicts detected?}
+    D -- yes --> E[Emit merge-conflict findings and exclude conflicting claims]
+    D -- no --> F[Continue]
+    E --> F
+    F --> G[Compile combined SMT-LIB with named assertions]
+    G --> H[Prepend set-option produce-unsat-cores true]
+    H --> I[Submit combined query to z3 with per-query timeout]
+    I --> J{Query result?}
+    J -- unsat --> K[Parse unsat core to identify conflicting claims]
+    K --> L[Derive severity from highest-obligation claim in core]
+    L --> M[Record contradiction with unsat-core evidence]
+    J -- sat --> N[Record mutual consistency - no finding]
+    J -- timeout/unknown --> O[Record inconclusive finding at warning severity]
+    M --> P{More spec groups?}
+    N --> P
+    O --> P
+    P -- yes --> B
+    P -- no --> Q[Persist all solver inputs and outputs verbatim]
+    Q --> R[Return logic analysis findings]
 ```
 
 Contract notes:
-- Mandatory contradictions produce higher-severity findings than advisory contradictions.
+- All claims from one spec file are combined into exactly one SMT-LIB file with named assertions.
+- Named assertions use `:named` labels encoding claim ID and assertion index for unsat-core traceability.
+- Contradiction severity is derived from the highest-obligation claim in the unsat core (mandatory → error, advisory → warning, informational → info).
+- Sort and function declarations are deduplicated across claims; signature conflicts produce merge-conflict findings.
 - Solver inputs and outputs are persisted verbatim regardless of result.
-- Sanitized identifiers include reversible mapping comments in SMT-LIB files.
+- One Z3 invocation per spec file (not per claim) detects both self-contradictions and inter-claim contradictions.
 
 #### Source Traceability
 
@@ -815,12 +823,12 @@ Code/component responsibilities:
 - **`src/domain/formal/formalize.ts`**: Packages claims for LLM-backed formalization sampling. Constructs prompts with claim context and validates returned formalization samples against logic IR schema.
 - **`src/domain/formal/validate.ts`**: Schema validation for formalization samples including sort consistency, assertion well-formedness, and identifier format checks.
 - **`src/domain/formal/clustering.ts`**: Pairwise implication query generation, equivalence cluster construction, stability threshold evaluation, and ambiguity finding emission.
-- **`src/domain/formal/smtlib.ts`**: Compiles logic IR into SMT-LIB artifacts. Handles identifier sanitization (replacing unsafe characters with `_` plus hex escape), reversible mapping comments, and obligation-annotated query generation.
-- **`src/domain/formal/logic-analysis.ts`**: Obligation-aware solver pass coordination. Runs mandatory-obligation queries first, then advisory queries. Classifies results by severity and preserves counterexamples, models, and inconclusive outcomes.
+- **`src/domain/formal/smtlib.ts`**: Compiles logic IR into SMT-LIB artifacts. Handles identifier sanitization (replacing unsafe characters with `_` plus hex escape), reversible mapping comments, and obligation-annotated query generation. Also provides `compileSpecSmtlib()` for per-spec combined compilation with declaration deduplication, named assertions (`(assert (! expr :named label))`), function signature conflict detection, and `parseUnsatCore()` for extracting named assertion labels from Z3 unsat-core output.
+- **`src/domain/formal/logic-analysis.ts`**: Per-spec combined solver analysis. Groups claims by spec file (`SpecClaimGroup`), compiles each group into one SMT-LIB file with `(set-option :produce-unsat-cores true)`, invokes Z3 once per spec with `(check-sat)` and `(get-unsat-core)`, parses unsat cores to identify conflicting claims, and derives finding severity from the highest-obligation claim in the core.
 - **`src/domain/code-backwards/trace.ts`**: Source traceability: scans declared source directory for canonical identifiers in implementation files, test files, and verified contracts. Reports supported and missing traces.
 - **`src/domain/code-backwards/derive.ts`**: Generates EARS-preferring code-derived specifications per capability from source evidence. Operates blind to original requirement text. Persists output as Markdown files in `gen_specs/` under the output directory.
 - **`src/domain/code-backwards/gen-formal.ts`**: Applies the formalization pipeline (LLM sampling, schema validation, equivalence clustering) to code-derived specifications. Persists SMT-LIB artifacts in `gen_specs_smt/` under the output directory.
-- **`src/domain/code-backwards/gen-logic.ts`**: Runs obligation-aware solver analysis on code-derived formalizations for internal consistency. Produces `report_2.logic.md`.
+- **`src/domain/code-backwards/gen-logic.ts`**: Groups code-derived claims by capability into `SpecClaimGroup` arrays and delegates to `runLogicAnalysis` for per-capability combined solver analysis. Produces `report_2.logic.md`.
 - **`src/domain/code-backwards/cross-implication.ts`**: Bidirectional solver-backed implication checks between original (`smt/`) and code-derived (`gen_specs_smt/`) formalizations. Classifies each claim pair as same, stronger, weaker, different, or uncertain. Persists all implication queries and results. Produces per-capability divergence summary.
 - **`src/domain/code-backwards/blind-compare.ts`**: Maintains the no-requirement-text boundary. Prepares blind comparison inputs where code-derived side receives only code artifacts. Provides explanatory rationale for cross-side implication classifications. Serves as fallback classifier when solver implication is inconclusive.
 - **`src/domain/tasks-analysis.ts`**: Task-summary extraction, completed-task evidence analysis, and consistency checking against the claim graph.

@@ -1,6 +1,6 @@
 import type { OutputDirPath } from "../branded.js";
 import type { Finding } from "../findings.js";
-import { runLogicAnalysis } from "../formal/logic-analysis.js";
+import { runLogicAnalysis, type SpecClaimGroup } from "../formal/logic-analysis.js";
 import type { LogicIrClaim } from "../logic-ir.js";
 
 /**
@@ -18,21 +18,24 @@ export interface GeneratedLogicOutput {
 /**
  * Run Z3 satisfiability analysis on code-derived formalized claims.
  *
- * @param input - formalized claims to analyze, output directory, and optional Z3 path
+ * @param input - formalized claims (with capability) to analyze, output directory, and optional Z3 path
  * @returns findings and markdown report from the logic analysis pass
  *
  * @remarks
- * Precondition: `input.claims` contains valid Logic IR claims.
- * Postcondition: delegates to `runLogicAnalysis` with the same concurrency and
- * artifact-persistence semantics.
+ * Precondition: `input.claims` contains valid Logic IR claims with capability metadata.
+ * Postcondition: claims are grouped by capability into SpecClaimGroups for per-spec
+ * combined analysis (one .smt2 per capability).
  */
 export async function analyzeGeneratedLogic(input: {
-  readonly claims: readonly LogicIrClaim[];
+  readonly claims: readonly { readonly capability: string; readonly representative: LogicIrClaim }[];
   readonly outputDir: OutputDirPath;
   readonly z3Path?: string;
 }): Promise<GeneratedLogicOutput> {
+  // Group claims by capability for per-spec combined SMT-LIB.
+  const groups = groupByCapability(input.claims);
+
   const logic = await runLogicAnalysis({
-    claims: input.claims,
+    groups,
     outputDir: input.outputDir,
     ...(input.z3Path === undefined ? {} : { z3Path: input.z3Path }),
   });
@@ -41,4 +44,28 @@ export async function analyzeGeneratedLogic(input: {
     findings: logic.findings,
     reportMarkdown: logic.reportMarkdown,
   };
+}
+
+/**
+ * Group generated claims by capability into SpecClaimGroups.
+ * Uses synthetic file paths: `<gen_specs/{capability}.md>` for provenance.
+ */
+function groupByCapability(
+  claims: readonly { readonly capability: string; readonly representative: LogicIrClaim }[],
+): SpecClaimGroup[] {
+  const groups = new Map<string, LogicIrClaim[]>();
+  const order: string[] = [];
+
+  for (const claim of claims) {
+    const key = `<gen_specs/${claim.capability}.md>`;
+    let group = groups.get(key);
+    if (group === undefined) {
+      group = [];
+      groups.set(key, group);
+      order.push(key);
+    }
+    group.push(claim.representative);
+  }
+
+  return order.map((specFile) => ({ specFile, claims: groups.get(specFile)! }));
 }

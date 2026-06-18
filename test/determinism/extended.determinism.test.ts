@@ -59,16 +59,19 @@ describe("determinism - extended", () => {
     traceSpec("FLA-RUN-LOGIC", "FLA-SOLVER-PERSIST");
     const { runLogicAnalysis } = await import("../../src/domain/formal/logic-analysis.js");
 
-    const claims = [{
-      claimId: toClaimId("DET-LOGIC-R1"),
-      obligation: "mandatory" as const,
-      sorts: [{ name: "S", sort: "Bool" as const }],
-      functions: [] as const,
-      assertions: [{ id: "A1", expr: "true" }],
+    const groups = [{
+      specFile: "test/determinism.md",
+      claims: [{
+        claimId: toClaimId("DET-LOGIC-R1"),
+        obligation: "mandatory" as const,
+        sorts: [{ name: "S", sort: "Bool" as const }],
+        functions: [] as const,
+        assertions: [{ id: "A1", expr: "true" }],
+      }],
     }];
 
-    const outputA = await runLogicAnalysis({ claims, outputDir: toOutputDirPath("/tmp/det-a") });
-    const outputB = await runLogicAnalysis({ claims, outputDir: toOutputDirPath("/tmp/det-b") });
+    const outputA = await runLogicAnalysis({ groups, outputDir: toOutputDirPath("/tmp/det-a") });
+    const outputB = await runLogicAnalysis({ groups, outputDir: toOutputDirPath("/tmp/det-b") });
 
     expect(outputA.findings).toEqual(outputB.findings);
     expect(outputA.reportMarkdown).toBe(outputB.reportMarkdown);

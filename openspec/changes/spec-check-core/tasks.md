@@ -21,7 +21,7 @@
 - Under-specified decision: build-time version embedding was implemented via esbuild banner constant (`__SPEC_CHECK_VERSION__`) rather than runtime package traversal to keep `--version` deterministic in bundled output.
 - Developer handoff notes: all bare `throw new Error` statements have been eliminated from the domain layer; use `precondition()`/`invariant()`/`postcondition()` for programmer errors and `Result.err()` for expected domain failures. Never mix these: assertions are for states that indicate broken code, Results are for states that indicate bad input.
 - Developer handoff notes: branded types use `as` casts in construction functions; validation responsibility is at the trust boundary where raw strings enter the system. When passing already-branded values between functions, no conversion is needed.
-- Validation evidence: `npm run typecheck`, `npm run build`, and `npm run test` pass (50 files, 285 tests, 0 failures).
+- Validation evidence: `npm run typecheck`, `npm run build`, and `npm run test` pass (52 files, 321 tests, 0 failures).
 
 ## 2. Catalog and Parser
 
@@ -45,7 +45,7 @@
 - Under-specified decision: parser behavior is intentionally conservative; unmatched non-empty lines are preserved as evidence findings rather than discarded, matching the no-silent-loss invariant.
 - Bug fix: the spec parser's outer loop now uses `Math.max(parsed.endLine - 1, index)` instead of `parsed.endLine - 1` when advancing past consumed requirement/scenario blocks. This prevents an infinite loop when a requirement heading is immediately followed by another heading (no body lines), which caused `endLine` to equal the current index and the loop to never advance. Discovered by adversarial input testing.
 - Developer handoff notes: parser functions return 0-indexed `endLine` values that the outer `parseSpec` loop interprets as "last consumed line"; the `Math.max` guard ensures forward progress regardless of how `parseRequirement`/`parseScenario` resolve their end boundaries.
-- Validation evidence: `npx vitest run` passes (50 files, 285 tests); adversarial inputs including empty documents, heading-only documents, 10KB lines, unicode edge cases, and null bytes all terminate successfully.
+- Validation evidence: `npx vitest run` passes (52 files, 321 tests); adversarial inputs including empty documents, heading-only documents, 10KB lines, unicode edge cases, and null bytes all terminate successfully.
 
 ## 3. Claim Graph and Coverage Analysis
 
@@ -107,18 +107,26 @@
 - [x] 6.2 Implement pairwise implication query generation for formalization sample clustering.
 - [x] 6.3 Implement equivalence cluster construction, stability threshold evaluation, and representative sample selection.
 - [x] 6.4 Implement ambiguity finding emission when no cluster meets the stability threshold.
-- [x] 6.5 Implement obligation-aware solver analysis passes: mandatory-obligation queries first (higher-severity findings), then advisory-obligation queries (lower-severity findings).
-- [x] 6.6 Implement solver evidence persistence: persist all SMT-LIB inputs, solver stdout/stderr, counterexamples, models, unsat cores, and inconclusive results verbatim under the output directory.
+- [x] 6.5 Implement per-spec combined solver analysis: group representative claims by source spec file, compile each group into one SMT-LIB with named assertions and unsat-core support, invoke Z3 once per spec.
+- [x] 6.6 Implement solver evidence persistence: persist all combined per-spec SMT-LIB inputs, solver stdout (including unsat core), stderr, and inconclusive results verbatim under the output directory.
 - [x] 6.7 Implement `report_1.logic.md` generation with preserved solver evidence references.
+- [x] 6.8 Implement `compileSpecSmtlib()` for per-spec compilation with declaration deduplication, named assertions, function signature conflict detection, and `parseUnsatCore()` for unsat-core parsing.
+- [x] 6.9 Implement `groupRepresentativesBySpec()` to map clustered representatives back to their source spec files via formalization candidate provenance.
 
 ### Clustering and logic analysis change summary
 - What changed: implemented `z3` adapter (`src/adapters/z3.ts`) with stdin SMT piping, stdout/stderr capture, timeout handling, and explicit result classification (`sat`/`unsat`/`timeout`/`unknown`/`error`). The `runZ3Query` function accepts `SmtlibContent` branded input.
 - Clustering pipeline: added pairwise implication query generation, equivalence graph construction, deterministic cluster building, stability-threshold representative selection, and ambiguity emission in `src/domain/formal/clustering.ts`. Uses `precondition()` assertions for internal invariants (non-empty sample arrays, valid cluster indices).
-- Obligation-aware logic pass: added mandatory-first then advisory solver analysis with severity differentiation and persisted solver artifacts in `src/domain/formal/logic-analysis.ts`.
-- Evidence persistence: solver inputs/outputs are written as first-class artifacts under output paths (including inconclusive cases), then referenced from findings and reports.
+- Per-spec combined logic analysis: replaced per-claim solver analysis with per-spec combined analysis. All representative claims from one spec file are merged into a single `.smt2` file (`compileSpecSmtlib()` in `src/domain/formal/smtlib.ts`). This detects both self-contradictions and inter-claim contradictions within the same spec. The combined file uses `(set-option :produce-unsat-cores true)` and named assertions (`(assert (! expr :named label))`) so that Z3's `(get-unsat-core)` output can be parsed back to specific conflicting claim IDs.
+- Declaration merging: sort and function declarations are deduplicated across claims in the same spec. When two claims declare the same function name with incompatible signatures, a `logic.merge_conflict` finding is emitted and the conflicting claim is excluded from the combined file.
+- Severity derivation: finding severity is derived from the highest-obligation claim in the unsat core (mandatory → error, advisory → warning, informational → info), replacing the previous mandatory-first/advisory-second two-pass model.
+- Pipeline grouping: `groupRepresentativesBySpec()` in `src/cli/run-cli.ts` maps each representative's `claimId` back to its candidate's `provenance.file` and builds `SpecClaimGroup[]` for the logic analysis phase.
+- Code-derived logic: `gen-logic.ts` groups claims by capability into `SpecClaimGroup[]` and delegates to the same `runLogicAnalysis` for per-capability combined analysis.
+- Evidence persistence: solver inputs/outputs are written as first-class artifacts under output paths (`smt/<sanitizedSpecId>.smt2`, `.stdout.txt`, `.stderr.txt`), then referenced from findings and reports.
 - Report generation: `report_1.logic.md` is rendered from persisted logic findings/evidence paths.
-- Under-specified decision: inconclusive pairwise implication results are treated as non-equivalent edges (not auto-merged or auto-split), preserving uncertainty explicitly.
+- Under-specified decision: inconclusive pairwise implication results (during clustering) are treated as non-equivalent edges (not auto-merged or auto-split), preserving uncertainty explicitly.
 - Developer handoff notes: fault injection testing confirms Z3 timeout (SIGTERM signal), crash (non-zero exit with garbage stderr), and spawn failure (ENOENT) are all handled gracefully without propagating untyped exceptions.
+- Developer handoff notes: the original `compileSmtlib()` function (per-claim, no unsat-core) is retained for use by the cross-implication module, which needs individual claim SMT-LIB for pairwise implication queries. `compileSpecSmtlib()` is used only for the main logic analysis phase.
+- Validation evidence: `npx vitest run` passes (52 files, 321 tests, 0 failures); `npx tsc --noEmit` reports zero type errors; esbuild bundle succeeds.
 
 ## 7. Source Traceability and Code-Backwards Analysis
 
@@ -129,7 +137,7 @@
 - [x] 7.5 Implement task-to-source consistency analysis when both task summaries and source evidence are available.
 - [x] 7.6 Implement code-derived spec generation: EARS-preferring behavioral specs per capability from source evidence, blind to original requirement text, persisted to `gen_specs/` under output directory.
 - [x] 7.7 Implement code-derived formalization: apply the same formalization pipeline (LLM sampling, schema validation, equivalence clustering, representative selection) to generated specs, persist SMT-LIB artifacts to `gen_specs_smt/` under output directory.
-- [x] 7.8 Implement code-derived solver analysis: run obligation-aware Z3 on code-derived formalizations for internal consistency, produce `report_2.logic.md`.
+- [x] 7.8 Implement code-derived solver analysis: group code-derived claims by capability, run per-capability combined Z3 analysis for internal consistency, produce `report_2.logic.md`.
 - [x] 7.9 Implement cross-side implication analysis: bidirectional solver-backed implication checks between original (`smt/`) and code-derived (`gen_specs_smt/`) formalizations with same/stronger/weaker/different/uncertain classification.
 - [x] 7.10 Integrate two-layer comparison: solver implication as primary classifier, blind comparison as explanatory layer providing human-readable rationale. Solver classification takes precedence when available; blind comparison serves as fallback when implication is uncertain.
 - [x] 7.11 Implement per-capability divergence summary as first-class evidence output in `report_2.compare.md`.
@@ -142,7 +150,7 @@
 - Evidence hierarchy: source traces are classified into primary/secondary/supporting tiers and used by downstream code-derived generation decisions.
 - Task-to-source consistency: added consistency checks between completed task evidence claims and traced source identifiers (`src/domain/tasks-analysis.ts`).
 - Code-derived generation: implemented capability-grouped EARS-preferring spec generation and persistence under `gen_specs/` with limitation findings when evidence is insufficient (`src/domain/code-backwards/derive.ts`).
-- Code-derived formal path: applied same formalize/validate/cluster pipeline to generated specs and persisted formal artifacts under `gen_specs_smt/` (`src/domain/code-backwards/gen-formal.ts`, `src/domain/code-backwards/gen-logic.ts`). These modules record error-severity findings for graceful degradation instead of throwing exceptions.
+- Code-derived formal path: applied same formalize/validate/cluster pipeline to generated specs and persisted formal artifacts under `gen_specs_smt/` (`src/domain/code-backwards/gen-formal.ts`, `src/domain/code-backwards/gen-logic.ts`). The `gen-logic.ts` module groups claims by capability into `SpecClaimGroup[]` and delegates to `runLogicAnalysis` for per-capability combined solver analysis. These modules record error-severity findings for graceful degradation instead of throwing exceptions.
 - Cross-side implication: implemented bidirectional implication classification (`same/stronger/weaker/different/uncertain`) with per-capability divergence summary and persisted query/result evidence (`src/domain/code-backwards/cross-implication.ts`). All output paths use `resolveConfinedOutputPath` to prevent path-traversal via crafted capability identifiers.
 - Blind comparison boundary: explanatory rationale layer only consumes generated-side context and explicitly surfaces boundary/context defects (`src/domain/code-backwards/blind-compare.ts`).
 - Report outputs: integrated `report_2.trace.md`, `report_2.logic.md`, and `report_2.compare.md` generation when `--src` is enabled.
@@ -186,7 +194,7 @@
 - [x] 9.15 Add distribution parity checks: verify `npm`-installed CLI and bundled `dist/spec-check.js` both produce help/version output and handle basic analysis correctly.
 
 ### Verification and evidence change summary
-- What changed: comprehensive test suite across 8 tiers totaling 50 files and 285 tests.
+- What changed: comprehensive test suite across 8 tiers totaling 52 files and 321 tests.
 - Contract tests (33 files): CLI, config, parser, opencode adapter, z3 adapter, manifest, distribution, traceability, claim graph, coverage, qualitative, formalize, clustering, logic analysis, derive, blind compare, cross implication, gen-formal, gen-logic, reporting, fs, errors, progress, run-state, smtlib, validate, task-parser, tasks-analysis, catalog, spec-trace, coverage-gaps, fault-injection, and adversarial-inputs.
 - Property tests (9 files): parser determinism/no-loss, claim graph provenance/obligation, coverage gap detection, manifest checksum, run-state append-only, blind-compare boundary, code-derived EARS conformance, cross-implication classification, and logic/SMT sanitization safety.
 - Invariant tests (2 files, 21 tests): global structural invariants (finding immutability, provenance, determinism) and safety/liveness properties (append-only, output confinement, claim-graph monotonicity).
@@ -199,7 +207,7 @@
 - Under-specified decision: oracle coverage for formalization is represented via deterministic compiler/validator behavior tests plus mocked formal sample contracts, keeping tests mechanical and repeatable without live model dependency.
 - Developer handoff notes: fault injection and adversarial tests run in the same vitest worker pool as all other tests without special configuration. The adversarial test file imports the full domain layer (parsers, claim-graph, smtlib, validate); if new adversarial scenarios cause memory pressure, consider splitting into focused files by subsystem.
 - Developer handoff notes: 3 tests that previously expected `.rejects.toThrow()` were updated to check for error-severity findings in results, matching the throw-to-finding conversions in `gen-formal.ts` and `blind-compare.ts`.
-- Validation evidence: `npx vitest run` passes (50 files, 285 tests, 0 failures); `npx tsc --noEmit` reports zero type errors; `npm run test:trace` with `DEVBOX_TRACE_COVERAGE=1` confirms all 189 canonical identifiers are covered by `traceSpec()` declarations with zero gaps.
+- Validation evidence: `npx vitest run` passes (52 files, 321 tests, 0 failures); `npx tsc --noEmit` reports zero type errors; `npm run test:trace` with `DEVBOX_TRACE_COVERAGE=1` confirms all 189 canonical identifiers are covered by `traceSpec()` declarations with zero gaps.
 
 ## 10. Packaging and Distribution
 

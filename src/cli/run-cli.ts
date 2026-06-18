@@ -17,9 +17,9 @@ import { parseSpec } from "../domain/parser/spec.js";
 import { parseTaskDocument } from "../domain/parser/task.js";
 import { analyzeCoverage } from "../domain/spec-forward/coverage.js";
 import { runQualitativePasses } from "../domain/spec-forward/qualitative.js";
-import { formalizeClaims } from "../domain/formal/formalize.js";
+import { formalizeClaims, type FormalizationCandidate } from "../domain/formal/formalize.js";
 import { clusterFormalizationSamples } from "../domain/formal/clustering.js";
-import { runLogicAnalysis } from "../domain/formal/logic-analysis.js";
+import { runLogicAnalysis, type SpecClaimGroup } from "../domain/formal/logic-analysis.js";
 import { writeManifest, buildManifestEntries } from "../domain/reporting/manifest.js";
 import { writePhaseReports, writeSummaryReport } from "../domain/reporting/render.js";
 import { traceClaimsToSource, type SourceTrace } from "../domain/code-backwards/trace.js";
@@ -271,10 +271,11 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
   });
   state = addFindings(clusterResult.state, clusterResult.value.findings);
 
-  // Phase 8: Run formal logic analysis on representative claims.
+  // Phase 8: Run formal logic analysis on per-spec combined SMT-LIB.
   const logicResult = await runPhaseWithResult("logic", state, async () => {
+    const groups = groupRepresentativesBySpec(formalResult.value.candidates, clusterResult.value.representatives);
     const output = await runLogicAnalysis({
-      claims: clusterResult.value.representatives,
+      groups,
       outputDir: config.output,
       ...(config.z3 === undefined ? {} : { z3Path: config.z3 }),
     });
@@ -497,6 +498,39 @@ async function runClusteringPhase(
 }
 
 /**
+ * Group representative claims by their source spec file for per-spec Z3 analysis.
+ *
+ * @param candidates - original formalization candidates (carry provenance.file)
+ * @param representatives - clustered representatives (same order as candidates)
+ * @returns SpecClaimGroup array with one entry per unique spec file
+ *
+ * @remarks
+ * Precondition: `representatives` is in the same order as `candidates` (one per candidate).
+ * Postcondition: every representative appears in exactly one group.
+ * Postcondition: groups are ordered by first occurrence of the spec file.
+ */
+function groupRepresentativesBySpec(
+  candidates: readonly FormalizationCandidate[],
+  representatives: readonly LogicIrClaim[],
+): SpecClaimGroup[] {
+  const groups = new Map<string, LogicIrClaim[]>();
+  const order: string[] = [];
+
+  for (let i = 0; i < representatives.length; i++) {
+    const file = candidates[i]!.claim.provenance.file;
+    let group = groups.get(file);
+    if (group === undefined) {
+      group = [];
+      groups.set(file, group);
+      order.push(file);
+    }
+    group.push(representatives[i]!);
+  }
+
+  return order.map((file) => ({ specFile: file, claims: groups.get(file)! }));
+}
+
+/**
  * Run source traceability and code-backwards phases.
  *
  * @param config - run configuration
@@ -595,7 +629,7 @@ async function runCodeBackwardsWork(
   allFindings.push(...generatedFormal.findings);
 
   const generatedLogic = await analyzeGeneratedLogic({
-    claims: generatedFormal.claims.map((c) => c.representative),
+    claims: generatedFormal.claims.map((c) => ({ capability: c.capability, representative: c.representative })),
     outputDir: config.output,
     ...(config.z3 === undefined ? {} : { z3Path: config.z3 }),
   });

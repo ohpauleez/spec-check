@@ -24,6 +24,10 @@ function makeClaim(claimId: string, obligation: "mandatory" | "advisory" | "info
   };
 }
 
+function makeGenClaim(capability: string, claimId: string, obligation: "mandatory" | "advisory" | "informational" = "mandatory") {
+  return { capability, representative: makeClaim(claimId, obligation) };
+}
+
 describe("gen-logic contract", () => {
   beforeEach(() => {
     vi.clearAllMocks();
@@ -40,12 +44,12 @@ describe("gen-logic contract", () => {
     });
 
     const output = await analyzeGeneratedLogic({
-      claims: [makeClaim("GEN-R1", "mandatory")],
+      claims: [makeGenClaim("test-cap", "GEN-R1")],
       outputDir: toOutputDirPath("/tmp/test-output"),
     });
 
-    expect(output.reportMarkdown).toContain("GEN-R1");
-    expect(output.reportMarkdown).toContain("sat");
+    expect(output.reportMarkdown).toContain("gen_specs/test-cap");
+    expect(output.reportMarkdown).toContain("SAT");
   });
 
   it("reports internal contradiction in code-derived formalizations", async () => {
@@ -53,13 +57,13 @@ describe("gen-logic contract", () => {
     const { runZ3Query } = await import("../../src/adapters/z3.js");
     vi.mocked(runZ3Query).mockResolvedValue({
       kind: "unsat",
-      stdout: "unsat\n",
+      stdout: "unsat\n(GEN_2DR2__a0)\n",
       stderr: "",
       exitCode: 0,
     });
 
     const output = await analyzeGeneratedLogic({
-      claims: [makeClaim("GEN-R2", "mandatory")],
+      claims: [makeGenClaim("test-cap", "GEN-R2")],
       outputDir: toOutputDirPath("/tmp/test-output"),
     });
 
@@ -79,11 +83,34 @@ describe("gen-logic contract", () => {
     });
 
     const output = await analyzeGeneratedLogic({
-      claims: [makeClaim("GEN-R3", "mandatory")],
+      claims: [makeGenClaim("test-cap", "GEN-R3")],
       outputDir: toOutputDirPath("/tmp/test-output"),
     });
 
     expect(output.findings.length).toBe(1);
     expect(output.findings[0]!.category).toBe("logic.inconclusive");
+  });
+
+  it("groups multiple claims from same capability into one Z3 call", async () => {
+    traceSpec("STC-GEN-LOGIC");
+    const { runZ3Query } = await import("../../src/adapters/z3.js");
+    vi.mocked(runZ3Query).mockResolvedValue({
+      kind: "sat",
+      stdout: "sat\n",
+      stderr: "",
+      exitCode: 0,
+    });
+
+    await analyzeGeneratedLogic({
+      claims: [
+        makeGenClaim("cap-a", "GEN-R4"),
+        makeGenClaim("cap-a", "GEN-R5"),
+        makeGenClaim("cap-b", "GEN-R6"),
+      ],
+      outputDir: toOutputDirPath("/tmp/test-output"),
+    });
+
+    // 2 Z3 calls: one for cap-a (2 claims), one for cap-b (1 claim).
+    expect(vi.mocked(runZ3Query)).toHaveBeenCalledTimes(2);
   });
 });

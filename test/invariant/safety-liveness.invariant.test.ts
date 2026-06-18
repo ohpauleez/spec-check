@@ -224,18 +224,21 @@ describe("liveness properties", () => {
     vi.mocked(writeOutputAtomic).mockResolvedValue(undefined);
 
     const output = await runLogicAnalysis({
-      claims: [{
-        claimId: toClaimId("R1"),
-        obligation: "mandatory",
-        sorts: [{ name: "S", sort: "Bool" }],
-        functions: [],
-        assertions: [{ id: "A1", expr: "true" }],
+      groups: [{
+        specFile: "test/invariant.md",
+        claims: [{
+          claimId: toClaimId("R1"),
+          obligation: "mandatory",
+          sorts: [{ name: "S", sort: "Bool" }],
+          functions: [],
+          assertions: [{ id: "A1", expr: "true" }],
+        }],
       }],
       outputDir: toOutputDirPath("/tmp/test-output"),
     });
 
-    expect(output.reportMarkdown).toContain("R1");
-    expect(output.reportMarkdown).toContain("sat");
+    expect(output.reportMarkdown).toContain("test/invariant.md");
+    expect(output.reportMarkdown).toContain("SAT");
   });
 
   it("LIVE-13: if z3 responds within timeout, cross-side implication completes", async () => {

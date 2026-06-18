@@ -108,12 +108,12 @@ describe("gen-formal contract", () => {
     expect(smtPaths[0]).toMatch(/^gen_specs_smt\/cat-pipeline\/.+\.smt2$/u);
   });
 
-  it("returns ambiguity findings from clustering when threshold not met", async () => {
+  it("with single sample clustering never produces ambiguity finding", async () => {
     traceSpec("STC-FORMAL-AMBIG");
     const { callOpencode } = await import("../../src/adapters/opencode.js");
     const { runZ3Query } = await import("../../src/adapters/z3.js");
     vi.mocked(callOpencode).mockResolvedValue(makeValidSample("SRC-R1"));
-    // All sat → no clusters merge → ambiguity
+    // With samplesPerClaim: 1, clustering is trivial — no pairwise checks needed.
     vi.mocked(runZ3Query).mockResolvedValue({
       kind: "sat",
       stdout: "sat\n",
@@ -127,7 +127,7 @@ describe("gen-formal contract", () => {
       model: toModelName("test-model"),
     });
 
-    expect(output.findings.some((f) => f.category === "formalization.ambiguity")).toBe(true);
+    expect(output.findings.some((f) => f.category === "formalization.ambiguity")).toBe(false);
   });
 
   it("records error finding on formalization failure (all samples invalid)", async () => {

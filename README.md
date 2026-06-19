@@ -18,7 +18,7 @@ Canonical project docs:
 At a high level it supports:
 - **specs-forward analysis**: qualitative review, coverage analysis, formalization, and solver-backed logic checks across `proposal.md`, `design.md`, and active `spec.md` files
 - **formalization pipeline**: translates requirement and scenario claims into typed logic IR, clusters alternate interpretations, and generates SMT-LIB artifacts for Z3 analysis
-- **optional source-backed analysis**: traces requirements to source evidence, generates EARS-preferring code-derived specifications, formalizes them through the same pipeline, and uses solver-backed cross-side implication as the primary strength classifier
+- **optional source-backed analysis**: traces requirements to source evidence, generates EARS-preferring code-derived specifications, formalizes them through the same pipeline, and uses solver-backed cross-side implication (ie: how strongly aligned are the specs and code?)
 - **evidence-preserving reports**: bounded Markdown reports with provenance, intermediate artifacts, and manifest-based completion semantics
 
 For the full design rationale, see [docs/design.md](docs/design.md).
@@ -52,15 +52,13 @@ spec-check [OPTIONS] [INPUT FILES...]
 
 ```sh
 node dist/spec-check.js \
-  openspec/changes/spec-check-core/proposal.md \
-  openspec/changes/spec-check-core/design.md \
-  openspec/changes/spec-check-core/specs/claim-graph-and-coverage/spec.md \
-  openspec/changes/spec-check-core/specs/claim-graph-and-coverage/spec.md \
-  openspec/changes/spec-check-core/specs/formalization-and-logic-analysis/spec.md \
-  openspec/changes/spec-check-core/specs/reporting-and-evidence/spec.md \
-  openspec/changes/spec-check-core/specs/source-traceability-and-code-backwards/spec.md \
-  openspec/changes/spec-check-core/proposal.md \
-  openspec/changes/spec-check-core/design.md \
+  openspec/changes/archive/spec-check-core/proposal.md \
+  openspec/changes/archive/2026-06-18-spec-check-core/design.md \
+  openspec/changes/archive/2026-06-18-spec-check-core/specs/catalog-and-parse/spec.md \
+  openspec/changes/archive/2026-06-18-spec-check-core/specs/claim-graph-and-coverage/spec.md \
+  openspec/changes/archive/2026-06-18-spec-check-core/specs/formalization-and-logic-analysis/spec.md \
+  openspec/changes/archive/2026-06-18-spec-check-core/specs/reporting-and-evidence/spec.md \
+  openspec/changes/archive/2026-06-18-spec-check-core/specs/source-traceability-and-code-backwards/spec.md \
   --src src
 ```
 
@@ -83,7 +81,7 @@ node dist/spec-check.js \
 |---|---|
 | 0 | Analysis completed without findings |
 | 1 | Analysis completed and surfaced one or more findings |
-| 2-11 | Fatal error prevented successful analysis (see [proposal](openspec/changes/archive/2026-06-18-spec-check-core/proposal.md) for full table) |
+| 2-11 | Fatal error prevented successful analysis (see [design doc](docs/design.md) for full table) |
 
 ## Makefile
 

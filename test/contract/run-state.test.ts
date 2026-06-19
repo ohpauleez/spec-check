@@ -8,6 +8,7 @@ const makeFinding = (desc: string): Finding => ({
   category: "test",
   provenance: { file: "test.md" },
   description: desc,
+  rationale: "test rationale",
   evidence: [{ kind: "test", value: "val" }],
 });
 

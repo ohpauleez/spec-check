@@ -1,3 +1,10 @@
+/**
+ * Tracks pipeline execution state — accumulated findings and completed phases —
+ * providing immutable state transitions for the verification pipeline.
+ *
+ * Domain layer — manages progression through ordered verification phases.
+ * Exports: RunState, createInitialRunState, addFindings, markPhaseComplete.
+ */
 import type { Finding } from "./findings.js";
 import { invariant, postcondition } from "./assert.js";
 
@@ -13,6 +20,13 @@ export interface RunState {
  *
  * @remarks
  * Postcondition: `findings.length === 0 && completedPhases.length === 0`.
+ *
+ * @example
+ * ```typescript
+ * const state = createInitialRunState();
+ * // state.findings === []
+ * // state.completedPhases === []
+ * ```
  */
 export function createInitialRunState(): RunState {
   return {
@@ -34,6 +48,17 @@ export function createInitialRunState(): RunState {
  * The spread construction structurally guarantees that all prior findings are
  * preserved. The O(1) length assertion validates this postcondition cheaply.
  * A full O(n) membership check runs only in development mode for defense-in-depth.
+ *
+ * @example
+ * ```typescript
+ * let state = createInitialRunState();
+ * const newFindings: Finding[] = [
+ *   { severity: "warning", category: "coherence", provenance: { file: "spec.md" },
+ *     description: "Ambiguous requirement", rationale: "...", evidence: [] },
+ * ];
+ * state = addFindings(state, newFindings);
+ * // state.findings.length === 1
+ * ```
  */
 export function addFindings(state: RunState, findings: readonly Finding[]): RunState {
   const nextFindings = [...state.findings, ...findings];
@@ -68,6 +93,14 @@ export function addFindings(state: RunState, findings: readonly Finding[]): RunS
  * Precondition: `phase` is a non-empty string.
  * Postcondition: `result.completedPhases` ends with `phase`.
  * Postcondition: `result.findings === state.findings` (identity-preserving).
+ *
+ * @example
+ * ```typescript
+ * let state = createInitialRunState();
+ * state = markPhaseCompleted(state, "structural");
+ * state = markPhaseCompleted(state, "qualitative");
+ * // state.completedPhases === ["structural", "qualitative"]
+ * ```
  */
 export function markPhaseCompleted(state: RunState, phase: string): RunState {
   return {

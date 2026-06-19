@@ -1,55 +1,36 @@
+/**
+ * Implements bidirectional implication checking between original spec formalizations
+ * and code-derived formalizations using Z3, classifying each pair as same/stronger/weaker/different.
+ *
+ * Core verification step in the code-backwards analysis pipeline.
+ * Exports: runCrossImplication, CrossImplicationResult.
+ */
 import { readFile } from "node:fs/promises";
 
 import { runZ3Query } from "../../adapters/z3.js";
 import { mapBounded } from "../../adapters/concurrency.js";
 import { resolveConfinedOutputPath, writeOutputAtomic } from "../../adapters/fs.js";
-import { toRelativePath, toSmtlibContent, type OutputDirPath, type RelativePath, type SmtlibContent } from "../branded.js";
+import { toRelativePath, type OutputDirPath, type RelativePath } from "../branded.js";
 import type { Finding } from "../findings.js";
-import { parseSmtlibContent } from "../formal/smtlib.js";
 
-/**
- * Closed domain of cross-side relationship classifications between original and generated formalizations.
- *
- * - `"same"`: mutual implication holds (logically equivalent)
- * - `"stronger"`: generated implies original but not vice versa
- * - `"weaker"`: original implies generated but not vice versa
- * - `"different"`: neither direction holds
- * - `"uncertain"`: at least one direction was inconclusive
- */
-export type CrossClassification = "same" | "stronger" | "weaker" | "different" | "uncertain";
+import {
+  CROSS_IMPLICATION_CONCURRENCY_DEFAULT,
+  type CrossImplicationResult,
+  type CrossImplicationOutput,
+  type CapabilityAggregateOutput,
+} from "./cross-implication-types.js";
+import {
+  buildImplicationQuery,
+  classifyDirection,
+  classifyRelationship,
+  classificationScore,
+  combineSmtContent,
+} from "./cross-implication-smt.js";
 
-/**
- * Result of a bidirectional implication check between original and generated formalizations for one claim.
- *
- * @remarks
- * Invariant: `forward` and `reverse` represent the original→generated and generated→original
- * implication directions respectively.
- * Invariant: `evidencePaths` contains paths to all persisted query and output artifacts.
- */
-export interface CrossImplicationResult {
-  readonly capability: string;
-  readonly claimId: string;
-  readonly classification: CrossClassification;
-  readonly forward: "yes" | "no" | "inconclusive";
-  readonly reverse: "yes" | "no" | "inconclusive";
-  readonly evidencePaths: readonly string[];
-}
-
-/**
- * Output from the cross-implication analysis pass.
- *
- * @remarks
- * Invariant: `results` preserves the ordering of matched pairs from `input.original`.
- * Invariant: `findings` includes per-claim classification findings and per-capability
- * divergence summaries.
- */
-export interface CrossImplicationOutput {
-  readonly findings: readonly Finding[];
-  readonly results: readonly CrossImplicationResult[];
-}
-
-/** Maximum concurrent Z3 cross-implication checks. */
-const CROSS_IMPLICATION_CONCURRENCY_DEFAULT = 4;
+// Re-export types, constants, and SMT utilities so existing consumers are unaffected.
+export type { CrossClassification, CrossImplicationResult, CrossImplicationOutput, CapabilityAggregateOutput } from "./cross-implication-types.js";
+export { CROSS_IMPLICATION_CONCURRENCY_DEFAULT } from "./cross-implication-types.js";
+export { buildImplicationQuery, classifyDirection, classifyRelationship, classificationScore, combineSmtContent } from "./cross-implication-smt.js";
 
 /**
  * Run bidirectional implication checks between original and code-derived formalizations.
@@ -58,9 +39,29 @@ const CROSS_IMPLICATION_CONCURRENCY_DEFAULT = 4;
  * @returns Classification results and findings for each matched pair
  *
  * @remarks
+ * Precondition: all `smtlibPath` entries in `input.original` and `input.generated`
+ * must be confined within `input.outputDir` (directory traversal is checked at resolve time).
  * Each claim pair is independent: forward and reverse Z3 queries within a pair
  * run in parallel, and pairs themselves are processed with bounded concurrency.
  * Results preserve the input ordering of `input.original`.
+ * Postcondition: returned `results` has one entry per matched pair; `findings` includes
+ * per-pair classification findings and per-capability divergence summaries.
+ * Failure modes: propagates filesystem errors from `readFile` if SMT files are missing
+ * or unreadable. Z3 subprocess failures are captured as "inconclusive" directions
+ * (not thrown). Path confinement violations throw.
+ * Safety: spawns up to `concurrency` Z3 subprocesses in parallel. Each subprocess is
+ * independent with no shared mutable state between concurrent units.
+ *
+ * @example
+ * ```typescript
+ * const output = await runCrossImplication({
+ *   outputDir: toOutputDirPath("/tmp/output"),
+ *   original: [{ capability: "auth", claimId: "auth_01", smtlibPath: toRelativePath("formal/auth_01.smt2") }],
+ *   generated: [{ capability: "auth", claimId: "auth_01", smtlibPath: toRelativePath("generated/auth_01.smt2") }],
+ * });
+ * // output.results[0].classification is "same" | "stronger" | "weaker" | "different" | "uncertain"
+ * // output.findings contains per-pair and per-capability divergence findings
+ * ```
  */
 export async function runCrossImplication(input: {
   readonly outputDir: OutputDirPath;
@@ -136,6 +137,7 @@ export async function runCrossImplication(input: {
       category: "code_backwards.cross_implication",
       provenance: { file: pair.original.smtlibPath, heading: pair.original.claimId },
       description: `Cross-side classification for ${pair.original.claimId}: ${classification}`,
+      rationale: "Cross-side classification reveals whether the code-derived formalization preserves, weakens, strengthens, or contradicts the spec-derived semantics for this claim, directly indicating implementation fidelity at the individual requirement level.",
       evidence: evidencePaths.map((path) => ({ kind: "artifact", value: path })),
       relatedClaimIdentifiers: [pair.original.claimId],
     };
@@ -156,13 +158,6 @@ export async function runCrossImplication(input: {
 // ---------------------------------------------------------------------------
 
 /**
- * Output from the capability-level aggregate comparison pass.
- */
-export interface CapabilityAggregateOutput {
-  readonly findings: readonly Finding[];
-}
-
-/**
  * Run capability-level aggregate bidirectional implication checks.
  *
  * For each capability present on both sides, combines all SMT assertions from
@@ -173,9 +168,15 @@ export interface CapabilityAggregateOutput {
  * @returns findings including aggregate classifications and unmatched capability signals
  *
  * @remarks
+ * Precondition: all `smtlibPath` entries in both maps must be confined within `input.outputDir`.
  * Cost: 2 Z3 calls per matched capability.
  * Postcondition: findings include `capability_aggregate`, `novel_capability`, and
  * `unimplemented_capability` categories.
+ * Failure modes: propagates filesystem errors from `readFile` if SMT files are missing
+ * or unreadable. Z3 subprocess failures are captured as "inconclusive" directions.
+ * Path confinement violations throw.
+ * Safety: spawns 2 Z3 subprocesses per matched capability (forward + reverse) in parallel.
+ * No shared mutable state between Z3 invocations.
  */
 export async function runCapabilityAggregateComparison(input: {
   readonly outputDir: OutputDirPath;
@@ -197,6 +198,7 @@ export async function runCapabilityAggregateComparison(input: {
         category: "code_backwards.novel_capability",
         provenance: { file: "<cross-implication>", heading: cap },
         description: `Generated capability "${cap}" has no original spec counterpart (${genClaims.length} claims). Possible causes: code covers behavior not in spec, context budget excluded relevant source, or LLM used non-suggested name.`,
+        rationale: "A capability present only in the code-derived formalization may indicate undocumented behavior that lacks spec coverage, creating a verification blind spot where the code could diverge from intent without detection.",
         evidence: [{ kind: "claim_count", value: String(genClaims.length) }],
       });
     }
@@ -211,6 +213,7 @@ export async function runCapabilityAggregateComparison(input: {
         category: "code_backwards.unimplemented_capability",
         provenance: { file: "<cross-implication>", heading: cap },
         description: `Original capability "${cap}" has no generated counterpart (${origClaims.length} claims). Possible causes: code gap, source context budget limitation, or LLM omission.`,
+        rationale: "A spec-defined capability with no code-derived counterpart suggests the implementation may be missing required behavior, or that source context limitations prevented the code analyzer from observing it.",
         evidence: [{ kind: "claim_count", value: String(origClaims.length) }],
         relatedClaimIdentifiers: origClaims.map((c) => c.claimId),
       });
@@ -274,6 +277,7 @@ export async function runCapabilityAggregateComparison(input: {
       category: "code_backwards.capability_aggregate",
       provenance: { file: "<cross-implication>", heading: cap },
       description: `Capability "${cap}" aggregate comparison: ${classification} (original: ${origClaims.length} claims, generated: ${genClaims.length} claims)`,
+      rationale: "Aggregate capability-level comparison detects systemic divergence patterns that individual claim checks may miss, revealing whether an entire functional area has drifted from its specification.",
       evidence: [
         { kind: "classification", value: classification },
         { kind: "forward", value: forward },
@@ -300,12 +304,30 @@ export async function runCapabilityAggregateComparison(input: {
  * @returns cross-implication results (for blind comparison) and detailed findings
  *
  * @remarks
+ * Precondition: all `smtlibPath` entries in both maps must be confined within `input.outputDir`.
  * For each matched capability:
  * - If N×M ≤ pairBudget: runs all bidirectional pairs, assigns greedily by classification score.
  * - If N×M > pairBudget: emits a `pairwise_skipped` finding and skips detailed comparison.
  *
  * Postcondition: returned results are compatible with `runBlindComparison` input.
  * Postcondition: greedy matching is deterministic given the same inputs.
+ * Failure modes: propagates filesystem errors from `readFile` if SMT files are missing
+ * or unreadable. Z3 subprocess failures are captured as "inconclusive" directions.
+ * Path confinement violations throw.
+ * Safety: spawns up to `concurrency` Z3 subprocesses in parallel per capability. Each
+ * subprocess is independent with no shared mutable state between concurrent units.
+ *
+ * @example
+ * ```typescript
+ * const output = await runBoundedPairwiseComparison({
+ *   outputDir: toOutputDirPath("/tmp/output"),
+ *   originalByCapability: new Map([["auth", [{ claimId: "auth_01", smtlibPath: toRelativePath("formal/auth_01.smt2") }]]]),
+ *   generatedByCapability: new Map([["auth", [{ claimId: "auth_01", smtlibPath: toRelativePath("generated/auth_01.smt2") }]]]),
+ *   pairBudget: 50,
+ * });
+ * // output.results contains greedy-matched pairs with classifications
+ * // output.findings includes per-pair, unmatched, and divergence findings
+ * ```
  */
 export async function runBoundedPairwiseComparison(input: {
   readonly outputDir: OutputDirPath;
@@ -334,6 +356,7 @@ export async function runBoundedPairwiseComparison(input: {
         category: "code_backwards.pairwise_skipped",
         provenance: { file: "<cross-implication>", heading: cap },
         description: `Pairwise comparison skipped for "${cap}": ${pairCount} pairs exceeds budget of ${input.pairBudget}`,
+        rationale: "Skipping pairwise comparison due to combinatorial explosion prevents excessive Z3 solver costs, but means fine-grained claim alignment within this capability remains unverified.",
         evidence: [
           { kind: "original_count", value: String(origClaims.length) },
           { kind: "generated_count", value: String(genClaims.length) },
@@ -390,15 +413,33 @@ export async function runBoundedPairwiseComparison(input: {
       };
     });
 
-    // Greedy bipartite matching: sort by classification score, assign greedily.
+    // Goal: pair each original claim with at most one generated claim, preferring
+    // the strongest semantic relationship. Greedy matching is sufficient here
+    // because we seek approximate alignment — identifying the best available
+    // pairing for diagnostic purposes — rather than an optimal assignment that
+    // would require Hungarian/Kuhn-Munkres. The downstream consumer only needs
+    // a plausible 1:1 correspondence, not a provably minimal-cost matching.
+
+    // Scoring: rank all N×M pair results by classification strength (highest
+    // first). Tie-breaking by origClaimId via localeCompare ensures deterministic
+    // output across runs — localeCompare is a total order on strings within a
+    // single locale, so pairs with equal scores always resolve in the same
+    // sequence regardless of the JS engine's sort stability characteristics.
     const scored = pairResults
       .map((pr) => ({ ...pr, score: classificationScore(pr.classification) }))
       .sort((a, b) => b.score - a.score || a.origClaimId.localeCompare(b.origClaimId));
 
+    // Invariant: assignedOrig and assignedGen each contain exactly the set of
+    // claim IDs that have already been matched. Because we only add to these
+    // sets (never remove), and skip any entry whose ID appears in either set,
+    // each claim is matched at most once — preserving the bipartite 1:1 property.
     const assignedOrig = new Set<string>();
     const assignedGen = new Set<string>();
     const matchedResults: typeof scored = [];
 
+    // Iteration is safe because `scored` is sorted strongest-first: every
+    // accepted pair is at least as strong as any pair that could replace it
+    // later in the iteration. Skipped pairs cannot improve the overall quality.
     for (const entry of scored) {
       if (assignedOrig.has(entry.origClaimId) || assignedGen.has(entry.genClaimId)) {
         continue;
@@ -439,6 +480,7 @@ export async function runBoundedPairwiseComparison(input: {
         category: "code_backwards.cross_implication",
         provenance: { file: `<cross-implication>`, heading: `${match.origClaimId} vs ${match.genClaimId}` },
         description: `Cross-side classification for ${match.origClaimId} (matched to ${match.genClaimId}): ${match.classification}`,
+        rationale: "The greedy-matched pair classification indicates whether the best-aligned code-derived claim preserves the semantics of its spec-derived counterpart, revealing per-requirement implementation fidelity after optimal pairing.",
         evidence: evidencePaths.map((path) => ({ kind: "artifact", value: path })),
         relatedClaimIdentifiers: [match.origClaimId],
       });
@@ -452,6 +494,7 @@ export async function runBoundedPairwiseComparison(input: {
           category: "code_backwards.unmatched_original",
           provenance: { file: `<cross-implication>`, heading: cap },
           description: `Original claim ${orig.claimId} in capability "${cap}" could not be paired to any generated claim`,
+          rationale: "An original spec claim that could not be paired to any generated claim may indicate a gap in code coverage—the specified behavior has no observable counterpart in the code-derived formalization.",
           evidence: [{ kind: "claim_id", value: orig.claimId }],
           relatedClaimIdentifiers: [orig.claimId],
         });
@@ -466,6 +509,7 @@ export async function runBoundedPairwiseComparison(input: {
           category: "code_backwards.unmatched_generated",
           provenance: { file: `<cross-implication>`, heading: cap },
           description: `Generated claim ${gen.claimId} in capability "${cap}" could not be paired to any original claim`,
+          rationale: "A generated claim without an original counterpart suggests the code implements behavior beyond the spec's scope, which may be intentional extension or an indicator of specification incompleteness.",
           evidence: [{ kind: "claim_id", value: gen.claimId }],
           relatedClaimIdentifiers: [gen.claimId],
         });
@@ -480,154 +524,16 @@ export async function runBoundedPairwiseComparison(input: {
 }
 
 /**
- * Score a cross-classification for greedy matching priority.
- * Higher scores are preferred when assigning pairs.
- */
-function classificationScore(classification: CrossClassification): number {
-  switch (classification) {
-    case "same":
-      return 4;
-    case "stronger":
-      return 3;
-    case "uncertain":
-      return 2;
-    case "weaker":
-      return 1;
-    case "different":
-      return 0;
-  }
-}
-
-/**
- * Combine multiple SMT-LIB file contents into a single synthetic SMT block
- * suitable for aggregate implication queries.
- *
- * @param smtContents - individual SMT-LIB content strings
- * @returns combined content with deduplicated declarations and merged assertions
- *
- * @remarks
- * Declarations are deduplicated by exact string match to avoid Z3 redeclaration errors.
- * Assertions are preserved verbatim.
- */
-function combineSmtContent(smtContents: readonly string[]): string {
-  const seenDeclarations = new Set<string>();
-  const allDeclarations: string[] = [];
-  const allAssertionExprs: string[] = [];
-
-  for (const content of smtContents) {
-    const parts = parseSmtlibContent(content);
-    for (const decl of parts.declarations) {
-      if (!seenDeclarations.has(decl)) {
-        seenDeclarations.add(decl);
-        allDeclarations.push(decl);
-      }
-    }
-    allAssertionExprs.push(...parts.assertionExprs);
-  }
-
-  // Reassemble into a format compatible with buildImplicationQuery's parseSmtlibContent.
-  const lines: string[] = [];
-  lines.push(...allDeclarations);
-  for (const expr of allAssertionExprs) {
-    lines.push(`(assert ${expr})`);
-  }
-  return lines.join("\n");
-}
-
-/**
- * Build an SMT-LIB implication query combining two SMT content blocks.
- *
- * @param leftSmt - SMT-LIB content for the premise side
- * @param rightSmt - SMT-LIB content for the consequent side
- * @returns combined SMT-LIB content encoding the implication check
- *
- * @remarks
- * Strategy: include declarations from both sides for shared context, assert left's
- * assertions as the premise, then assert the negation of right's assertions.
- * If Z3 returns "unsat", the left implies the right.
- * Postcondition: output contains exactly one `(check-sat)` at the end.
- */
-/** @internal Exported for testing. */
-export function buildImplicationQuery(leftSmt: string, rightSmt: string): SmtlibContent {
-  const leftParts = parseSmtlibContent(leftSmt);
-  const rightParts = parseSmtlibContent(rightSmt);
-
-  const declarations = [...leftParts.declarations, ...rightParts.declarations];
-  const leftAssertions = leftParts.assertionExprs.map((expr) => `(assert ${expr})`);
-
-  // Negate the consequent: if unsat, left entails right.
-  const negatedConsequent = rightParts.assertionExprs.length === 0
-    ? "(assert (not true))"
-    : `(assert (not (and ${rightParts.assertionExprs.join(" ")})))`;
-
-  return toSmtlibContent([
-    "; cross-side implication query",
-    ...declarations,
-    ...leftAssertions,
-    negatedConsequent,
-    "(check-sat)",
-  ].join("\n"));
-}
-
-/**
- * Classify a Z3 solver result into a ternary implication direction.
- *
- * @param kind - Z3 result kind (sat, unsat, timeout, unknown, error)
- * @returns "yes" if unsat (implication holds), "no" if sat (counterexample), "inconclusive" otherwise
- *
- * @remarks
- * Postcondition: mapping is total over the input domain.
- */
-export function classifyDirection(kind: "sat" | "unsat" | "timeout" | "unknown" | "error"): "yes" | "no" | "inconclusive" {
-  if (kind === "unsat") {
-    return "yes";
-  }
-  if (kind === "sat") {
-    return "no";
-  }
-  return "inconclusive";
-}
-
-/**
- * Classify the cross-side relationship from forward and reverse implication results.
- *
- * @param forward - result of original→generated implication check
- * @param reverse - result of generated→original implication check
- * @returns cross-classification from the closed `CrossClassification` domain
- *
- * @remarks
- * Postcondition: returns "uncertain" if either direction is inconclusive;
- * "same" for mutual implication; "weaker"/"stronger"/"different" based on
- * which direction holds.
- */
-export function classifyRelationship(
-  forward: "yes" | "no" | "inconclusive",
-  reverse: "yes" | "no" | "inconclusive",
-): CrossClassification {
-  if (forward === "inconclusive" || reverse === "inconclusive") {
-    return "uncertain";
-  }
-  if (forward === "yes" && reverse === "yes") {
-    return "same";
-  }
-  if (forward === "yes" && reverse === "no") {
-    return "weaker";
-  }
-  if (forward === "no" && reverse === "yes") {
-    return "stronger";
-  }
-  return "different";
-}
-
-/**
  * Summarize cross-implication results per capability, emitting divergence findings.
  *
  * @param results - all cross-implication results to summarize
  * @returns per-capability divergence summary findings
  *
  * @remarks
+ * Precondition: none — handles empty `results` gracefully (returns empty findings).
  * Postcondition: emits error-severity "high_divergence" if >50% of a capability's claims
  * are "different" or "weaker"; info-severity "low_divergence" otherwise.
+ * Failure modes: none — pure computation.
  */
 function summarizePerCapability(results: readonly CrossImplicationResult[]): readonly Finding[] {
   const byCapability = new Map<string, CrossImplicationResult[]>();
@@ -650,10 +556,10 @@ function summarizePerCapability(results: readonly CrossImplicationResult[]): rea
       category: "code_backwards.capability_divergence",
       provenance: { file: "<cross-implication>", heading: capability },
       description: `Capability ${capability} divergence summary: ${category}`,
+      rationale: "Capability-level divergence rate quantifies systematic implementation drift; high divergence signals that the majority of a capability's claims do not align with their spec-derived counterparts, indicating a likely structural mismatch.",
       evidence: entries.map((entry) => ({ kind: entry.claimId, value: entry.classification })),
     });
   }
 
   return findings;
 }
-

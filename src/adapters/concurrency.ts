@@ -22,14 +22,25 @@ import { precondition } from "../domain/assert.js";
  * @param fn - Async transform applied to each item
  * @returns Results in the same deterministic order as input items
  *
- * @throws Error if concurrency < 1
+ * @throws Error if concurrency < 1 (precondition violation)
  * @throws Error if any invocation of `fn` throws (first rejection propagates)
  *
  * @remarks
+ * Precondition: `concurrency >= 1` (enforced via assertion).
+ * Postcondition: `output.length === items.length` and `output[i]` corresponds to `items[i]`.
+ *
+ * Failure modes:
+ * - `concurrency < 1` → throws immediately via precondition assertion.
+ * - Any `fn` invocation rejects → the returned promise rejects with the first error
+ *   after all in-flight operations settle. Remaining unstarted items are not launched.
+ * - Empty input array → resolves immediately with `[]` (cannot fail).
+ *
+ * Safety:
  * - Ordering guarantee: output[i] corresponds to input[i] for all i.
  * - Backpressure: at most `concurrency` calls to `fn` are in-flight at any time.
  * - Cancellation: not supported; all in-flight work completes even if one fails.
  *   Callers requiring cancellation should use AbortSignal within `fn`.
+ * - No shared mutable state between concurrent `fn` invocations.
  */
 export async function mapBounded<T, R>(
   items: readonly T[],

@@ -1,3 +1,12 @@
+/**
+ * LLM-based qualitative review passes that assess spec quality, coherence, and
+ * adherence to engineering properties beyond what deterministic checks can catch.
+ *
+ * Role: Spec-forward analysis pass that uses LLM calls to produce subjective
+ * quality findings (review pass and properties pass).
+ *
+ * Key exports: `runQualitativeReview`, `QualitativeOutput`
+ */
 import type { ParsedDesign, ParsedProposal, ParsedSpec } from "../model.js";
 import type { Finding } from "../findings.js";
 import { callOpencode } from "../../adapters/opencode.js";
@@ -32,7 +41,68 @@ export interface QualitativePassError {
 }
 
 /**
- * Run specs-forward qualitative review passes with fenced prompts.
+ * Runs two sequential LLM-based qualitative review passes against the provided specification documents.
+ *
+ * Pass 1 ("qualitative-review") evaluates overall spec coherence and completeness.
+ * Pass 2 ("qualitative-properties") checks for property-level invariants and safety concerns.
+ * Each pass constructs a fenced prompt from the input documents and invokes the configured LLM model.
+ *
+ * @param input - Review input bundle.
+ * @param input.proposal - Optional parsed proposal document to include in the review context.
+ * @param input.design - Optional parsed design document to include in the review context.
+ * @param input.specs - Parsed spec files to review; may be empty but must not contain undefined entries.
+ * @param input.model - LLM model identifier string passed to the OpenCode adapter.
+ *
+ * @returns On success, resolves to `Ok<QualitativePassOutput>` containing:
+ *   - `pass1Findings`: normalized findings from the qualitative-review phase.
+ *   - `pass2Findings`: normalized findings from the qualitative-properties phase.
+ *   - `rawResponses`: the original LLM response objects in phase order for audit/diagnostics.
+ *
+ *   On failure, resolves to `Err<QualitativePassError>` with a `message` identifying which
+ *   pass failed (1 or 2) and the underlying error from the OpenCode adapter. If pass 1 fails,
+ *   pass 2 is never attempted.
+ *
+ * @throws Propagates any unhandled exceptions from the `callOpencode` adapter (e.g., network
+ *   failures, unexpected transport errors) that are not captured as `Result.err` by the adapter.
+ *
+ * @remarks
+ * Concurrency: The two passes execute **sequentially** — pass 2 only starts after pass 1
+ * succeeds. This is intentional; future passes may depend on prior results.
+ *
+ * Bounds: Exactly 2 LLM calls are made on the success path; exactly 1 on the early-error path.
+ *
+ * Preconditions:
+ * - `input.model` must be a valid model identifier accepted by `callOpencode`.
+ * - Document content is treated as untrusted and fenced before inclusion in prompts.
+ *
+ * Postconditions:
+ * - On `Ok`, `rawResponses` has exactly 2 entries in phase order.
+ * - On `Err`, no partial findings are returned; the caller receives only the error.
+ *
+ * Failure modes:
+ * - Returns `Err<QualitativePassError>` if either LLM call returns a non-ok result.
+ * - Propagates unhandled exceptions from `callOpencode` (e.g., network failures).
+ *
+ * Ownership: The returned `QualitativePassOutput` is a fresh allocation; callers own it.
+ *
+ * @example
+ * ```typescript
+ * import { runQualitativePasses } from "./qualitative.js";
+ *
+ * const result = await runQualitativePasses({
+ *   proposal: parsedProposal,
+ *   design: parsedDesign,
+ *   specs: [parsedSpec],
+ *   model: "claude-sonnet",
+ * });
+ *
+ * if (!result.ok) {
+ *   console.error(`Qualitative analysis failed: ${result.error.message}`);
+ * } else {
+ *   const allFindings = [...result.value.pass1Findings, ...result.value.pass2Findings];
+ *   console.log(`Found ${allFindings.length} qualitative issues`);
+ * }
+ * ```
  */
 export async function runQualitativePasses(input: {
   readonly proposal?: ParsedProposal;
@@ -85,6 +155,7 @@ export async function runQualitativePasses(input: {
  * Postcondition: all user-supplied document content is sandboxed inside XML fences
  * via `fenceDocument`, preventing prompt injection from document text.
  * Invariant: the returned prompt always includes the mode header and JSON instruction.
+ * Failure modes: none — pure computation.
  */
 export function buildReviewPrompt(
   mode: "qualitative_review" | "qualitative_properties",
@@ -138,6 +209,19 @@ export function buildReviewPrompt(
  * Postcondition: any sequences in `content` that could break out of the fence
  * (closing `</document>` tags and runs of 3+ backticks) are neutralized.
  * Invariant: the returned string is a single well-formed fence block.
+ * Failure modes: none — pure computation.
+ *
+ * @example
+ * ```typescript
+ * const fenced = fenceDocument("design", "## Overview\nThis system handles payments.");
+ * // Returns:
+ * // <document name="design">
+ * // ```markdown
+ * // ## Overview
+ * // This system handles payments.
+ * // ```
+ * // </document>
+ * ```
  */
 export function fenceDocument(label: string, content: string): string {
   // Neutralize closing XML tags that would break the document fence.
@@ -156,6 +240,7 @@ export function fenceDocument(label: string, content: string): string {
  * Precondition: `sections` keys are non-empty heading strings.
  * Postcondition: returned string preserves section ordering from the map iterator.
  * Invariant: each section is separated by its heading; no extra blank lines inserted.
+ * Failure modes: none — pure computation.
  */
 export function serializeSections(sections: ReadonlyMap<string, { readonly lines: readonly string[] }>): string {
   const parts: string[] = [];
@@ -176,6 +261,17 @@ export function serializeSections(sections: ReadonlyMap<string, { readonly lines
  * Precondition: each `response` entry is the raw decoded JSON from an LLM call.
  * Postcondition: returned findings are all valid `Finding` objects with normalized severity.
  * Invariant: responses without a `.findings` array property are silently skipped.
+ * Failure modes: none — pure computation (gracefully handles malformed input).
+ *
+ * @example
+ * ```typescript
+ * const responses = [
+ *   { phase: "qualitative-review", response: { findings: [{ severity: "warning", description: "Vague requirement" }] } },
+ *   { phase: "qualitative-properties", response: { findings: [] } },
+ * ];
+ * const findings = extractFindingsFromResponses(responses);
+ * // findings contains normalized Finding objects from all responses
+ * ```
  */
 export function extractFindingsFromResponses(
   responses: readonly { readonly phase: string; readonly response: unknown }[],
@@ -211,6 +307,20 @@ export function extractFindingsFromResponses(
  * Postcondition: if defined, the returned Finding has a valid severity from the closed
  * domain `"error" | "warning" | "info"`, defaulting to `"warning"` for unrecognized values.
  * Invariant: evidence array always contains at least one entry (falls back to phase tag).
+ * Failure modes: none — pure computation (returns undefined for non-normalizable input).
+ *
+ * @example
+ * ```typescript
+ * const raw = {
+ *   severity: "error",
+ *   category: "coherence.gap",
+ *   description: "Missing error handling for timeout",
+ *   rationale: "No timeout recovery path specified",
+ *   evidence: [{ kind: "heading", value: "## Error Handling" }],
+ * };
+ * const finding = normalizeRawFinding(raw, "qualitative-review");
+ * // finding.severity === "error", finding.category === "coherence.gap"
+ * ```
  */
 export function normalizeRawFinding(raw: unknown, phase: string): Finding | undefined {
   if (typeof raw !== "object" || raw === null) {
@@ -221,6 +331,7 @@ export function normalizeRawFinding(raw: unknown, phase: string): Finding | unde
     readonly severity?: unknown;
     readonly category?: unknown;
     readonly description?: unknown;
+    readonly rationale?: unknown;
     readonly file?: unknown;
     readonly heading?: unknown;
     readonly evidence?: unknown;
@@ -249,6 +360,8 @@ export function normalizeRawFinding(raw: unknown, phase: string): Finding | unde
     evidence.push({ kind: "raw_phase", value: phase });
   }
 
+  const description = typeof record.description === "string" ? record.description : `Qualitative finding from ${phase}`;
+
   return {
     severity,
     category: typeof record.category === "string" ? record.category : `qualitative.${phase}`,
@@ -256,7 +369,8 @@ export function normalizeRawFinding(raw: unknown, phase: string): Finding | unde
       file: typeof record.file === "string" ? record.file : "<llm>",
       ...(typeof record.heading === "string" ? { heading: record.heading } : {}),
     },
-    description: typeof record.description === "string" ? record.description : `Qualitative finding from ${phase}`,
+    description,
+    rationale: typeof record.rationale === "string" ? record.rationale : `Identified during qualitative ${phase} analysis: ${description}`,
     evidence,
   };
 }

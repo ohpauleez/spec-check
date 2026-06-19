@@ -1,3 +1,12 @@
+/**
+ * Generates and manages the output manifest that tracks all rendered report artifacts.
+ * Handles atomic writes, checksum verification, and stale artifact cleanup.
+ *
+ * Role: Reporting layer component that ensures output integrity and enables
+ * incremental/idempotent report generation.
+ *
+ * Key exports: `OutputManifest`, `ManifestEntry`
+ */
 import { unlink } from "node:fs/promises";
 import { join } from "node:path";
 
@@ -30,7 +39,28 @@ export interface ManifestFile {
 }
 
 /**
- * Build manifest entries from rendered output artifacts.
+ * Build manifest entries from rendered output artifacts, computing SHA-256 checksums.
+ *
+ * @param files - array of output descriptors, each with a relative path, phase identifier, and content string
+ * @returns manifest entries with computed checksums for each file
+ *
+ * @remarks
+ * Preconditions: none — any array of well-typed descriptors is accepted.
+ * Postconditions:
+ * - The returned array has the same length and order as `files`.
+ * - Each entry's `checksum` is the SHA-256 hex digest of the corresponding `content`.
+ *
+ * Failure modes: none — pure computation.
+ *
+ * @example
+ * ```typescript
+ * const entries = buildManifestEntries([
+ *   { path: "findings.json", phase: "reporting", content: '{"findings":[]}' },
+ *   { path: "summary.md", phase: "reporting", content: "# Summary\nNo issues." },
+ * ]);
+ * // entries[0].checksum is the SHA-256 hex of the content
+ * // entries[0].path === "findings.json"
+ * ```
  */
 export function buildManifestEntries(
   files: readonly { readonly path: string; readonly phase: string; readonly content: string }[],
@@ -43,7 +73,35 @@ export function buildManifestEntries(
 }
 
 /**
- * Write manifest after all other artifacts are finalized.
+ * Write the output manifest atomically after all other artifacts are finalized.
+ *
+ * @param outputDir - branded absolute directory path where the manifest is written
+ * @param entries - manifest entries for all rendered artifacts
+ * @returns resolves when the manifest has been written successfully
+ *
+ * @remarks
+ * Preconditions:
+ * - `outputDir` must reference an existing, writable directory.
+ * - `entries` should reflect all artifacts produced during the run.
+ *
+ * Postconditions:
+ * - A `manifest.json` file exists in `outputDir` with the serialized entries.
+ * - The write is atomic (write-to-temp then rename).
+ *
+ * Failure modes:
+ * - Throws if `writeOutputAtomic` fails (e.g., permission denied, disk full, directory missing).
+ *
+ * Safety: must be called after all other artifact writes are complete to ensure manifest consistency.
+ *
+ * @example
+ * ```typescript
+ * import { toOutputDirPath } from "../branded.js";
+ *
+ * const outputDir = toOutputDirPath("/tmp/spec-check-output");
+ * const entries = buildManifestEntries(renderedFiles);
+ * await writeManifest(outputDir, entries);
+ * // Writes manifest.json atomically to the output directory
+ * ```
  */
 export async function writeManifest(outputDir: OutputDirPath, entries: readonly ManifestEntry[]): Promise<void> {
   const manifest: ManifestFile = { files: entries };
@@ -63,6 +121,14 @@ export async function writeManifest(outputDir: OutputDirPath, entries: readonly 
  *
  * Precondition: `outputDir` is a valid path (directory may or may not exist).
  * Postcondition: no manifest.json exists in `outputDir` after this call.
+ *
+ * Failure modes:
+ * - Returns `false` silently when no manifest exists (ENOENT).
+ * - Throws for unexpected filesystem errors (e.g., EACCES, EIO) that are not ENOENT.
+ *
+ * Safety: performs a single filesystem unlink; no concurrent mutation concerns for
+ * the manifest file itself, but callers must ensure no concurrent pipeline run
+ * is writing a new manifest simultaneously.
  */
 export async function invalidateStaleManifest(outputDir: OutputDirPath): Promise<boolean> {
   const manifestPath = join(outputDir, "manifest.json");

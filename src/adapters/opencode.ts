@@ -1,3 +1,10 @@
+/**
+ * LLM adapter that interfaces with OpenCode by spawning subprocess invocations
+ * for each verification phase and parsing structured JSON responses.
+ *
+ * Adapter layer — translates domain phase requests into OpenCode CLI calls.
+ * Exports: OpencodePhase, OpencodeInvocation, invokeOpencode.
+ */
 import { runProcess } from "./process.js";
 import { err, ok, type Result } from "../domain/result.js";
 
@@ -50,8 +57,24 @@ export interface OpencodeError {
 /**
  * Call `opencode` with bounded retries and strict JSON validation.
  *
- * @param options - invocation options
- * @returns schema-validated JSON response or terminal error
+ * @param options - invocation options including model, prompt, phase, and retry/timeout config
+ * @returns schema-validated JSON response on success, or a terminal `OpencodeError` on failure
+ *
+ * @remarks
+ * Precondition: `options.model` and `options.prompt` are non-empty strings.
+ * Postcondition: on `ok: true`, the value is a non-null object that passed phase schema
+ * validation. On `ok: false`, all retry attempts have been exhausted.
+ *
+ * Failure modes:
+ * - Binary not found or not executable → `kind: "spawn_error"` after all retries.
+ * - Process exceeds timeout on every attempt → `kind: "timeout"`.
+ * - Model returns non-JSON output → `kind: "invalid_json"`.
+ * - Model returns JSON that fails phase schema validation → `kind: "schema_validation_error"`.
+ * - All failures are retried up to `options.retries` (default 3) before returning error.
+ *
+ * Safety: spawns up to `retries` sequential subprocess invocations. No concurrent
+ * subprocess overlap within a single call. Network failures in the LLM backend
+ * surface as process-level errors (non-zero exit or timeout).
  */
 export async function callOpencode(
   options: OpencodeCallOptions,
@@ -123,11 +146,23 @@ export async function callOpencode(
  * @param stdout - raw stdout captured from the opencode subprocess
  * @returns decoded JSON payload emitted by the model response
  *
+ * @throws Error if stdout is empty, contains no parseable JSON, contains an error event,
+ *   or lacks a text event with the payload content
+ *
  * @remarks
  * The current opencode CLI emits newline-delimited JSON events. The model's
  * actual response text is carried by `type: "text"` events in `part.text`.
  * We concatenate those text fragments and then parse the result as the phase
  * payload JSON expected by spec-check.
+ *
+ * Precondition: `stdout` is the raw string output from `opencode run --format json`.
+ * Postcondition: on success, returns a fully parsed JSON value representing the model payload.
+ *
+ * Failure modes:
+ * - Empty stdout → throws Error("empty stdout").
+ * - Malformed JSON lines → throws Error("invalid event json").
+ * - Error event present in stream → throws with the error event's message.
+ * - No text events found → throws Error("missing payload text event").
  */
 function parseOpencodePayload(stdout: string): unknown {
   const trimmed = stdout.trim();
@@ -172,11 +207,19 @@ function parseOpencodePayload(stdout: string): unknown {
  *
  * @param events - parsed JSON events from opencode stdout
  *
+ * @throws Error if any event has `type: "error"`, propagating the error message
+ *   from the event payload when available
+ *
  * @remarks
  * Precondition: each element in `events` is a decoded JSON value.
  * Postcondition: throws if any event has `type: "error"`, propagating the
  * error message from the event payload when available.
- * Invariant: non-error events are ignored.
+ * Invariant: non-error events are ignored; does not mutate `events`.
+ *
+ * Failure modes:
+ * - Error event found with nested message → throws Error with that message.
+ * - Error event found without parseable message → throws Error("opencode returned an error event").
+ * - No error events → returns normally (cannot fail).
  */
 function throwOnErrorEvent(events: readonly unknown[]): void {
   for (const event of events) {
@@ -203,6 +246,24 @@ function throwOnErrorEvent(events: readonly unknown[]): void {
   }
 }
 
+/**
+ * Concatenate text parts from opencode events and parse as JSON payload.
+ *
+ * @param events - parsed JSON events from opencode stdout
+ * @returns parsed JSON payload from concatenated text parts, or `undefined` if no text events found
+ *
+ * @throws SyntaxError if text parts concatenate to invalid JSON
+ *
+ * @remarks
+ * Precondition: each element in `events` is a decoded JSON value.
+ * Postcondition: on non-undefined return, the value is a parsed JSON object
+ * constructed from all `type: "text"` event fragments joined in order.
+ * Invariant: does not mutate `events`.
+ *
+ * Failure modes:
+ * - No text events → returns `undefined` (not a failure).
+ * - Concatenated text is invalid JSON → throws SyntaxError from `JSON.parse`.
+ */
 function extractPayloadFromEvents(events: readonly unknown[]): unknown {
   const textParts = events
     .map(extractTextPart)
@@ -215,6 +276,19 @@ function extractPayloadFromEvents(events: readonly unknown[]): unknown {
   return JSON.parse(textParts.join(""));
 }
 
+/**
+ * Extract the text content from a single opencode event if it is a text event.
+ *
+ * @param event - a single parsed JSON event value
+ * @returns the text string from the event's `part.text` field, or `undefined` if not a text event
+ *
+ * @remarks
+ * Precondition: `event` is a decoded JSON value (may be any type).
+ * Postcondition: returns a string only if `event` is an object with `type: "text"` and
+ * a nested `part.text` string field; returns `undefined` otherwise.
+ *
+ * Failure modes: none — pure computation. Never throws.
+ */
 function extractTextPart(event: unknown): string | undefined {
   if (typeof event !== "object" || event === null) {
     return undefined;
@@ -229,6 +303,20 @@ function extractTextPart(event: unknown): string | undefined {
   return typeof part.text === "string" ? part.text : undefined;
 }
 
+/**
+ * Attempt to parse a string as JSON, returning a Result instead of throwing.
+ *
+ * @param input - raw string to parse as JSON
+ * @returns `ok` with the parsed value on success, or `err` with an Error on parse failure
+ *
+ * @remarks
+ * Precondition: `input` is a string (no type narrowing performed).
+ * Postcondition: on `ok: true`, `value` is the result of `JSON.parse(input)`.
+ * On `ok: false`, `error` is an Error describing the parse failure.
+ *
+ * Failure modes: none — all parse failures are captured in the Result error branch.
+ * This function never throws.
+ */
 function tryParseJson(input: string): Result<unknown, Error> {
   try {
     return ok(JSON.parse(input));
@@ -248,6 +336,9 @@ function tryParseJson(input: string): Result<unknown, Error> {
  * Precondition: `payload` is the result of a successful `JSON.parse` call.
  * Postcondition: on success, `payload` is a non-null object and any `findings` field is an array.
  * Invariant: does not mutate `payload`.
+ *
+ * Failure modes: none — validation failures are captured in the Result error branch.
+ * This function never throws.
  */
 function validatePhaseSchema(
   phase: OpencodePhase,

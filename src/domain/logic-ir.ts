@@ -1,3 +1,10 @@
+/**
+ * Defines the logic intermediate representation (IR) used to express claims
+ * as typed, structured assertions before compilation to SMT-LIB.
+ *
+ * Domain layer — sits between natural-language formalization and Z3 encoding.
+ * Exports: LogicSort, LogicVariable, LogicIrClaim, LogicIrDocument.
+ */
 import type { ClaimId } from "./branded.js";
 
 /**

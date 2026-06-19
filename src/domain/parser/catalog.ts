@@ -1,3 +1,12 @@
+/**
+ * Discovers and catalogs spec documents from filesystem input paths.
+ * Walks directories to identify proposal, design, spec, and task files by naming convention.
+ *
+ * Role: Entry point for the parser layer — builds the document catalog that downstream
+ * analysis passes consume.
+ *
+ * Key exports: `buildCatalog`
+ */
 import { readdir, stat } from "node:fs/promises";
 import { basename, join, resolve } from "node:path";
 
@@ -31,10 +40,58 @@ export interface CatalogBuildOutput {
 }
 
 /**
- * Resolve input paths into a deterministic active OpenSpec catalog.
+ * Resolve input paths into a deterministic active OpenSpec catalog, discovering documents
+ * recursively and resolving capability conflicts.
  *
- * @param inputs - CLI input files and/or directories
- * @returns active catalog with conflict findings or unreadable-input error
+ * @param inputs - CLI input file paths and/or directory paths to scan. Each entry is resolved
+ *   to an absolute path before traversal. Directories are scanned recursively for recognized
+ *   OpenSpec documents (`proposal.md`, `design.md`, `tasks.md`, `spec.md`).
+ *
+ * @returns On success (`ok`): a {@link CatalogBuildOutput} containing:
+ *   - `catalog.documents` — active (non-archived) documents sorted lexicographically by path,
+ *     with at most one delta spec per capability.
+ *   - `catalog.skippedDeltaConflicts` — structured records of delta specs that were excluded
+ *     due to per-capability conflict resolution (lexicographically first delta wins).
+ *   - `findings` — diagnostic warnings for each skipped conflicting delta, with provenance
+ *     and evidence fields identifying the skipped path, kept path, and capability name.
+ *
+ *   On error (`err`): a {@link CatalogBuildError} with `kind: "unreadable_input"` and the
+ *   resolved `path` that could not be accessed. Returns on the first unreadable path
+ *   encountered (fail-fast; does not attempt remaining inputs).
+ *
+ * @throws Propagates unexpected errors from `fs.stat` or `fs.readdir` that are not
+ *   permission/existence failures (e.g., filesystem corruption, interrupted syscall).
+ *   Standard ENOENT/EACCES errors are caught and returned as `err`.
+ *
+ * @remarks
+ * Precondition: `inputs` contains valid filesystem path strings (relative or absolute).
+ *   Empty array is valid and produces an empty catalog with no findings.
+ * Postcondition: returned documents are all non-archived and lexicographically sorted by path.
+ * Postcondition: at most one finalized spec and one delta spec exist per capability in the output.
+ * Invariant: conflict resolution is deterministic — the lexicographically first delta path
+ *   is always selected regardless of input order or filesystem traversal order.
+ *
+ * Concurrency: this function performs sequential filesystem traversal (no parallel I/O).
+ * It is safe to call concurrently from multiple callers as it performs read-only filesystem
+ * operations with no shared mutable state.
+ *
+ * Failure modes:
+ * - Returns `Err<CatalogBuildError>` with `kind: "unreadable_input"` for ENOENT/EACCES on any input path.
+ * - Propagates unexpected `fs.stat`/`fs.readdir` errors (e.g., filesystem corruption) as thrown exceptions.
+ *
+ * @example
+ * ```ts
+ * const result = await buildCatalog(["./specs", "./openspec/changes/my-feature"]);
+ * if (!result.ok) {
+ *   console.error(`Cannot read path: ${result.error.path}`);
+ *   process.exit(1);
+ * }
+ * const { catalog, findings } = result.value;
+ * console.log(`Discovered ${catalog.documents.length} documents`);
+ * for (const conflict of catalog.skippedDeltaConflicts) {
+ *   console.warn(`Skipped delta for ${conflict.capability}: ${conflict.skippedPath}`);
+ * }
+ * ```
  */
 export async function buildCatalog(inputs: readonly string[]): Promise<Result<CatalogBuildOutput, CatalogBuildError>> {
   const discoveredFiles: string[] = [];
@@ -76,12 +133,18 @@ export async function buildCatalog(inputs: readonly string[]): Promise<Result<Ca
  * Recursively collect all file paths under a given filesystem path.
  *
  * @param path - resolved absolute filesystem path (file or directory)
- * @returns flat array of file paths, or an unreadable_input error if stat/readdir fails
+ * @returns flat array of file paths on success, or an `unreadable_input` error if stat/readdir fails
  *
  * @remarks
  * Precondition: `path` is a resolved absolute path.
  * Postcondition: on success, every entry in the returned array is a regular file path.
  * Recursion is bounded by filesystem depth.
+ *
+ * Failure modes:
+ * - Returns `Err` with `kind: "unreadable_input"` if `stat` or `readdir` throws (ENOENT, EACCES, etc.).
+ * - Propagates unexpected filesystem errors not caught by the try/catch (e.g., EINTR).
+ *
+ * Safety: performs recursive filesystem reads; bounded by directory tree depth.
  */
 async function collectFiles(path: string): Promise<Result<readonly string[], CatalogBuildError>> {
   let stats;
@@ -136,6 +199,7 @@ async function collectFiles(path: string): Promise<Result<readonly string[], Cat
  * Precondition: `path` is a non-empty file path with a recognizable basename.
  * Postcondition: when a value is returned, `type` and `source` are consistent with the path structure.
  * Only `proposal.md`, `design.md`, `tasks.md`, and `spec.md` are recognized.
+ * Failure modes: none — pure computation.
  */
 export function classifyDocument(path: string): CatalogDocument | undefined {
   const name = basename(path);
@@ -175,6 +239,7 @@ export function classifyDocument(path: string): CatalogDocument | undefined {
  * Precondition: `path` uses forward-slash separators.
  * Postcondition: when defined, the returned name is the directory segment immediately following
  * the last occurrence of `specs` in the path.
+ * Failure modes: none — pure computation.
  */
 export function inferCapabilityName(path: string): CapabilityName | undefined {
   const segments = path.split("/");
@@ -200,6 +265,7 @@ export function inferCapabilityName(path: string): CapabilityName | undefined {
  * capability, sorted lexicographically by path. Conflicts are deterministically resolved by
  * choosing the lexicographically first delta path.
  * Invariant: non-spec documents pass through unconditionally.
+ * Failure modes: none — pure computation.
  */
 export function resolveActiveCapabilities(documents: readonly CatalogDocument[]): {
   readonly activeDocuments: readonly CatalogDocument[];
@@ -262,6 +328,7 @@ export function resolveActiveCapabilities(documents: readonly CatalogDocument[])
         category: "catalog.delta_conflict",
         provenance: { file: skipped.path },
         description: `Skipped conflicting in-development delta for capability ${capability}`,
+        rationale: "Multiple in-development deltas for the same capability create ambiguity about which version is authoritative; only the first discovered delta is kept",
         evidence: [
           { kind: "skipped_path", value: skipped.path },
           { kind: "kept_path", value: kept.path },

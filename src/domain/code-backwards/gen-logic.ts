@@ -1,3 +1,10 @@
+/**
+ * Generates Z3 logic analysis (satisfiability checks) for code-derived
+ * formalized claims, producing contradiction and consistency findings.
+ *
+ * Applies the formal logic-analysis pass to code-backwards formalizations.
+ * Exports: generateCodeLogicAnalysis, CodeLogicOutput.
+ */
 import type { OutputDirPath } from "../branded.js";
 import type { Finding } from "../findings.js";
 import { runLogicAnalysis, type SpecClaimGroup } from "../formal/logic-analysis.js";
@@ -25,6 +32,10 @@ export interface GeneratedLogicOutput {
  * Precondition: `input.claims` contains valid Logic IR claims with capability metadata.
  * Postcondition: claims are grouped by capability into SpecClaimGroups for per-spec
  * combined analysis (one .smt2 per capability).
+ * Failure modes: propagates errors from `runLogicAnalysis` (Z3 subprocess failures
+ * are captured as findings within the logic analysis pass, not thrown).
+ * Safety: spawns Z3 subprocesses via `runLogicAnalysis`; see that function's safety
+ * contract for concurrency details.
  */
 export async function analyzeGeneratedLogic(input: {
   readonly claims: readonly { readonly capability: string; readonly representative: LogicIrClaim }[];
@@ -49,6 +60,15 @@ export async function analyzeGeneratedLogic(input: {
 /**
  * Group generated claims by capability into SpecClaimGroups.
  * Uses synthetic file paths: `<gen_specs/{capability}.md>` for provenance.
+ *
+ * @param claims - formalized claims with capability metadata
+ * @returns array of SpecClaimGroups ordered by first encounter of each capability
+ *
+ * @remarks
+ * Precondition: none — handles empty input gracefully.
+ * Postcondition: returned groups preserve first-encounter ordering of capabilities.
+ * Each group's `specFile` uses the synthetic path format `<gen_specs/{capability}.md>`.
+ * Failure modes: none — pure computation.
  */
 function groupByCapability(
   claims: readonly { readonly capability: string; readonly representative: LogicIrClaim }[],

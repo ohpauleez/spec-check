@@ -1,3 +1,12 @@
+/**
+ * Parses task documents, extracting task groups and individual checklist items
+ * with completion status from markdown task lists.
+ *
+ * Role: Parser layer component responsible for task document ingestion; feeds
+ * coverage analysis with task-evidence data.
+ *
+ * Key exports: `parseTaskDocument`
+ */
 import { readFile } from "node:fs/promises";
 
 import type { ParsedTaskDocument, ParsedTaskGroup, ParsedTaskItem } from "../model.js";
@@ -6,10 +15,25 @@ import { collectUnparsedLines, parseHeading, toProvenance } from "./shared.js";
 const TASK_ITEM_PATTERN = /^-\s+\[(?<mark>[ xX])\]\s+(?<text>.+)$/u;
 
 /**
- * Parse a tasks markdown file with group and completion extraction.
+ * Parse a tasks markdown file, extracting task groups with completion status and change summaries.
  *
- * @param file - tasks markdown path
- * @returns parsed task document
+ * @param file - absolute or workspace-relative path to the tasks markdown file
+ * @returns parsed task document containing groups, task items with completion marks,
+ *   change summaries, and any unparsed lines
+ *
+ * @remarks
+ * Preconditions:
+ * - `file` must be a readable filesystem path to a UTF-8 markdown file.
+ *
+ * Postconditions:
+ * - Every `## ` heading becomes a task group; `- [x]` / `- [ ]` items within become tasks.
+ * - `### ... change summary` headings are captured separately in `changeSummaries`.
+ * - Lines not consumed by any parser rule are preserved in `unparsed`.
+ *
+ * Failure modes:
+ * - Throws if `readFile` fails (e.g., ENOENT, EACCES, or other I/O error).
+ *
+ * Safety: performs a single filesystem read; no concurrent mutation concerns.
  */
 export async function parseTaskDocument(file: string): Promise<ParsedTaskDocument> {
   const raw = await readFile(file, "utf8");

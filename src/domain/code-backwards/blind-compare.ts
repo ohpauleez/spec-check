@@ -1,3 +1,10 @@
+/**
+ * Performs identity-free semantic comparison between spec claims and code-derived
+ * claims using an LLM, without relying on formal identifiers or structure.
+ *
+ * Provides a complementary soft-match signal alongside formal cross-implication.
+ * Exports: runBlindComparison, BlindCompareOutput.
+ */
 import { callOpencode } from "../../adapters/opencode.js";
 import type { Finding } from "../findings.js";
 import type { CrossImplicationResult } from "./cross-implication.js";
@@ -28,6 +35,21 @@ export interface BlindComparisonOutput {
  * LLM call failures produce error-severity findings rather than aborting
  * the pipeline, preserving partial results.
  * Invariant: no original requirement text is ever exposed to the LLM.
+ * Failure modes: does not throw. LLM call failures and missing context are
+ * captured as error-severity findings in the output.
+ * Safety: performs network I/O (LLM calls) sequentially per result. No shared
+ * mutable state.
+ *
+ * @example
+ * ```ts
+ * const { findings } = await runBlindComparison({
+ *   model: "anthropic:claude-sonnet-4-20250514",
+ *   results: crossImplicationResults,
+ *   generatedOnlyContext: [
+ *     { capability: "auth", claimId: "AUTH-001", summary: "Session expires after inactivity" },
+ *   ],
+ * });
+ * ```
  */
 export async function runBlindComparison(input: {
   readonly model: string;
@@ -46,6 +68,7 @@ export async function runBlindComparison(input: {
         category: "code_backwards.blind_boundary_violation",
         provenance: { file: "<blind-compare>", heading: result.claimId },
         description: "Blind comparison context missing for claim",
+        rationale: "Without the generated-only context for a claim, the blind comparison cannot proceed — the code-derived formalization has no spec-derived counterpart to compare against, breaking the identity-free matching guarantee.",
         evidence: [{ kind: "claim_id", value: result.claimId }],
         relatedClaimIdentifiers: [result.claimId],
       });
@@ -67,6 +90,7 @@ export async function runBlindComparison(input: {
         category: "code_backwards.blind_comparison_failure",
         provenance: { file: "<blind-compare>", heading: result.claimId },
         description: `Blind comparison failed for ${result.claimId}: ${response.error.message}`,
+        rationale: "A failed LLM call means no independent semantic comparison was produced for this claim, so we cannot confirm or deny alignment between the code-derived and spec-derived formalizations.",
         evidence: [{ kind: "claim_id", value: result.claimId }],
         relatedClaimIdentifiers: [result.claimId],
       });
@@ -79,6 +103,7 @@ export async function runBlindComparison(input: {
       category: "code_backwards.blind_explanation",
       provenance: { file: "<blind-compare>", heading: result.claimId },
       description: `Blind comparison rationale for ${result.claimId}`,
+      rationale: "Records the independent semantic comparison result so downstream consumers can assess whether the code-derived formalization aligns with the spec-derived one without relying on identifier matching.",
       evidence: [
         { kind: "classification", value: result.classification },
         { kind: "rationale", value: rationale },
@@ -101,6 +126,7 @@ export async function runBlindComparison(input: {
  * Precondition: `generatedSummary` contains no original requirement text (blind boundary).
  * Postcondition: prompt explicitly forbids inference of original requirement content.
  * Invariant: returned prompt always requests JSON with a `rationale` field.
+ * Failure modes: none — pure computation.
  */
 export function buildBlindPrompt(result: CrossImplicationResult, generatedSummary: string): string {
   return [
@@ -123,6 +149,7 @@ export function buildBlindPrompt(result: CrossImplicationResult, generatedSummar
  * Precondition: `payload` is untrusted and may be any JSON value.
  * Postcondition: always returns a non-empty string (falls back to "No rationale provided").
  * Invariant: never throws for any input shape.
+ * Failure modes: none — pure computation, cannot fail.
  */
 export function extractRationale(payload: unknown): string {
   if (typeof payload !== "object" || payload === null) {

@@ -38,15 +38,20 @@ export interface FindingEvidence {
  *
  * @remarks
  * Invariant: `category` is a dot-separated hierarchical identifier (e.g., `"claim_graph.orphaned_claim"`).
+ * Invariant: `rationale` explains why the finding exists; it is always non-empty.
  * Invariant: `evidence` is non-empty when supporting context is available.
  * `suggestion` provides an actionable remediation hint when one can be inferred.
  * `relatedClaimIdentifiers` links the finding to specific claims in the claim graph.
+ *
+ * Required by spec [RAE-FINDING-SHAPE]: severity, category, provenance,
+ * description, rationale, and evidence are all mandatory fields.
  */
 export interface Finding {
   readonly severity: FindingSeverity;
   readonly category: string;
   readonly provenance: FindingProvenance;
   readonly description: string;
+  readonly rationale: string;
   readonly evidence: readonly FindingEvidence[];
   readonly suggestion?: string;
   readonly relatedClaimIdentifiers?: readonly string[];

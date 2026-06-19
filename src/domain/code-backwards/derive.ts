@@ -1,3 +1,10 @@
+/**
+ * Derives informal specifications from source code by prompting an LLM to
+ * infer behavioral claims that the implementation satisfies.
+ *
+ * Entry point for the code-backwards pipeline — generates claims before formalization.
+ * Exports: deriveSpecsFromCode, DeriveResult.
+ */
 import { readdir, readFile, stat } from "node:fs/promises";
 import { extname, join, relative } from "node:path";
 
@@ -63,6 +70,28 @@ export interface DerivedSpecOutput {
  *
  * @param input - source directory, output path, model, and optional trace data
  * @returns derived specs and diagnostic findings
+ *
+ * @example
+ * ```ts
+ * const { specs, findings } = await deriveSpecsFromSource({
+ *   outputDir: toOutputDirPath("./output"),
+ *   srcDir: "./src",
+ *   model: "anthropic:claude-sonnet-4-20250514",
+ *   traces: sourceTraces,
+ *   suggestedCapabilities: ["auth-session", "data-export"],
+ * });
+ * console.log(`Derived ${specs.length} capability specs`);
+ * ```
+ *
+ * @remarks
+ * Precondition: `input.outputDir` is a valid, writable output directory path.
+ * Postcondition: on success, generated spec markdown files are atomically written to
+ * `gen_specs/` under `outputDir`. Returns partial results — LLM failures produce
+ * error findings rather than throwing.
+ * Failure modes: propagates filesystem write errors from `writeOutputAtomic`. LLM call
+ * failures are captured as error-severity findings (does not throw).
+ * Safety: performs network I/O (LLM call) and filesystem I/O (source scan + artifact write).
+ * No shared mutable state between calls.
  */
 export async function deriveSpecsFromSource(input: {
   readonly outputDir: OutputDirPath;
@@ -82,6 +111,7 @@ export async function deriveSpecsFromSource(input: {
       category: "code_derived.no_source_files",
       provenance: { file: input.srcDir },
       description: `No scannable source files found in ${input.srcDir}`,
+      rationale: "Cannot derive a specification when no source files are available to analyze",
       evidence: [{ kind: "directory", value: input.srcDir }],
     });
     return { specs: [], findings };
@@ -105,6 +135,7 @@ export async function deriveSpecsFromSource(input: {
       category: "code_derived.informalization_failed",
       provenance: { file: input.srcDir },
       description: `Code informalization LLM call failed: ${response.error.message}`,
+      rationale: "The LLM informalization step is required to translate source code into natural-language specifications",
       evidence: [{ kind: "phase", value: "code-derived-generation" }],
     });
     return { specs: [], findings };
@@ -135,6 +166,18 @@ export async function deriveSpecsFromSource(input: {
 // Source scanning
 // ---------------------------------------------------------------------------
 
+/**
+ * Collected source tree context used to construct the informalization prompt.
+ *
+ * @remarks
+ * Invariant: `fileList` is sorted lexicographically and contains relative paths
+ * for all files discovered under the source directory (excluding common non-source
+ * directories such as node_modules, .git, dist, build, coverage).
+ * Invariant: `fileContents` is a subset of `fileList` — every path in
+ * `fileContents` also appears in `fileList`.
+ * Invariant: the combined byte length of all `content` entries does not exceed
+ * SOURCE_CONTENT_BUDGET_BYTES.
+ */
 interface SourceContext {
   readonly fileList: readonly string[];
   readonly fileContents: readonly { readonly path: string; readonly content: string }[];
@@ -145,6 +188,14 @@ interface SourceContext {
  *
  * @param srcDir - absolute path to source directory
  * @returns file listing and selected file contents within budget
+ *
+ * @remarks
+ * Precondition: `srcDir` is a valid filesystem path (need not exist — produces empty result).
+ * Postcondition: returned `fileList` is sorted lexicographically; `fileContents` is a
+ * subset of `fileList` whose combined byte length does not exceed SOURCE_CONTENT_BUDGET_BYTES.
+ * Failure modes: filesystem errors on individual files are silently caught — unreadable
+ * files are skipped without aborting. If `srcDir` itself is unreadable, returns empty context.
+ * Safety: performs I/O; no shared mutable state.
  */
 async function buildSourceContext(srcDir: string): Promise<SourceContext> {
   const allFiles: string[] = [];
@@ -179,6 +230,20 @@ async function buildSourceContext(srcDir: string): Promise<SourceContext> {
 
 /**
  * Recursively walk a directory and collect relative file paths.
+ *
+ * @param baseDir - absolute root path used to compute relative paths
+ * @param currentDir - absolute path of the directory currently being traversed
+ * @param results - mutable accumulator for discovered relative file paths
+ * @returns resolves when traversal is complete; results are appended to `results`
+ *
+ * @remarks
+ * Precondition: `baseDir` is a prefix of `currentDir`.
+ * Postcondition: all regular files reachable from `currentDir` (excluding excluded
+ * directories: node_modules, .git, dist, build, coverage) are appended to `results`
+ * as relative paths from `baseDir`.
+ * Failure modes: if `readdir` fails on `currentDir`, returns without appending
+ * anything — does not throw.
+ * Safety: mutates `results` array; caller owns the array exclusively.
  */
 async function walkDirectory(baseDir: string, currentDir: string, results: string[]): Promise<void> {
   let entries;
@@ -209,6 +274,16 @@ async function walkDirectory(baseDir: string, currentDir: string, results: strin
 
 /**
  * Build the informalization prompt from source context and optional capability suggestions.
+ *
+ * @param sourceContext - structured source file listing and contents
+ * @param suggestedCapabilities - optional capability names to hint at during informalization
+ * @returns assembled prompt string ready for LLM submission
+ *
+ * @remarks
+ * Precondition: `sourceContext` conforms to the SourceContext invariants.
+ * Postcondition: returned string includes INFORMALIZE_INSTRUCTIONS, optional capability
+ * suggestions section, and source context section — never includes original requirement text.
+ * Failure modes: none — pure computation.
  */
 function buildInformalizationPrompt(
   sourceContext: SourceContext,
@@ -232,6 +307,17 @@ function buildInformalizationPrompt(
 // Response parsing
 // ---------------------------------------------------------------------------
 
+/**
+ * A single capability extracted and validated from the LLM informalization response.
+ *
+ * @remarks
+ * Invariant: `name` is a non-empty string — entries with missing or empty names
+ * are rejected during parsing.
+ * Invariant: each entry in `requirements` has a non-empty `id` and `text` — malformed
+ * requirement entries are filtered out before inclusion.
+ * Invariant: `sourceIdentifiers` contains trace identifiers resolved from source
+ * evidence files; it may be empty if no trace mapping exists for the capability's files.
+ */
 interface ParsedCapability {
   readonly name: string;
   readonly description: string;
@@ -239,6 +325,16 @@ interface ParsedCapability {
   readonly sourceIdentifiers: readonly string[];
 }
 
+/**
+ * Validated parse result of the full LLM informalization response.
+ *
+ * @remarks
+ * Invariant: if the response failed structural validation (not an object, or
+ * missing `capabilities` array), `capabilities` is empty and `findings` contains
+ * at least one error-severity finding describing the failure.
+ * Invariant: each entry in `capabilities` passed field-level validation; malformed
+ * entries are excluded and reported as warning findings.
+ */
 interface ParsedInformalizationResponse {
   readonly capabilities: readonly ParsedCapability[];
   readonly findings: readonly Finding[];
@@ -247,9 +343,16 @@ interface ParsedInformalizationResponse {
 /**
  * Parse the LLM informalization response into structured capabilities.
  *
- * @param response - raw LLM response value
+ * @param response - raw LLM response value (untrusted — may be any JSON shape)
  * @param traces - source traces for supplementary identifier mapping
  * @returns parsed capabilities and diagnostic findings
+ *
+ * @remarks
+ * Precondition: none — handles arbitrary input defensively.
+ * Postcondition: if `response` is structurally valid, `capabilities` contains
+ * parsed entries that passed field-level validation; otherwise `capabilities` is
+ * empty and `findings` contains at least one error-severity diagnostic.
+ * Failure modes: none — does not throw. Structural errors are captured as findings.
  */
 function parseInformalizationResponse(
   response: unknown,
@@ -263,6 +366,7 @@ function parseInformalizationResponse(
       category: "code_derived.parse_failed",
       provenance: { file: "<informalization>" },
       description: "Informalization response is not a JSON object",
+      rationale: "The informalization response must be a valid JSON object to extract capability specifications",
       evidence: [{ kind: "response_type", value: typeof response }],
     });
     return { capabilities: [], findings };
@@ -275,6 +379,7 @@ function parseInformalizationResponse(
       category: "code_derived.parse_failed",
       provenance: { file: "<informalization>" },
       description: "Informalization response missing 'capabilities' array",
+      rationale: "The response schema requires a top-level 'capabilities' array to enumerate derived specs",
       evidence: [{ kind: "keys", value: Object.keys(response as object).join(", ") }],
     });
     return { capabilities: [], findings };
@@ -303,8 +408,9 @@ function parseInformalizationResponse(
         severity: "warning",
         category: "code_derived.invalid_capability_entry",
         provenance: { file: "<informalization>" },
-        description: "Skipped malformed capability entry in informalization response",
-        evidence: [{ kind: "raw", value: JSON.stringify(entry).slice(0, 200) }],
+      description: "Skipped malformed capability entry in informalization response",
+      rationale: "Each capability entry must conform to the expected shape to produce a valid derived spec",
+      evidence: [{ kind: "raw", value: JSON.stringify(entry).slice(0, 200) }],
       });
     }
   }
@@ -314,6 +420,17 @@ function parseInformalizationResponse(
 
 /**
  * Parse a single capability entry from the LLM response.
+ *
+ * @param entry - untrusted capability entry object from the LLM response array
+ * @param traceByFile - lookup map from file paths to trace identifiers
+ * @returns parsed capability if structurally valid, or `undefined` if malformed
+ *
+ * @remarks
+ * Precondition: none — handles arbitrary input defensively.
+ * Postcondition: returns `undefined` for any entry missing required fields (name,
+ * description, requirements array with at least one valid requirement).
+ * When returning a value, guarantees non-empty `name` and non-empty `requirements`.
+ * Failure modes: none — pure computation, never throws.
  */
 function parseCapabilityEntry(
   entry: unknown,
@@ -372,6 +489,15 @@ function parseCapabilityEntry(
 
 /**
  * Format a parsed capability into EARS-preferring markdown spec structure.
+ *
+ * @param cap - validated parsed capability with name, description, and requirements
+ * @returns markdown string following the EARS-preferring spec template
+ *
+ * @remarks
+ * Precondition: `cap` satisfies the ParsedCapability invariants (non-empty name, non-empty requirements).
+ * Postcondition: returned markdown includes a top-level heading, description blockquote,
+ * and requirement subsections with evidence annotations.
+ * Failure modes: none — pure computation.
  */
 function formatCapabilityMarkdown(cap: ParsedCapability): string {
   const requirements = cap.requirements.map((req) => {
@@ -409,6 +535,7 @@ function formatCapabilityMarkdown(cap: ParsedCapability): string {
  * Precondition: `identifier` is a non-empty string.
  * Postcondition: returned string is lowercase; single-segment identifiers are returned as-is.
  * Invariant: at most the first two hyphenated parts are retained.
+ * Failure modes: none — pure computation.
  */
 export function inferCapability(identifier: string): string {
   const normalized = identifier.toLowerCase();

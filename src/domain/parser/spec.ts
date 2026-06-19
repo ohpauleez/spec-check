@@ -1,3 +1,12 @@
+/**
+ * Parses spec documents, extracting requirements, EARS-pattern scenarios, references,
+ * and delta sections from capability spec markdown files.
+ *
+ * Role: Core parser for the specification layer — produces the structured spec models
+ * that coverage and qualitative analysis consume.
+ *
+ * Key exports: `parseSpecDocument`
+ */
 import { readFile } from "node:fs/promises";
 
 import type { ParsedRequirement, ParsedScenario, ParsedSpec } from "../model.js";
@@ -9,10 +18,27 @@ const REFERENCES_HEADING = "**References:**";
 const DELTA_HEADINGS = new Set(["ADDED Requirements", "MODIFIED Requirements", "REMOVED Requirements", "RENAMED Requirements"]);
 
 /**
- * Parse a capability spec markdown file for requirements, scenarios, references, and structure.
+ * Parse a capability spec markdown file, extracting requirements, scenarios, references,
+ * delta sections, and structural findings.
  *
- * @param file - spec markdown path
- * @returns parsed spec model
+ * @param file - absolute or workspace-relative path to the spec markdown file
+ * @returns parsed spec model containing requirements, scenarios, delta section tags,
+ *   structural findings (e.g., missing references, non-EARS bodies), and unparsed lines
+ *
+ * @remarks
+ * Preconditions:
+ * - `file` must be a readable filesystem path to a UTF-8 markdown file.
+ *
+ * Postconditions:
+ * - Requirements are extracted from `### Requirement:` blocks; scenarios from `#### Scenario:` blocks.
+ * - If no requirements or scenarios are found, a structural finding is emitted.
+ * - EARS classification is applied to each requirement body.
+ * - Unparsed lines (non-blank, not consumed by any rule) are preserved.
+ *
+ * Failure modes:
+ * - Throws if `readFile` fails (e.g., ENOENT, EACCES, or other I/O error).
+ *
+ * Safety: performs a single filesystem read; no concurrent mutation concerns.
  */
 export async function parseSpec(file: string): Promise<ParsedSpec> {
   const raw = await readFile(file, "utf8");
@@ -95,6 +121,7 @@ export async function parseSpec(file: string): Promise<ParsedSpec> {
  * Postcondition: the returned `endLine` is the 1-indexed last line consumed by this block.
  * Body lines are joined with spaces; references are extracted from a `**References:**` subsection.
  * EARS classification is applied to the body and a finding is emitted for non-EARS requirements.
+ * Failure modes: none — pure computation (operates on in-memory line arrays).
  */
 function parseRequirement(
   file: string,
@@ -187,6 +214,7 @@ function parseRequirement(
  * Precondition: `lines[startIndex]` starts with `"#### Scenario:"`.
  * Postcondition: the returned `endLine` is the 1-indexed last line consumed by this block.
  * Body lines are joined with spaces. Parsing terminates at the next heading of equal or higher level.
+ * Failure modes: none — pure computation (operates on in-memory line arrays).
  */
 function parseScenario(
   file: string,
@@ -246,6 +274,7 @@ function parseScenario(
  * Postcondition: `title` is always non-empty when the input is non-empty. If a bracketed
  * token is present but malformed, `identifierError` describes the issue and `identifier`
  * is undefined. A well-formed token yields `identifier` with no error.
+ * Failure modes: none — pure computation.
  */
 function parseTitledIdentifier(raw: string): {
   readonly title: string;
@@ -296,6 +325,7 @@ const UNWANTED_BEHAVIOR_INDICATORS = [
  * from `"conditional"` by the presence of negative-scenario indicators between
  * `IF` and `THEN`.
  * Invariant: classification is purely textual — no external state is consulted.
+ * Failure modes: none — pure computation.
  */
 function classifyEarsType(body: string): ParsedRequirement["earsType"] {
   const normalized = body.trim().toUpperCase();

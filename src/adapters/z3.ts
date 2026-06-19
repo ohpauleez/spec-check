@@ -1,3 +1,10 @@
+/**
+ * Z3 solver adapter that invokes the Z3 SMT solver as a subprocess,
+ * parses its output, and classifies results into a closed set of outcomes.
+ *
+ * Adapter layer — bridges domain SMT-LIB content to the Z3 binary.
+ * Exports: Z3ResultKind, Z3Result, Z3Options, runZ3.
+ */
 import type { SmtlibContent } from "../domain/branded.js";
 import { runProcess } from "./process.js";
 
@@ -46,6 +53,16 @@ export interface Z3Result {
  * When Z3 emits `(error ...)` diagnostic lines, the result is classified as `"error"`
  * regardless of any subsequent verdict line, since the verdict is unreliable when
  * assertions failed to parse.
+ *
+ * Failure modes:
+ * - Z3 binary not found or not executable → `kind: "error"`, `exitCode: null`.
+ * - Process exceeds timeout → `kind: "timeout"`, process killed via SIGKILL.
+ * - Z3 emits `(error ...)` diagnostics → `kind: "error"`, `errorCount > 0`.
+ * - Z3 produces unrecognized output (no verdict line) → `kind: "error"`, `errorCount: 0`.
+ * - Network/filesystem unavailability does not apply (Z3 is a local subprocess).
+ *
+ * Safety: spawns a child process; at most one Z3 process per call. Caller is
+ * responsible for bounding concurrent invocations to avoid resource exhaustion.
  */
 export async function runZ3Query(input: {
   readonly smtlib: SmtlibContent;

@@ -1,10 +1,67 @@
+/**
+ * Performs deterministic coverage analysis comparing spec claims against upstream requirements.
+ * Detects missing spec files, unsupported references, coverage gaps, contradictions, and
+ * task-evidence inconsistencies.
+ *
+ * Role: Spec-forward analysis pass that validates structural completeness without LLM calls.
+ *
+ * Key exports: `analyzeCoverage`
+ */
 import type { ParsedProposal, ParsedSpec, ParsedTaskDocument } from "../model.js";
 import type { Claim, ClaimGraph } from "../claim-graph.js";
 import type { Finding } from "../findings.js";
 import { severityForObligation } from "../claim-graph.js";
 
 /**
- * Deterministic coverage and contradiction analysis across upstream and downstream claims.
+ * Performs deterministic coverage and contradiction analysis across upstream and downstream claims.
+ *
+ * Runs five sub-analyses in sequence: missing spec files, unsupported references,
+ * coverage gaps, contradictions/drift, and task evidence inconsistency.
+ *
+ * @param input - Analysis input bundle.
+ * @param input.claimGraph - The claim graph containing all upstream and downstream claims to analyze.
+ * @param input.proposal - Optional parsed proposal; when absent, the missing-spec-file check is skipped.
+ * @param input.specs - All active parsed spec files in the catalog.
+ * @param input.tasks - Optional parsed task document; when absent, task evidence analysis still
+ *   runs but finds no task_evidence claims in the graph.
+ *
+ * @returns A readonly array of {@link Finding} objects. Returns an empty array when no issues
+ *   are detected. Findings are emitted with severity levels derived from claim obligation
+ *   (for requirement-linked checks) or fixed at "warning" (for uncovered upstream claims).
+ *
+ * @remarks
+ * Preconditions:
+ * - `input.claimGraph.claims` must include all claims extracted from the provided documents.
+ * - `input.specs` file paths must follow the convention `<dir>/<capability>/...` for the
+ *   missing-spec-file detection to match capabilities correctly.
+ *
+ * Postconditions:
+ * - The returned findings array is a fresh allocation; callers may freely mutate it.
+ * - Finding categories are prefixed with `coverage.` (e.g., `coverage.contradiction`,
+ *   `coverage.uncovered_upstream_claim`).
+ *
+ * Invariants:
+ * - Analysis is purely deterministic — no randomness or LLM calls.
+ * - A keyword token cache is built once and shared across all O(upstream × downstream)
+ *   comparisons; keyword tokens are lowercase strings of at least 5 characters.
+ * - Sub-analyses are independent and do not share mutable state beyond the token cache.
+ *
+ * Failure modes: none — pure computation over in-memory data structures.
+ *
+ * @example
+ * ```typescript
+ * import { analyzeCoverage } from "./coverage.js";
+ *
+ * const findings = analyzeCoverage({
+ *   claimGraph: extractedGraph,
+ *   proposal: parsedProposal,
+ *   specs: [parsedSpec1, parsedSpec2],
+ *   tasks: parsedTaskDoc,
+ * });
+ *
+ * const errors = findings.filter((f) => f.severity === "error");
+ * console.log(`${errors.length} error-level findings detected`);
+ * ```
  */
 export function analyzeCoverage(input: {
   readonly claimGraph: ClaimGraph;
@@ -38,6 +95,7 @@ export function analyzeCoverage(input: {
  * Precondition: `specs` file paths follow the convention `<dir>/<capability>/...`.
  * Postcondition: each finding identifies one unmatched capability name.
  * Returns empty array if proposal is undefined or has no Capabilities section.
+ * Failure modes: none — pure computation.
  */
 function detectMissingSpecFiles(
   proposal: ParsedProposal | undefined,
@@ -74,6 +132,7 @@ function detectMissingSpecFiles(
       category: "coverage.missing_spec_file",
       provenance: { file: proposal.file, heading: "Capabilities", line: capabilitiesSection.startLine },
       description: `Declared capability has no active spec file: ${capability}`,
+      rationale: "A declared capability without a corresponding spec file means requirements for that capability cannot be verified, leaving a blind spot in coverage analysis.",
       evidence: [{ kind: "declared_capability", value: capability }],
     });
   }
@@ -92,6 +151,7 @@ function detectMissingSpecFiles(
  * Postcondition: finding severity matches the obligation level of the referencing requirement.
  * Invariant: only requirement claims are checked; empty references and archived
  * provenance references (`openspec/changes/archive/`) are skipped.
+ * Failure modes: none — pure computation.
  */
 function detectUnsupportedReferences(graph: ClaimGraph): readonly Finding[] {
   const upstreamClaims = graph.claims.filter((claim) => claim.kind !== "requirement" && claim.kind !== "scenario");
@@ -123,6 +183,7 @@ function detectUnsupportedReferences(graph: ClaimGraph): readonly Finding[] {
         category: "coverage.unsupported_reference",
         provenance: claim.provenance,
         description: `Requirement references unsupported upstream content: ${reference}`,
+        rationale: "A requirement that references upstream content not present in the claim graph cannot be traced back to its origin, breaking the traceability chain needed for conformance verification.",
         evidence: [
           { kind: "reference", value: reference },
           { kind: "requirement", value: claim.text },
@@ -146,6 +207,7 @@ function detectUnsupportedReferences(graph: ClaimGraph): readonly Finding[] {
  * Precondition: `tokenCache` has entries for all claims in `graph`.
  * Postcondition: each finding identifies one upstream claim lacking downstream support.
  * Invariant: overlap is determined by shared keyword tokens (minimum 5 characters).
+ * Failure modes: none — pure computation.
  */
 function detectCoverageGaps(graph: ClaimGraph, tokenCache: TokenCache): readonly Finding[] {
   const upstream = graph.claims.filter((claim) => isUpstreamClaim(claim.kind));
@@ -165,6 +227,7 @@ function detectCoverageGaps(graph: ClaimGraph, tokenCache: TokenCache): readonly
       category: "coverage.uncovered_upstream_claim",
       provenance: sourceClaim.provenance,
       description: "Upstream claim lacks matching downstream requirement coverage",
+      rationale: "An upstream claim with no downstream requirement coverage indicates a design intent or constraint that was never refined into a verifiable specification, risking silent omission.",
       evidence: [{ kind: "upstream_claim", value: sourceClaim.text }],
       ...(sourceClaim.id === undefined ? {} : { relatedClaimIdentifiers: [sourceClaim.id] }),
     });
@@ -185,6 +248,7 @@ function detectCoverageGaps(graph: ClaimGraph, tokenCache: TokenCache): readonly
  * Postcondition: contradiction findings are emitted at the requirement's obligation severity;
  * drift findings are always warnings.
  * Invariant: only claim pairs with keyword overlap are compared.
+ * Failure modes: none — pure computation.
  */
 function detectContradictionsAndDrift(graph: ClaimGraph, tokenCache: TokenCache): readonly Finding[] {
   const upstream = graph.claims.filter((claim) => isUpstreamClaim(claim.kind));
@@ -204,6 +268,7 @@ function detectContradictionsAndDrift(graph: ClaimGraph, tokenCache: TokenCache)
           category: "coverage.contradiction",
           provenance: requirement.provenance,
           description: "Detected contradiction between upstream and downstream claims",
+          rationale: "A negation conflict between upstream intent and downstream requirement means the implementation cannot satisfy both, indicating a specification error that must be resolved before verification.",
           evidence: [
             { kind: "upstream_claim", value: sourceClaim.text },
             { kind: "downstream_requirement", value: requirement.text },
@@ -219,6 +284,7 @@ function detectContradictionsAndDrift(graph: ClaimGraph, tokenCache: TokenCache)
           category: "coverage.semantic_drift",
           provenance: requirement.provenance,
           description: "Downstream requirement may omit upstream failure-mode constraints",
+          rationale: "When a downstream requirement overlaps with an upstream failure mode but lacks failure-handling terms, the error path may be unspecified — risking undefined behavior under fault conditions.",
           evidence: [
             { kind: "upstream_failure_mode", value: sourceClaim.text },
             { kind: "downstream_requirement", value: requirement.text },
@@ -244,6 +310,7 @@ function detectContradictionsAndDrift(graph: ClaimGraph, tokenCache: TokenCache)
  * Postcondition: each orphan task evidence produces a `coverage.task_gap` finding;
  * each negation conflict produces a `coverage.task_conflict` finding.
  * Invariant: overlap between task and requirement is keyword-based.
+ * Failure modes: none — pure computation.
  */
 function detectTaskEvidenceInconsistency(graph: ClaimGraph, tokenCache: TokenCache): readonly Finding[] {
   const tasks = graph.claims.filter((claim) => claim.kind === "task_evidence");
@@ -259,6 +326,7 @@ function detectTaskEvidenceInconsistency(graph: ClaimGraph, tokenCache: TokenCac
         category: "coverage.task_gap",
         provenance: taskClaim.provenance,
         description: "Completed task evidence has no matching specification requirement",
+        rationale: "Task evidence without a matching requirement suggests work was done outside the scope of the specification, which may indicate undocumented requirements or scope creep.",
         evidence: [{ kind: "task_evidence", value: taskClaim.text }],
       });
       continue;
@@ -274,6 +342,7 @@ function detectTaskEvidenceInconsistency(graph: ClaimGraph, tokenCache: TokenCac
         category: "coverage.task_conflict",
         provenance: taskClaim.provenance,
         description: "Task evidence appears inconsistent with requirement behavior",
+        rationale: "A negation conflict between task evidence and a requirement indicates the implementation may have diverged from the specified behavior, requiring investigation before the task can be considered compliant.",
         evidence: [
           { kind: "task_evidence", value: taskClaim.text },
           { kind: "requirement", value: requirement.text },
@@ -294,6 +363,7 @@ function detectTaskEvidenceInconsistency(graph: ClaimGraph, tokenCache: TokenCac
  *
  * @remarks
  * Postcondition: returns true only for the closed set of upstream claim kinds.
+ * Failure modes: none — pure computation.
  */
 function isUpstreamClaim(kind: Claim["kind"]): boolean {
   return kind === "proposal_property" || kind === "design_property" || kind === "assumption" || kind === "invariant" || kind === "failure_mode";
@@ -303,8 +373,16 @@ function isUpstreamClaim(kind: Claim["kind"]): boolean {
 type TokenCache = ReadonlyMap<Claim, ReadonlySet<string>>;
 
 /**
- * Build a token cache for all claims once. Avoids redundant tokenization across
- * the O(upstream x downstream) comparisons.
+ * Build a pre-computed token cache mapping each claim to its keyword token set.
+ *
+ * @param claims - all claims from the claim graph to tokenize
+ * @returns a map from claim reference identity to the claim's keyword token set
+ *
+ * @remarks
+ * Precondition: `claims` is a non-empty array of valid Claim objects with non-null `text`.
+ * Postcondition: the returned map has exactly one entry per input claim.
+ * Invariant: tokenization uses `keywordTokens` — lowercase tokens of 5+ characters.
+ * Failure modes: none — pure computation.
  */
 function buildTokenCache(claims: readonly Claim[]): TokenCache {
   const cache = new Map<Claim, ReadonlySet<string>>();
@@ -316,7 +394,16 @@ function buildTokenCache(claims: readonly Claim[]): TokenCache {
 
 /**
  * Check whether two pre-computed token sets share any keyword.
- * Iterates the smaller set for O(min(|a|, |b|)) lookups.
+ *
+ * @param a - first token set (or undefined if the claim was not cached)
+ * @param b - second token set (or undefined if the claim was not cached)
+ * @returns true if the sets share at least one common token
+ *
+ * @remarks
+ * Precondition: none — undefined inputs are handled as no-overlap.
+ * Postcondition: returns true only when at least one token exists in both sets.
+ * Invariant: iterates the smaller set for O(min(|a|, |b|)) lookups.
+ * Failure modes: none — pure computation.
  */
 function cachedTokensOverlap(
   a: ReadonlySet<string> | undefined,
@@ -343,6 +430,7 @@ function cachedTokensOverlap(
  * @remarks
  * Postcondition: all tokens are lowercase, trimmed, and at least 5 characters long.
  * Invariant: splitting is performed on non-alphanumeric boundaries.
+ * Failure modes: none — pure computation.
  */
 function keywordTokens(text: string): ReadonlySet<string> {
   return new Set(
@@ -363,6 +451,7 @@ function keywordTokens(text: string): ReadonlySet<string> {
  *
  * @remarks
  * Postcondition: returns true only when the negation status of the two texts differs.
+ * Failure modes: none — pure computation.
  */
 function isNegationConflict(left: string, right: string): boolean {
   const leftNegated = containsNegation(left);
@@ -378,6 +467,7 @@ function isNegationConflict(left: string, right: string): boolean {
  *
  * @remarks
  * Postcondition: matching is case-insensitive and requires surrounding whitespace.
+ * Failure modes: none — pure computation.
  */
 function containsNegation(text: string): boolean {
   const normalized = text.toLowerCase();
@@ -392,6 +482,7 @@ function containsNegation(text: string): boolean {
  *
  * @remarks
  * Postcondition: matching is case-insensitive substring search.
+ * Failure modes: none — pure computation.
  */
 function containsFailureTerms(text: string): boolean {
   const normalized = text.toLowerCase();
@@ -407,6 +498,7 @@ function containsFailureTerms(text: string): boolean {
  * @remarks
  * Postcondition: returned string is trimmed, lowercase, with no backticks/asterisks/underscores,
  * and whitespace runs replaced by hyphens.
+ * Failure modes: none — pure computation.
  */
 function normalizeCapabilityName(raw: string): string {
   return raw
@@ -426,6 +518,7 @@ function normalizeCapabilityName(raw: string): string {
  * Archived change documents are valid provenance-only links — they record the design
  * history behind a requirement but do not need to be present in the active analysis catalog.
  * Postcondition: returns true only for paths that pass through the archive directory.
+ * Failure modes: none — pure computation.
  */
 function isArchivedChangeReference(reference: string): boolean {
   return reference.includes("openspec/changes/archive/");

@@ -1,3 +1,9 @@
+/**
+ * Exposes the build-time-injected semantic version string for spec-check.
+ *
+ * Used by the CLI for --version output and report metadata.
+ * Exports: `SPEC_CHECK_VERSION`.
+ */
 declare const __SPEC_CHECK_VERSION__: string;
 
 /**

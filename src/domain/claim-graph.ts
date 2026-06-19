@@ -1,3 +1,10 @@
+/**
+ * Builds and queries the claim graph — a unified structure linking requirements,
+ * scenarios, proposals, designs, and task evidence into traceable claims.
+ *
+ * Domain layer — core data structure for cross-artifact consistency analysis.
+ * Exports: ClaimKind, Claim, ClaimGraph, buildClaimGraph.
+ */
 import type {
   ParsedDesign,
   ParsedProposal,
@@ -21,6 +28,22 @@ import { toClaimId, type CapabilityName, type ClaimId } from "./branded.js";
  * - `"invariant"` — a stated invariant from the proposal.
  * - `"failure_mode"` — a documented failure mode from the proposal.
  * - `"task_evidence"` — evidence of implementation from a task document.
+ *
+ * @example
+ * ```ts
+ * function describeClaim(kind: ClaimKind): string {
+ *   switch (kind) {
+ *     case "requirement": return "spec requirement";
+ *     case "scenario": return "spec scenario";
+ *     case "proposal_property": return "proposal property";
+ *     case "design_property": return "design property";
+ *     case "assumption": return "assumed context";
+ *     case "invariant": return "stated invariant";
+ *     case "failure_mode": return "documented failure mode";
+ *     case "task_evidence": return "implementation evidence";
+ *   }
+ * }
+ * ```
  */
 export type ClaimKind =
   | "requirement"
@@ -50,6 +73,18 @@ export type ObligationLevel = "mandatory" | "advisory" | "informational";
  * Invariant: `text` is a non-empty string.
  * Invariant: `provenance.file` is a non-empty path.
  * If `id` is present, it is a branded {@link ClaimId} unique within the graph.
+ *
+ * @example
+ * ```ts
+ * const claim: Claim = {
+ *   id: toClaimId("AUTH-SESSION-001"),
+ *   kind: "requirement",
+ *   text: "The system SHALL expire sessions after 30 minutes of inactivity.",
+ *   obligation: "mandatory",
+ *   provenance: { file: "specs/auth.md", heading: "Session Management", line: 42 },
+ *   references: ["AUTH-LOGIN-002"],
+ * };
+ * ```
  */
 export interface Claim {
   readonly id?: ClaimId;
@@ -70,6 +105,13 @@ export interface Claim {
  *
  * @remarks
  * Invariant: `claims` preserves extraction order (proposal, design, specs, tasks).
+ *
+ * @example
+ * ```ts
+ * const graph: ClaimGraph = { claims: [claim1, claim2] };
+ * const mandatory = graph.claims.filter(c => c.obligation === "mandatory");
+ * const requirements = graph.claims.filter(c => c.kind === "requirement");
+ * ```
  */
 export interface ClaimGraph {
   readonly claims: readonly Claim[];
@@ -96,6 +138,16 @@ export interface ClaimGraphOutput {
  * Postcondition: every claim in the returned graph has a non-empty `provenance.file`,
  *   or an error finding is emitted for the offending claim.
  * Claims are appended in deterministic order: proposal, design, specs, tasks.
+ *
+ * @example
+ * ```ts
+ * const { graph, findings } = buildClaimGraph({
+ *   specs: [parsedAuthSpec, parsedStorageSpec],
+ *   proposal: parsedProposal,
+ *   design: parsedDesign,
+ * });
+ * console.log(`Extracted ${graph.claims.length} claims, ${findings.length} issues`);
+ * ```
  */
 export function buildClaimGraph(input: {
   readonly proposal?: ParsedProposal;
@@ -356,6 +408,7 @@ function detectOrphanClaims(claims: readonly Claim[]): readonly Finding[] {
         ...(claim.provenance.heading === undefined ? {} : { heading: claim.provenance.heading }),
       },
       description: "Claim missing provenance",
+      rationale: "An orphaned claim cannot be traced back to its source document, making it impossible to verify correctness or detect when the upstream specification changes.",
       evidence: [{ kind: "claim_text", value: claim.text }],
       ...(claim.id === undefined ? {} : { relatedClaimIdentifiers: [claim.id] }),
     });

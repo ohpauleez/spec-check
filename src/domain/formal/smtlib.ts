@@ -1,3 +1,10 @@
+/**
+ * Compiles Logic IR claims into SMT-LIB text suitable for Z3 execution.
+ * Handles identifier sanitization, sort declarations, and assertion generation.
+ *
+ * Central compilation layer between the Logic IR and the Z3 solver adapter.
+ * Exports: compileSmtlib, compileSpecSmtlib, parseUnsatCore, sanitizeIdentifier.
+ */
 import type { LogicIrClaim, LogicFunctionSymbol } from "../logic-ir.js";
 import { toSanitizedClaimId, toSmtlibContent, type SanitizedClaimId, type SmtlibContent } from "../branded.js";
 
@@ -20,10 +27,16 @@ export interface CompiledSmtlib {
 /**
  * Compile logic IR into SMT-LIB with identifier sanitization and mapping comments.
  *
+ * @param claim - a validated LogicIrClaim to compile into SMT-LIB text
+ * @returns compiled SMT-LIB containing declarations, assertions, and the sanitized claim identifier
+ *
  * @remarks
- * The output `smtlib` contains declarations and assertions but does NOT include
+ * Precondition: `claim` is a structurally valid `LogicIrClaim` (passed validation).
+ * Postcondition: the output `smtlib` contains declarations and assertions but does NOT include
  * `(check-sat)`. Callers are responsible for appending `(check-sat)` when building
  * a complete query for the solver.
+ * Postcondition: `assertionExprs` contains sanitized inner expressions without `(assert ...)` wrapper.
+ * Failure modes: none — pure computation.
  */
 export function compileSmtlib(claim: LogicIrClaim): CompiledSmtlib {
   const identifierMap = new Map<string, string>();
@@ -70,7 +83,13 @@ export function compileSmtlib(claim: LogicIrClaim): CompiledSmtlib {
 
 /**
  * Check whether a code point is valid in SMT-LIB identifiers without escaping.
- * Valid characters: A-Z (65-90), a-z (97-122), 0-9 (48-57), _ (95).
+ *
+ * @param codePoint - numeric Unicode code point to test
+ * @returns true when the code point is A-Z (65-90), a-z (97-122), 0-9 (48-57), or _ (95)
+ *
+ * @remarks
+ * Postcondition: returns true only for characters that do not require hex-escaping.
+ * Failure modes: none — pure computation.
  */
 function isSmtlibSafeCodePoint(codePoint: number): boolean {
   return (
@@ -83,7 +102,13 @@ function isSmtlibSafeCodePoint(codePoint: number): boolean {
 
 /**
  * Check whether a code point is valid as the first character of an SMT-LIB identifier.
- * Valid leading characters: A-Z (65-90), a-z (97-122), _ (95).
+ *
+ * @param codePoint - numeric Unicode code point to test
+ * @returns true when the code point is A-Z (65-90), a-z (97-122), or _ (95)
+ *
+ * @remarks
+ * Postcondition: returns true only for characters valid in leading position (digits excluded).
+ * Failure modes: none — pure computation.
  */
 function isSmtlibLeadingCodePoint(codePoint: number): boolean {
   return (
@@ -104,6 +129,7 @@ function isSmtlibLeadingCodePoint(codePoint: number): boolean {
  * Postcondition: returned identifier is non-empty, starts with a letter or underscore,
  * and contains only [A-Za-z0-9_]. Illegal characters are hex-escaped as `_XX`.
  * Invariant: the empty string maps to `"_"`.
+ * Failure modes: none — pure computation.
  */
 export function sanitizeIdentifier(value: string): SanitizedClaimId {
   let output = "";
@@ -136,6 +162,7 @@ export function sanitizeIdentifier(value: string): SanitizedClaimId {
  * @remarks
  * Postcondition: identifiers matching `[A-Za-z_][A-Za-z0-9_\-.:]∗` are sanitized;
  * non-identifier content (parentheses, whitespace, operators) is preserved verbatim.
+ * Failure modes: none — pure computation.
  */
 function sanitizeAssertion(expr: string, sanitize: (value: string) => string): string {
   return expr.replace(/[A-Za-z_][A-Za-z0-9_\-.:]*/gu, (token) => sanitize(token));
@@ -152,6 +179,7 @@ function sanitizeAssertion(expr: string, sanitize: (value: string) => string): s
  * Postcondition: `declarations` contains `(declare-const ...)` and `(declare-fun ...)` lines.
  * Postcondition: `assertionExprs` contains the inner expressions from `(assert expr)` lines.
  * Lines that are comments, `(check-sat)`, or empty are ignored.
+ * Failure modes: none — pure computation. Malformed lines are silently skipped.
  */
 export function parseSmtlibContent(content: string): {
   readonly declarations: readonly string[];
@@ -218,6 +246,13 @@ export interface CompiledSpecSmtlib {
  * @returns combined SMT-LIB with deduplicated declarations, named assertions, and any merge conflicts
  *
  * @remarks
+ * Precondition: `claims` may be empty (produces output with no assertions).
+ * Precondition: each claim in `claims` is a structurally valid `LogicIrClaim`.
+ * Postcondition: `smtlib` contains declarations and named assertions but NOT `(check-sat)`.
+ * Postcondition: `assertionNameMap` maps every emitted assertion label back to its source claimId.
+ * Postcondition: claims involved in merge conflicts are excluded from the combined output.
+ * Failure modes: none — pure computation.
+ *
  * Strategy:
  * - Variable declarations are deduplicated by name (first-wins; same name + same sort → emit once).
  * - Function declarations are deduplicated by name; if a duplicate name has a different
@@ -361,6 +396,7 @@ export function compileSpecSmtlib(specFile: string, claims: readonly LogicIrClai
  * @remarks
  * Postcondition: returned labels are the raw strings from Z3 output.
  * Callers map these back to claim IDs via `CompiledSpecSmtlib.assertionNameMap`.
+ * Failure modes: none — returns empty array for malformed or unparseable input.
  */
 export function parseUnsatCore(stdout: string): readonly string[] {
   const lines = stdout.trim().split("\n");
@@ -378,7 +414,18 @@ export function parseUnsatCore(stdout: string): readonly string[] {
   return [];
 }
 
-/** Check whether two function symbols have identical signatures. */
+/**
+ * Check whether two function symbols have identical signatures.
+ *
+ * @param a - first function symbol to compare
+ * @param b - second function symbol to compare
+ * @returns true when both functions have the same return sort and identical arg sort lists
+ *
+ * @remarks
+ * Postcondition: returns true iff `a.returns === b.returns` and `a.args` and `b.args`
+ * are element-wise equal.
+ * Failure modes: none — pure computation.
+ */
 function signaturesMatch(a: LogicFunctionSymbol, b: LogicFunctionSymbol): boolean {
   if (a.returns !== b.returns) return false;
   if (a.args.length !== b.args.length) return false;

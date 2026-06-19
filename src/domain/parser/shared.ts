@@ -1,3 +1,12 @@
+/**
+ * Shared parsing utilities used across all document parsers.
+ * Provides heading detection, section extraction, identifier parsing, and provenance tracking.
+ *
+ * Role: Foundation layer for the parser module — all specific parsers depend on these helpers.
+ *
+ * Key exports: `parseHeading`, `extractSections`, `parseCanonicalIdentifier`,
+ * `collectUnparsedLines`, `toProvenance`, `HEADING_PATTERN`
+ */
 import type { LineProvenance, ParsedSection, UnparsedLine } from "../model.js";
 
 /** Regex matching ATX-style markdown headings (levels 1–6) with captured level and text groups. */
@@ -7,10 +16,16 @@ export const HEADING_PATTERN = /^(#{1,6})\s+(.+)$/u;
 export const CANONICAL_IDENTIFIER_PATTERN = /^\[([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)\]$/u;
 
 /**
- * Parse markdown headings with level and text.
+ * Parse a markdown line to extract ATX-style heading level and text.
  *
- * @param line - markdown line
- * @returns parsed heading when the line is a heading
+ * @param line - a single line of markdown text to inspect
+ * @returns an object with `level` (1–6) and trimmed `text` if the line is a valid ATX heading,
+ *   or `undefined` if the line is not a heading
+ *
+ * @remarks
+ * Preconditions: none — any string is accepted.
+ * Postconditions: when defined, `level` is in [1, 6] and `text` is the trimmed heading content.
+ * Failure modes: none — pure computation.
  */
 export function parseHeading(line: string): { readonly level: number; readonly text: string } | undefined {
   const match = line.match(HEADING_PATTERN);
@@ -25,10 +40,15 @@ export function parseHeading(line: string): { readonly level: number; readonly t
 }
 
 /**
- * Validate canonical bracketed identifier format.
+ * Validate and extract a canonical bracketed identifier of the form `[PREFIX-SEGMENT-...]`.
  *
- * @param token - bracketed identifier token
- * @returns bare canonical identifier when valid
+ * @param token - bracketed string to validate (e.g. `"[REQ-AUTH-01]"`)
+ * @returns the bare identifier string (without brackets) if valid, or `undefined` if malformed
+ *
+ * @remarks
+ * Preconditions: none — any string is accepted.
+ * Postconditions: when defined, the returned string matches `[A-Z][A-Z0-9]*(-[A-Z0-9]+)+`.
+ * Failure modes: none — pure computation.
  */
 export function parseCanonicalIdentifier(token: string): string | undefined {
   const match = token.match(CANONICAL_IDENTIFIER_PATTERN);
@@ -36,12 +56,25 @@ export function parseCanonicalIdentifier(token: string): string | undefined {
 }
 
 /**
- * Build markdown sections from heading boundaries.
+ * Build structured sections from a markdown document by splitting at heading boundaries.
  *
- * @param file - source file path
- * @param lines - full document lines
- * @param minLevel - minimum heading level to include
- * @returns parsed sections with line ranges
+ * @param file - source file path for provenance tracking (not read; already split into lines)
+ * @param lines - full document content split into lines
+ * @param minLevel - minimum ATX heading level (1–6) to treat as a section boundary
+ * @returns ordered array of parsed sections, each with heading text, line range, and body lines
+ *
+ * @remarks
+ * Preconditions:
+ * - `minLevel` should be in [1, 6]; values outside this range will simply match no headings.
+ * - `lines` represents the full document content.
+ *
+ * Postconditions:
+ * - Sections are returned in document order.
+ * - Each section's `startLine` is the 1-indexed heading line; `endLine` is the last body line
+ *   (or `startLine` if the section has no body).
+ * - Content before the first qualifying heading is not captured.
+ *
+ * Failure modes: none — pure computation.
  */
 export function extractSections(file: string, lines: readonly string[], minLevel: number): readonly ParsedSection[] {
   const sections: ParsedSection[] = [];
@@ -83,12 +116,22 @@ export function extractSections(file: string, lines: readonly string[], minLevel
 }
 
 /**
- * Convert unmatched lines to provenance-rich records.
+ * Collect all non-blank lines that were not consumed by parser logic, preserving provenance.
  *
- * @param file - source file path
- * @param lines - full document lines
- * @param matchedLineNumbers - line numbers consumed by parser logic
- * @returns preserved unparsed lines for evidence
+ * @param file - source file path for provenance records
+ * @param lines - full document content split into lines
+ * @param matchedLineNumbers - set of 1-indexed line numbers that were successfully parsed
+ * @returns array of unparsed lines with their provenance (file and line number)
+ *
+ * @remarks
+ * Preconditions:
+ * - `matchedLineNumbers` contains 1-indexed values corresponding to lines in `lines`.
+ *
+ * Postconditions:
+ * - Only non-blank, unmatched lines appear in the output.
+ * - Output preserves document order.
+ *
+ * Failure modes: none — pure computation.
  */
 export function collectUnparsedLines(
   file: string,
@@ -126,6 +169,7 @@ export function collectUnparsedLines(
  * @remarks
  * Precondition: `line` is a positive integer (1-indexed).
  * Postcondition: returned object is a fresh value with no shared references.
+ * Failure modes: none — pure computation.
  */
 export function toProvenance(file: string, line: number): LineProvenance {
   return { file, line };

@@ -1,3 +1,10 @@
+/**
+ * Translates natural-language specification claims into SMT-LIB formalizations
+ * by prompting an LLM and validating the structured output.
+ *
+ * Core transformation step in the formal verification pipeline.
+ * Exports: formalizeClaims, formalizeClaim.
+ */
 import { callOpencode } from "../../adapters/opencode.js";
 import { mapBounded } from "../../adapters/concurrency.js";
 import type { Claim } from "../claim-graph.js";
@@ -13,6 +20,16 @@ import { FORMALIZATION_INSTRUCTIONS, FORMALIZATION_SANDBOXING, BATCH_FORMALIZATI
  * @remarks
  * Invariant: `samples` contains only structurally validated Logic IR claims.
  * Invariant: `invalidSamples` preserves the raw payload and rejection reason for diagnostics.
+ *
+ * @example
+ * ```ts
+ * const candidate: FormalizationCandidate = {
+ *   claim: { kind: "requirement", text: "SHALL timeout", obligation: "mandatory",
+ *     provenance: { file: "specs/auth.md" }, references: [] },
+ *   samples: [validLogicIrClaim],
+ *   invalidSamples: [{ raw: { malformed: true }, reason: "missing assertions field" }],
+ * };
+ * ```
  */
 export interface FormalizationCandidate {
   readonly claim: Claim;
@@ -45,20 +62,94 @@ export interface FormalizationError {
   readonly message: string;
 }
 
-/** Maximum concurrent LLM formalization sessions across claims. */
+/**
+ * Maximum concurrent LLM formalization sessions across claims.
+ *
+ * @remarks
+ * **Value:** 3 concurrent file-batch LLM sessions.
+ *
+ * **Rationale:** LLM API rate limits and cost are the binding constraints. At 3
+ * concurrent sessions the pipeline keeps the model busy without triggering
+ * per-minute rate limit rejections on most providers (typical burst limit is
+ * 5–10 RPM for large-context calls). Lower values under-utilize available
+ * throughput; higher values risk 429 errors and wasted retry budget.
+ *
+ * **Exceeded behavior:** This is a default — callers may override via the
+ * `concurrency` parameter. If overridden higher, expect increased rate-limit
+ * pressure and potential retry storms.
+ */
 const FORMALIZATION_CONCURRENCY_DEFAULT = 3;
 
 /**
- * Formalize eligible claims with batch-per-file strategy and bounded concurrency.
+ * Formalize eligible claims into Logic IR using a batch-per-file strategy with bounded concurrency.
  *
- * @param input - Claims to formalize, model to use, and samples per claim
- * @returns All successfully formalized candidates, aggregated findings, and any errors
+ * @param input - Configuration object for the formalization pipeline.
+ * @param input.claims - All claims to consider; only `"requirement"` and `"scenario"` kinds are processed.
+ * @param input.model - LLM model identifier passed to the adapter for each formalization call.
+ * @param input.samplesPerClaim - Number of independent valid Logic IR samples to collect per claim.
+ * @param input.concurrency - Maximum concurrent file-batch LLM sessions (defaults to 3).
+ *
+ * @returns On success (`ok`): a {@link FormalizationOutput} containing:
+ *   - `candidates` — successfully formalized claims with their valid Logic IR samples (preserves input order).
+ *   - `findings` — warnings from rejected samples or batch entry validation failures.
+ *   - `errors` — per-claim errors for claims that could not be formalized after all retries.
+ *   The current implementation always returns `ok` with partial results; total failures are
+ *   captured in `output.errors` rather than short-circuiting the pipeline.
+ *
+ *   On error (`err`): a readonly array of {@link FormalizationError} describing claims that
+ *   failed entirely. Reserved for future use where catastrophic failure aborts the pipeline.
+ *
+ * @throws Propagates unhandled errors from the concurrency adapter (`mapBounded`) or the
+ *   LLM transport layer if they throw outside of the handled retry/fallback paths (e.g.,
+ *   network socket destruction, AbortSignal). Callers should wrap in try/catch for resilience.
  *
  * @remarks
- * Strategy: claims are grouped by provenance file. Each file's claims are sent as
- * a single batch LLM call. Individual entries that fail validation are retried
- * individually with the single-claim prompt. This reduces LLM calls from
- * O(claims × samplesPerClaim) to O(files × samplesPerClaim) in the happy path.
+ * Precondition: `input.claims` may be empty (produces empty output).
+ * Precondition: `input.samplesPerClaim` >= 1.
+ * Postcondition: every entry in `candidates` has at least one structurally valid Logic IR sample.
+ * Postcondition: `candidates.length + errors.length <= eligibleClaims.length`.
+ *
+ * **Concurrency** (value: 3 file-batch sessions, unit: parallel LLM API calls):
+ * File batches are processed with at most `concurrency` (default 3) parallel LLM
+ * sessions. Within a batch, individual retries are capped at concurrency 2 (to
+ * respect rate limits while still making progress on failed entries). The function
+ * is safe to call concurrently from multiple callers — no shared mutable state.
+ *
+ * **Retry count** (value: 3, unit: LLM transport-level retries per call):
+ * Each `callOpencode` invocation retries up to 3 times on transient failures
+ * (network errors, 5xx responses). This bounds worst-case latency per call to
+ * ~4× the single-call timeout while recovering from intermittent provider issues.
+ *
+ * **Sample count per claim** (value: caller-specified `samplesPerClaim`, typically 3):
+ * Multiple independent formalizations are collected per claim so downstream
+ * clustering can detect instability. The attempt cap per claim is bounded to
+ * `samplesPerClaim × 3` maximum LLM calls to prevent unbounded retry loops when
+ * the model consistently produces invalid output.
+ *
+ * **Batch size** (value: one batch per provenance file, unbounded claim count):
+ * Claims are grouped by provenance file. Each file group is sent as a single
+ * batch LLM call. This reduces LLM calls from O(claims × samplesPerClaim) to
+ * O(files × samplesPerClaim) in the happy path. Individual entries that fail
+ * validation are retried individually with the single-claim prompt (up to
+ * `samplesPerClaim × 3` attempts per claim). If the entire batch call fails,
+ * all claims in that batch fall back to individual formalization.
+ *
+ * @example
+ * ```ts
+ * const result = await formalizeClaims({
+ *   claims: parsedClaims,
+ *   model: "anthropic:claude-sonnet-4-20250514",
+ *   samplesPerClaim: 3,
+ *   concurrency: 5,
+ * });
+ * if (result.ok) {
+ *   console.log(`Formalized ${result.value.candidates.length} claims`);
+ *   console.log(`Errors: ${result.value.errors.length}`);
+ *   for (const finding of result.value.findings) {
+ *     console.warn(finding.description);
+ *   }
+ * }
+ * ```
  */
 export async function formalizeClaims(input: {
   readonly claims: readonly Claim[];
@@ -115,7 +206,22 @@ export async function formalizeClaims(input: {
  * individual single-claim formalization.
  *
  * @param input - claims from one file, model, and samples per claim
- * @returns aggregated candidates, findings, and errors
+ * @param input.claims - claims from a single provenance file to formalize together
+ * @param input.model - LLM model identifier for formalization calls
+ * @param input.samplesPerClaim - number of valid Logic IR samples to collect per claim
+ * @returns aggregated candidates, findings, and errors across batch and retry phases
+ *
+ * @remarks
+ * Precondition: `input.claims` is non-empty (caller groups by file and only invokes for non-empty groups).
+ * Precondition: `input.samplesPerClaim` >= 1.
+ * Postcondition: every input claim appears in exactly one of: `candidates`, `errors`, or was
+ * merged into an existing candidate during the additional-samples phase.
+ *
+ * Failure modes:
+ * - Propagates unhandled errors from `callOpencode` or `mapBounded` if they throw outside
+ *   of the retry/fallback paths (network socket destruction, AbortSignal).
+ * - Individual claim failures are captured in `errors`; the function does not throw for
+ *   per-claim LLM failures.
  */
 async function formalizeBatch(input: {
   readonly claims: readonly Claim[];
@@ -126,7 +232,10 @@ async function formalizeBatch(input: {
   const findings: Finding[] = [];
   const errors: FormalizationError[] = [];
 
-  // Attempt batch call.
+  // ─── Phase 1: Batch attempt ───────────────────────────────────────────────────
+  // Goal: formalize all claims in a single LLM call to amortize latency and cost.
+  // A batch call is O(1) in network round-trips regardless of claim count, making
+  // it strictly cheaper than per-claim calls when the model cooperates.
   const prompt = buildBatchFormalizationPrompt(input.claims);
   const response = await callOpencode({
     model: input.model,
@@ -134,8 +243,13 @@ async function formalizeBatch(input: {
     prompt,
     retries: 3,
   });
+  // Invariant on success: `response.value` contains one entry per input claim
+  // (positional correspondence). Validation of individual entries happens below.
 
-  // If the entire batch call fails, fall back to individual calls for all claims.
+  // If the entire batch call fails (network error, rate limit exhaustion after
+  // retries, or unparseable top-level response), no partial results are salvageable.
+  // Falling back to individual calls is safe because the batch failure is
+  // independent of any single claim's content — the model simply did not respond.
   if (!response.ok) {
     const fallbackResults = await mapBounded(input.claims, 2, async (claim) => {
       return await sampleFormalizationsForClaim({
@@ -155,10 +269,13 @@ async function formalizeBatch(input: {
     return { candidates, findings, errors };
   }
 
-  // Parse batch response.
+  // Parse the batch response into positionally-indexed entries. Each entry
+  // corresponds to the claim at the same index in the input array.
   const batchEntries = extractBatchPayload(response.value);
 
-  // Match entries to claims by position.
+  // Match entries to claims by position. Claims whose batch entry is missing or
+  // invalid are collected for individual retry. This preserves the invariant that
+  // every input claim is either resolved to a candidate or queued for retry.
   const failedClaims: Claim[] = [];
   for (let i = 0; i < input.claims.length; i++) {
     const claim = input.claims[i];
@@ -179,6 +296,7 @@ async function formalizeBatch(input: {
         category: "formalization.batch_entry_invalid",
         provenance: claim.provenance,
         description: `Batch entry invalid, retrying individually: ${validated.error.message}`,
+        rationale: "A batch entry that fails validation suggests the model produced malformed output for this claim; individual retry may succeed but the instability signals a fragile formalization.",
         evidence: [{ kind: "claim", value: claim.text }],
         ...(claim.id === undefined ? {} : { relatedClaimIdentifiers: [claim.id] }),
       });
@@ -192,7 +310,11 @@ async function formalizeBatch(input: {
     });
   }
 
-  // Retry individually for failed batch entries (need samplesPerClaim > 1 or validation failure).
+  // ─── Phase 2: Individual retry for failed batch entries ─────────────────────
+  // Goal: recover claims that the batch call could not produce valid output for.
+  // Per-claim retries are safe because each call is independent and bounded by
+  // sampleFormalizationsForClaim's internal attempt cap (samplesPerClaim * 3).
+  // Concurrency is capped at 2 to respect rate limits while still making progress.
   if (failedClaims.length > 0) {
     const retryResults = await mapBounded(failedClaims, 2, async (claim) => {
       return await sampleFormalizationsForClaim({
@@ -211,10 +333,18 @@ async function formalizeBatch(input: {
     }
   }
 
-  // For claims that succeeded in batch but need additional samples (samplesPerClaim > 1),
-  // collect additional samples individually.
+  // ─── Phase 3: Additional samples for clustering ────────────────────────────
+  // Goal: gather multiple independent formalizations per claim so downstream
+  // clustering can detect instability (divergent interpretations of the same
+  // natural-language claim). The batch call only yields one sample per claim;
+  // additional samples must be collected individually.
+  // The attempt cap per claim is bounded by sampleFormalizationsForClaim
+  // (samplesPerClaim * 3 max attempts), preventing runaway retries.
   if (input.samplesPerClaim > 1) {
     const needMoreSamples = candidates.filter((c) => c.samples.length < input.samplesPerClaim);
+    // Each candidate already holds at least one valid sample from Phase 1 or 2,
+    // so failures here are non-fatal — we degrade gracefully to fewer samples
+    // rather than losing the claim entirely.
     const additionalResults = await mapBounded(needMoreSamples, 2, async (candidate) => {
       const needed = input.samplesPerClaim - candidate.samples.length;
       return await sampleFormalizationsForClaim({
@@ -256,6 +386,11 @@ async function formalizeBatch(input: {
  * Postcondition: on success, `candidate.samples.length >= 1` (at least one valid sample).
  * Invariant: retry attempts are bounded to `samplesPerClaim * 3` to prevent unbounded loops.
  * Each attempt makes one LLM call; invalid responses are recorded but do not abort the loop.
+ *
+ * Failure modes:
+ * - Returns `err` if the LLM transport layer fails on the first call (no valid samples collected).
+ * - Returns `err` if all attempts produce invalid formalizations (exhausted retry budget).
+ * - Propagates unhandled errors from `callOpencode` if it throws outside retry paths.
  */
 async function sampleFormalizationsForClaim(input: {
   readonly claim: Claim;
@@ -290,6 +425,7 @@ async function sampleFormalizationsForClaim(input: {
         category: "formalization.invalid_sample",
         provenance: input.claim.provenance,
         description: `Rejected invalid formalization sample: ${validated.error.message}`,
+        rationale: "Repeated invalid samples consume retry budget and reduce the effective sample count available for clustering, potentially degrading confidence in the final formalization.",
         evidence: [
           { kind: "claim", value: input.claim.text },
           { kind: "attempt", value: String(attempts) },
@@ -326,6 +462,7 @@ async function sampleFormalizationsForClaim(input: {
  * Precondition: `claim.text` is treated as untrusted user content.
  * Postcondition: prompt instructs strict JSON output with Logic IR schema fields.
  * Invariant: claim text is never interpreted as instructions by the prompt structure.
+ * Failure modes: none — pure computation.
  */
 export function buildFormalizationPrompt(claim: Claim): string {
   return [
@@ -349,6 +486,7 @@ export function buildFormalizationPrompt(claim: Claim): string {
  * Precondition: `response` is untrusted and may be any JSON value.
  * Postcondition: returns the most specific nested payload for downstream validation.
  * Invariant: never throws; returns `response` as-is for non-object inputs.
+ * Failure modes: none — pure computation.
  */
 export function extractSamplePayload(response: unknown): unknown {
   if (typeof response !== "object" || response === null) {
@@ -375,6 +513,7 @@ export function extractSamplePayload(response: unknown): unknown {
  * @remarks
  * Precondition: all claims share the same provenance file.
  * Postcondition: the prompt instructs the LLM to return a JSON array in claim order.
+ * Failure modes: none — pure computation.
  */
 export function buildBatchFormalizationPrompt(claims: readonly Claim[]): string {
   const claimSections = claims.map((claim, index) => {
@@ -404,6 +543,7 @@ export function buildBatchFormalizationPrompt(claims: readonly Claim[]): string 
  * @remarks
  * Precondition: `response` is untrusted and may be any JSON value.
  * Postcondition: returns an array; empty array if structure is unrecognized.
+ * Failure modes: none — pure computation.
  */
 export function extractBatchPayload(response: unknown): readonly unknown[] {
   if (typeof response !== "object" || response === null) {

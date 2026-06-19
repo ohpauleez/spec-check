@@ -1,3 +1,10 @@
+/**
+ * Process execution adapter that spawns subprocesses with timeout support
+ * and captures stdout, stderr, exit codes, and termination signals.
+ *
+ * Adapter layer — provides a uniform subprocess interface to other adapters.
+ * Exports: ProcessResult, RunProcessOptions, runProcess, runProcessSync.
+ */
 import { spawn, spawnSync } from "node:child_process";
 
 /**
@@ -22,6 +29,17 @@ export interface ProcessResult {
  *
  * @param command - binary name or absolute path
  * @returns true when process spawns successfully and exits with code 0
+ *
+ * @remarks
+ * Precondition: `command` is a non-empty string.
+ * Postcondition: returns `true` if and only if `command --version` exits with code 0,
+ * or the spawn error is not ENOENT/ENOTDIR (indicating the binary exists but failed).
+ *
+ * Failure modes: none — spawn errors are caught and mapped to boolean result.
+ * This function never throws.
+ *
+ * Safety: synchronous subprocess spawn; blocks the event loop for the duration
+ * of `command --version`. Avoid calling in hot paths or tight loops.
  */
 export function isCommandAvailable(command: string): boolean {
   const result = spawnSync(command, ["--version"], {
@@ -43,7 +61,24 @@ export function isCommandAvailable(command: string): boolean {
  * @param command - binary name or absolute path
  * @param args - argv arguments without shell interpolation
  * @param options - execution options
- * @returns captured process result
+ * @param options.timeoutMs - maximum execution time in milliseconds; no timeout if omitted
+ * @param options.cwd - working directory for the child process
+ * @param options.stdinText - text to write to the child's stdin before closing it
+ * @returns captured process result including stdout, stderr, exit code, and timeout flag
+ *
+ * @remarks
+ * Precondition: `command` is a non-empty string referencing an executable binary.
+ * Postcondition: on resolution, all stdout/stderr data has been captured and the child
+ * process has terminated. On rejection, the process failed to spawn entirely.
+ *
+ * Failure modes:
+ * - Binary not found or not executable → rejects with an Error (ENOENT/EACCES).
+ * - Process exceeds `timeoutMs` → resolves with `timedOut: true`, process killed via SIGKILL.
+ * - Process exits with non-zero code → resolves normally with the exit code captured.
+ *
+ * Safety: spawns exactly one child process per call. The timer is always cleared on
+ * completion. No shell interpolation occurs (`shell: false`). Callers must bound
+ * concurrent invocations to avoid file descriptor exhaustion.
  */
 export async function runProcess(
   command: string,

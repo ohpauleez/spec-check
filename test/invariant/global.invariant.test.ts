@@ -83,6 +83,7 @@ describe("global invariants", () => {
       category: "test",
       provenance: { file: "test.md" },
       description: "test finding",
+      rationale: "test rationale",
       evidence: [{ kind: "test", value: "v" }],
     };
 

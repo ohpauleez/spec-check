@@ -1,3 +1,10 @@
+/**
+ * Generates SMT-LIB formalizations for code-derived specification claims by
+ * orchestrating formalization, clustering, and compilation steps.
+ *
+ * Bridges the derive stage to the formal verification layer in code-backwards.
+ * Exports: generateCodeFormalizations, CodeFormalizationOutput.
+ */
 import { writeOutputAtomic } from "../../adapters/fs.js";
 import { toCapabilityName, toClaimId, toRelativePath, type ModelName, type OutputDirPath, type RelativePath } from "../branded.js";
 import type { Finding } from "../findings.js";
@@ -48,6 +55,11 @@ export interface GeneratedFormalizationOutput {
  * findings rather than aborting the pipeline.
  * Invariant: partial results are preserved — a failure for one spec does not
  * prevent other specs from being formalized.
+ * Failure modes: propagates filesystem write errors from `writeOutputAtomic`.
+ * LLM formalization failures and Z3 clustering errors are captured as findings
+ * (error or warning severity) without throwing.
+ * Safety: performs network I/O (LLM formalization) and filesystem I/O (artifact writes).
+ * May spawn Z3 subprocesses for clustering stability checks. No shared mutable state.
  */
 export async function formalizeGeneratedSpecs(input: {
   readonly outputDir: OutputDirPath;
@@ -84,6 +96,7 @@ export async function formalizeGeneratedSpecs(input: {
         category: "code_derived.formalization_failure",
         provenance: { file: `<gen_specs/${spec.capability}.md>`, heading: spec.capability },
         description: `Code-derived formalization failed for capability ${spec.capability}: ${formalized.error.map((e) => e.message).join("; ")}`,
+        rationale: "The formalization step returned an unexpected error result, preventing any formal claims from being generated for this capability. Without formal claims, the capability cannot be verified.",
         evidence: spec.sourceIdentifiers.map((id) => ({ kind: "identifier", value: id })),
       });
       continue;
@@ -96,6 +109,7 @@ export async function formalizeGeneratedSpecs(input: {
         category: "code_derived.formalization_failure",
         provenance: { file: `<gen_specs/${spec.capability}.md>`, heading: spec.capability },
         description: `Code-derived formalization failed for capability ${spec.capability}: ${formalized.value.errors.map((e) => e.message).join("; ")}`,
+        rationale: "All formalization attempts failed with no viable candidates produced. The capability has no formal representation and cannot proceed to verification.",
         evidence: spec.sourceIdentifiers.map((id) => ({ kind: "identifier", value: id })),
       });
       continue;
@@ -108,6 +122,7 @@ export async function formalizeGeneratedSpecs(input: {
         category: "code_derived.formalization_partial",
         provenance: { file: `<gen_specs/${spec.capability}.md>`, heading: spec.capability },
         description: `Partial formalization failure for capability ${spec.capability}: ${formalized.value.errors.map((e) => e.message).join("; ")}`,
+        rationale: "Some claims were successfully formalized but others failed. The capability has incomplete formal coverage, which may leave certain behaviors unverified.",
         evidence: spec.sourceIdentifiers.map((id) => ({ kind: "identifier", value: id })),
       });
     }

@@ -1,3 +1,11 @@
+/**
+ * Parses proposal documents into structured section maps.
+ * Extracts known proposal sections (Motivation, Scope, Capabilities, etc.) from markdown.
+ *
+ * Role: Parser layer component responsible for proposal document ingestion.
+ *
+ * Key exports: `parseProposalDocument`
+ */
 import { readFile } from "node:fs/promises";
 
 import type { ParsedProposal } from "../model.js";
@@ -15,10 +23,25 @@ const PROPOSAL_SECTION_KEYS = new Set([
 ]);
 
 /**
- * Parse a proposal markdown file into deterministic section structure.
+ * Parse a proposal markdown file into a deterministic section structure.
  *
- * @param file - proposal markdown path
- * @returns parsed proposal model
+ * @param file - absolute or workspace-relative path to the proposal markdown file
+ * @returns parsed proposal model containing a section map (keyed by recognized heading names),
+ *   the source file path, and any unparsed lines not consumed by section extraction
+ *
+ * @remarks
+ * Preconditions:
+ * - `file` must be a readable filesystem path to a UTF-8 markdown file.
+ *
+ * Postconditions:
+ * - Only headings matching `PROPOSAL_SECTION_KEYS` are captured in the sections map.
+ * - Lines consumed by recognized sections are excluded from `unparsed`.
+ * - Non-blank lines outside recognized sections are preserved in `unparsed`.
+ *
+ * Failure modes:
+ * - Throws if `readFile` fails (e.g., ENOENT, EACCES, or other I/O error).
+ *
+ * Safety: performs a single filesystem read; no concurrent mutation concerns.
  */
 export async function parseProposal(file: string): Promise<ParsedProposal> {
   const raw = await readFile(file, "utf8");

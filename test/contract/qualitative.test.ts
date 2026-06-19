@@ -146,4 +146,31 @@ describe("qualitative review contract", () => {
     expect(normalizeRawFinding(null, "test-phase")).toBeUndefined();
     expect(normalizeRawFinding(42, "test-phase")).toBeUndefined();
   });
+
+  it("normalizeRawFinding extracts rationale from raw input when present", () => {
+    traceSpec("RAE-FINDING-SHAPE", "RAE-SHAPE-COMPLETE");
+    const finding = normalizeRawFinding(
+      {
+        severity: "warning",
+        category: "test.check",
+        description: "test finding",
+        rationale: "explicit rationale from LLM",
+        file: "spec.md",
+      },
+      "test-phase",
+    );
+    expect(finding).toBeDefined();
+    expect(finding!.rationale).toBe("explicit rationale from LLM");
+  });
+
+  it("normalizeRawFinding derives rationale fallback when raw input lacks it", () => {
+    traceSpec("RAE-FINDING-SHAPE", "RAE-SHAPE-COMPLETE");
+    const finding = normalizeRawFinding(
+      { severity: "error", category: "test.check", description: "missing something" },
+      "review",
+    );
+    expect(finding).toBeDefined();
+    expect(finding!.rationale.length).toBeGreaterThan(0);
+    expect(finding!.rationale).toContain("review");
+  });
 });

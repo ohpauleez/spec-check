@@ -13,6 +13,7 @@ const makeFinding = (desc: string): Finding => ({
   category: "test.category",
   provenance: { file: "test.md", heading: "Section" },
   description: desc,
+  rationale: "test rationale",
   evidence: [{ kind: "test", value: "value" }],
 });
 
@@ -56,6 +57,7 @@ describe("reporting contracts", () => {
       category: "test.bad",
       provenance: { file: "test.md" },
       description: "test",
+      rationale: "test rationale",
       evidence: [], // empty evidence — should be suppressed
     };
     const dir = await mkdtemp(join(tmpdir(), "spec-check-report-"));
@@ -69,10 +71,63 @@ describe("reporting contracts", () => {
     expect(content).toContain("unsupported_verdict");
   });
 
-  it("passes finding with all required fields", async () => {
+  it("suppresses finding with empty rationale as defect", async () => {
+    traceSpec("RAE-FINDING-SHAPE", "RAE-SHAPE-FAIL");
+    // Bypass type system to simulate upstream defect producing empty rationale.
+    const badFinding = {
+      severity: "warning",
+      category: "test.bad",
+      provenance: { file: "test.md" },
+      description: "test description",
+      rationale: "",
+      evidence: [{ kind: "test", value: "value" }],
+    } as Finding;
+    const dir = await mkdtemp(join(tmpdir(), "spec-check-report-"));
+    await writePhaseReports({
+      outputDir: toOutputDirPath(dir),
+      report11: [badFinding],
+      report12: [],
+      report13: [],
+    });
+    const content = await readFile(join(dir, "report_1.1.md"), "utf8");
+    // The finding is suppressed and replaced with an unsupported_verdict defect.
+    expect(content).toContain("unsupported_verdict");
+    // The original finding's description is not rendered as a normal finding line.
+    expect(content).not.toContain("[warning] test.bad: test description");
+  });
+
+  it("suppresses finding with empty provenance file as defect", async () => {
+    traceSpec("RAE-EVID-FAIL", "RAE-SHAPE-FAIL");
+    // Empty provenance file string — should trigger rejection.
+    const badFinding = {
+      severity: "warning",
+      category: "test.bad",
+      provenance: { file: "" },
+      description: "test description",
+      rationale: "has rationale",
+      evidence: [{ kind: "test", value: "value" }],
+    } as Finding;
+    const dir = await mkdtemp(join(tmpdir(), "spec-check-report-"));
+    await writePhaseReports({
+      outputDir: toOutputDirPath(dir),
+      report11: [badFinding],
+      report12: [],
+      report13: [],
+    });
+    const content = await readFile(join(dir, "report_1.1.md"), "utf8");
+    // The finding is suppressed and replaced with an unsupported_verdict defect.
+    expect(content).toContain("unsupported_verdict");
+    // The original finding's description is not rendered as a normal finding line.
+    expect(content).not.toContain("[warning] test.bad: test description");
+  });
+
+  it("passes finding with all required fields including rationale", async () => {
     traceSpec("RAE-FINDING-SHAPE", "RAE-SHAPE-COMPLETE");
     const dir = await mkdtemp(join(tmpdir(), "spec-check-report-"));
     const good = makeFinding("good finding");
+    // Verify the finding type includes the required rationale field.
+    expect(good.rationale).toBeDefined();
+    expect(good.rationale.length).toBeGreaterThan(0);
     await writePhaseReports({
       outputDir: toOutputDirPath(dir),
       report11: [good],

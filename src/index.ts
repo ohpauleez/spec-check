@@ -1,5 +1,12 @@
-import { parseArgv } from "./cli/parse-argv.js";
-import { resolveRunConfig } from "./cli/config.js";
+/**
+ * CLI entrypoint for spec-check. Orchestrates argument parsing, configuration
+ * resolution, pipeline execution, and process exit code determination.
+ *
+ * Serves as the top-level script invoked by the user's shell.
+ * Exports: nothing (side-effectful entrypoint).
+ */
+import { parseArgv, type ArgError } from "./cli/parse-argv.js";
+import { resolveRunConfig, type ConfigError } from "./cli/config.js";
 import { runCli, PipelineAbortError } from "./cli/run-cli.js";
 import {
   EXIT_CODE_FINDINGS,
@@ -9,18 +16,28 @@ import {
   makeTypedError,
   type SpecCheckError,
 } from "./domain/errors.js";
+import { assertNever } from "./domain/assert.js";
 import { SPEC_CHECK_VERSION } from "./version.js";
 
 /**
  * CLI entrypoint.
+ *
+ * @returns process exit code: 0 (success), 1 (findings detected), or 2-11 (category-specific error)
  *
  * @remarks
  * Orchestrates argument parsing, config resolution, pipeline execution,
  * and exit code determination. Maps all failure paths into structured
  * `SpecCheckError` values before rendering to stderr.
  *
+ * Precondition: `process.argv` contains the raw CLI arguments.
  * Postcondition: process exit code is set to 0 (success), 1 (findings),
  * or 2-11 (category-specific error).
+ *
+ * Failure modes:
+ * - Invalid CLI arguments → returns exit code for ArgumentError.
+ * - Invalid or missing config → returns exit code for ConfigError.
+ * - Pipeline execution failure → propagated as PipelineAbortError (caught in top-level `.catch`).
+ * - Unexpected runtime error → caught by top-level `.catch`, rendered as PipelineError.
  */
 async function main(): Promise<number> {
   const parsed = parseArgv(process.argv.slice(2));
@@ -59,7 +76,11 @@ async function main(): Promise<number> {
  *
  * @remarks
  * Precondition: `error` is a well-formed `SpecCheckError`.
- * Postcondition: error message has been written to stderr.
+ * Postcondition: error message has been written to stderr; returned code is
+ * the deterministic exit code for `error`'s category.
+ *
+ * Failure modes: none — pure computation over the error value followed by a
+ * synchronous write to stderr. Cannot fail under normal process conditions.
  */
 function failWithError(error: SpecCheckError): number {
   process.stderr.write(`${formatError(error)}\n`);
@@ -69,51 +90,57 @@ function failWithError(error: SpecCheckError): number {
 /**
  * Convert an argument parse error into a structured SpecCheckError.
  *
- * @param error - raw parse error from `parseArgv`
+ * @param error - typed parse error from `parseArgv`
  * @returns structured ArgumentError with human-readable message
  *
  * @remarks
- * Precondition: `error` has a `kind` field from the ArgError union.
+ * Precondition: `error` is a member of the `ArgError` discriminated union.
  * Postcondition: returned error has category `"ArgumentError"`.
+ * Exhaustiveness: all `ArgError` variants are handled; new variants produce compile error.
+ *
+ * Failure modes: none — pure computation over a discriminated union.
  */
-function parseArgParseError(error: { readonly kind: string; readonly flag?: string }): SpecCheckError {
+function parseArgParseError(error: ArgError): SpecCheckError {
   switch (error.kind) {
     case "unknown_flag":
-      return makeTypedError("ArgumentError", `unrecognized flag: ${error.flag ?? "<unknown>"}`);
+      return makeTypedError("ArgumentError", `unrecognized flag: ${error.flag}`);
     case "missing_flag_value":
-      return makeTypedError("ArgumentError", `missing value for flag: ${error.flag ?? "<unknown>"}`);
+      return makeTypedError("ArgumentError", `missing value for flag: ${error.flag}`);
     default:
-      return makeTypedError("ArgumentError", "invalid arguments");
+      return assertNever(error);
   }
 }
 
 /**
  * Convert a config error into a structured SpecCheckError.
  *
- * @param error - raw config error from `resolveRunConfig`
+ * @param error - typed config error from `resolveRunConfig`
  * @returns structured ConfigError with human-readable message
  *
  * @remarks
- * Precondition: `error` has a `kind` field from the ConfigError union.
+ * Precondition: `error` is a member of the `ConfigError` discriminated union.
  * Postcondition: returned error has category `"ConfigError"`.
+ * Exhaustiveness: all `ConfigError` variants are handled; new variants produce compile error.
+ *
+ * Failure modes: none — pure computation over a discriminated union.
  */
-function parseConfigError(error: { readonly kind: string; readonly path?: string; readonly message?: string }): SpecCheckError {
+function parseConfigError(error: ConfigError): SpecCheckError {
   switch (error.kind) {
     case "missing_inputs":
       return makeTypedError("ConfigError", "missing required input paths");
     case "output_inside_src":
       return makeTypedError("ConfigError", "output directory must not reside within the source directory");
     case "config_read_error":
-      return makeTypedError("ConfigError", `config file is unreadable: ${error.path ?? "<unknown>"}`);
+      return makeTypedError("ConfigError", `config file is unreadable: ${error.path}`);
     case "config_parse_error":
-      return makeTypedError("ConfigError", `config file is invalid JSON: ${error.path ?? "<unknown>"}`);
+      return makeTypedError("ConfigError", `config file is invalid JSON: ${error.path}`);
     case "config_validation_error":
       return makeTypedError(
         "ConfigError",
-        `config file failed validation: ${error.path ?? "<unknown>"}${error.message === undefined ? "" : ` (${error.message})`}`,
+        `config file failed validation: ${error.path}${error.message.length > 0 ? ` (${error.message})` : ""}`,
       );
     default:
-      return makeTypedError("ConfigError", "invalid configuration");
+      return assertNever(error);
   }
 }
 
@@ -121,7 +148,11 @@ function parseConfigError(error: { readonly kind: string; readonly path?: string
  * Print CLI usage information to stdout.
  *
  * @remarks
+ * Precondition: none.
  * Postcondition: help text is written to stdout without trailing extra newline.
+ *
+ * Failure modes: none — synchronous write to stdout. Cannot fail under normal
+ * process conditions.
  */
 function printHelp(): void {
   process.stdout.write(

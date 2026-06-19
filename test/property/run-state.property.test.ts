@@ -11,6 +11,7 @@ function makeFinding(description: string): Finding {
     category: "test",
     provenance: { file: "test.md" },
     description,
+    rationale: "test rationale",
     evidence: [{ kind: "test", value: description }],
   };
 }

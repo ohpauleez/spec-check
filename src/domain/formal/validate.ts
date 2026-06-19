@@ -1,3 +1,10 @@
+/**
+ * Validates formalization candidates against the Logic IR schema, ensuring
+ * well-formedness of sorts, variables, and assertion expressions before compilation.
+ *
+ * Guards the boundary between LLM-generated output and the trusted formal pipeline.
+ * Exports: validateFormalizationSample, ValidationError.
+ */
 import type { LogicIrClaim, LogicSort } from "../logic-ir.js";
 import { toClaimId } from "../branded.js";
 import { err, ok, type Result } from "../result.js";
@@ -28,6 +35,7 @@ export interface SampleValidationError {
  *   - well-formed `functions` with declared-or-builtin arg/return sorts
  *   - well-formed `assertions` with balanced parentheses and uppercase IDs
  * Invariant: validation is deterministic and side-effect free.
+ * Failure modes: none — returns `err` Result on invalid input rather than throwing.
  *
  * @example
  * ```ts
@@ -108,6 +116,7 @@ export function validateFormalizationSample(sample: unknown): Result<LogicIrClai
  * Precondition: `entries` is an array (caller validates this).
  * Postcondition: all returned variables have a string `name` and a valid `LogicSort`.
  * Postcondition: `declaredVariableNames` contains exactly the names from validated entries.
+ * Failure modes: none — returns `err` Result on invalid entries rather than throwing.
  */
 function validateVariables(
   entries: readonly unknown[],
@@ -145,6 +154,7 @@ function validateVariables(
  * Precondition: `entries` is an array; `declaredVariableNames` contains all validated variable names.
  * Postcondition: all returned functions have valid names, arg sorts, and return sorts.
  * Postcondition: all referenced sorts are either built-in or declared in the sample.
+ * Failure modes: none — returns `err` Result on invalid entries rather than throwing.
  */
 function validateFunctions(
   entries: readonly unknown[],
@@ -198,6 +208,7 @@ function validateFunctions(
  * @remarks
  * Precondition: `entries` is an array (caller validates this).
  * Postcondition: all returned assertions have uppercase IDs and well-formed s-expressions.
+ * Failure modes: none — returns `err` Result on invalid entries rather than throwing.
  */
 function validateAssertions(
   entries: readonly unknown[],
@@ -233,6 +244,7 @@ function validateAssertions(
  *
  * @remarks
  * Postcondition: when true, TypeScript narrows `value` to `LogicSort`.
+ * Failure modes: none — pure computation.
  */
 function isLogicSort(value: unknown): value is LogicSort {
   return value === "Bool" || value === "Int" || value === "Real" || value === "String";
@@ -248,6 +260,7 @@ function isLogicSort(value: unknown): value is LogicSort {
  * @remarks
  * Precondition: `declaredVariableNames` must contain all names from the sample's `variables` array.
  * Postcondition: returns true only for sorts that will be available in the SMT solver context.
+ * Failure modes: none — pure computation.
  */
 function usesDeclaredOrBuiltInSort(sort: LogicSort, declaredVariableNames: ReadonlySet<string>): boolean {
   return sort === "Bool" || sort === "Int" || sort === "Real" || sort === "String" || declaredVariableNames.has(sort);
@@ -262,6 +275,7 @@ function usesDeclaredOrBuiltInSort(sort: LogicSort, declaredVariableNames: Reado
  * @remarks
  * Postcondition: when true, `expr` has equal opening and closing parentheses
  * with no point where closing count exceeds opening count.
+ * Failure modes: none — pure computation.
  */
 function isWellFormedAssertion(expr: string): boolean {
   if (expr.trim().length === 0) {

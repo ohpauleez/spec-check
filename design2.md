@@ -1,0 +1,1041 @@
+# spec-check -- Technical Design
+
+> **Living document** -- maintained alongside OpenSpec artifacts, code, and tests.
+> Complements [`docs/lfm.md`](docs/lfm.md) (assurance posture), [`docs/spec_traceability.md`](docs/spec_traceability.md) (traceability contract), [`docs/typescript_style.md`](docs/typescript_style.md) (implementation style), and the normative specs under [`openspec/specs/`](openspec/specs/).
+
+---
+
+## Table of Contents
+
+1. [Overview](#1-overview)
+2. [Scope and Boundaries](#2-scope-and-boundaries)
+3. [Architecture](#3-architecture)
+4. [Domain Model](#4-domain-model)
+5. [Preconditions, Postconditions, and Invariants](#5-preconditions-postconditions-and-invariants)
+6. [State Machines](#6-state-machines)
+7. [Interaction Protocols](#7-interaction-protocols)
+8. [Failure Modes and Error Model](#8-failure-modes-and-error-model)
+9. [Safety and Liveness Claims](#9-safety-and-liveness-claims)
+10. [Quality Attributes](#10-quality-attributes)
+11. [Verification Strategy](#11-verification-strategy)
+12. [Distribution and Packaging](#12-distribution-and-packaging)
+13. [Security and Trust Boundaries](#13-security-and-trust-boundaries)
+14. [Operational Concerns](#14-operational-concerns)
+15. [Forward Evolution](#15-forward-evolution)
+16. [Pipeline and Output Summary](#16-pipeline-and-output-summary)
+17. [Relationship to Other Documents](#17-relationship-to-other-documents)
+18. [Maintenance Rules](#18-maintenance-rules)
+
+---
+
+## 1. Overview
+
+### 1.1 What spec-check Is
+
+`spec-check` is a local TypeScript CLI that analyzes OpenSpec specification artifacts -- proposals, designs, capability specs, and optional task files -- to catch defects, ambiguity, contradictions, and missing assumptions before implementation begins. When a source directory is provided, it optionally compares original specification intent against code-derived guarantees using solver-backed formal analysis.
+
+### 1.2 Why It Exists
+
+Agent-assisted development can produce plausible code faster than developers can produce trustworthy evidence. `spec-check` supports evidence-based dependability cases through the full software development lifecycle by surfacing specification defects early enough that developers can correct them before they spread. The product value comes from surfacing evidence, assumptions, counterexamples, and residual uncertainty -- not from opaque verdicts.
+
+### 1.3 Core Design Challenge
+
+The design problem is cross-cutting. It spans structured parsing, deterministic domain modeling, LLM-backed qualitative and formalization phases, solver-backed logic analysis, source traceability, code-derived specification generation, cross-side formal comparison, and report generation. The core challenge is preserving trust across two kinds of nondeterministic boundary -- LLM responses (`opencode`) and solver calls (`z3`) -- while keeping the deterministic core inspectable, auditable, and reproducible.
+
+### 1.4 Design Philosophy
+
+This project applies **lightweight formal methods** ([`docs/lfm.md`](docs/lfm.md)): critical properties are expressed as preconditions, postconditions, and invariants in code; the verification pyramid (formal models, property-based tests, contract tests, integration tests) provides layered assurance; and the design treats lightweight formal methods as practical engineering discipline rather than a separate research artifact.
+
+The design is centered on:
+
+- preconditions for every pipeline phase and boundary crossing
+- postconditions that describe the observable outcome after success or failure
+- invariants over evidence preservation, provenance propagation, determinism, and output confinement
+- failure modes that are explicit rather than hidden behind opaque summaries
+- safety properties that forbid bad things from happening (false success, evidence loss, prompt injection)
+- liveness properties that describe when bounded progress is expected
+
+The goal is not a proof of the whole system. The goal is justified confidence: the design claims are explicit, mechanically checkable, traceable into the capability specs, and re-checked in tests as the system evolves.
+
+### 1.5 Relevant Capability Specs
+
+| Capability | Purpose |
+|---|---|
+| [`catalog-and-parse`](openspec/specs/catalog-and-parse/spec.md) | input discovery, CLI validation, structured parsing, EARS extraction, loss-aware evidence |
+| [`claim-graph-and-coverage`](openspec/specs/claim-graph-and-coverage/spec.md) | claim normalization, obligation levels, coverage gaps, contradiction detection |
+| [`formalization-and-logic-analysis`](openspec/specs/formalization-and-logic-analysis/spec.md) | formalization sampling, equivalence clustering, SMT-LIB compilation, per-spec solver analysis |
+| [`source-traceability-and-code-backwards`](openspec/specs/source-traceability-and-code-backwards/spec.md) | source tracing, code-derived specs, cross-side implication, blind comparison |
+| [`reporting-and-evidence`](openspec/specs/reporting-and-evidence/spec.md) | report rendering, evidence preservation, manifest semantics, output confinement |
+| [`spec-traceability`](openspec/specs/spec-traceability/spec.md) | canonical identifier discovery, test harness integration, coverage enforcement |
+
+---
+
+## 2. Scope and Boundaries
+
+### 2.1 In Scope
+
+- local TypeScript CLI that analyzes OpenSpec artifacts using the `srs-driven` schema
+- a specs-forward pipeline that evaluates `proposal.md`, `design.md`, active capability `spec.md` files, and optional `tasks.md` for ambiguity, contradiction, incompleteness, and traceability gaps
+- a formalization pipeline that translates claims into typed logic IR and SMT-LIB artifacts for solver-backed analysis
+- optional source-backed analysis: traceability, code-derived spec generation, code-derived formalization, solver-backed cross-side implication, and blind LLM comparison
+- output artifacts, evidence preservation, progress signaling, failure behavior, manifest-based completion semantics
+- first-class support for canonical requirement and scenario identifiers
+- traceability infrastructure that keeps specs, tests, and evidence connected
+- v1 targets small repositories: up to 10 spec files, low hundreds of requirements and scenarios total, modest single-package or small multi-module source trees
+
+### 2.2 Out of Scope
+
+- support for arbitrary Markdown conventions or arbitrary OpenSpec schemas
+- full formal verification of the entire implementation
+- mutation of specs, source files, or tasks as part of analysis
+- cloud-hosted, multi-tenant, or continuously running service operation
+- incremental resume, distributed execution, or content-addressed caching in v1
+- monorepo-scale capacity targets
+
+### 2.3 Goals and Non-Goals
+
+#### Goals
+
+- build a deterministic analysis pipeline that converts OpenSpec artifacts into typed claims, findings, reports, and preserved evidence
+- keep nondeterminism at explicit boundaries so reviewers can distinguish deterministic processing from model- or solver-dependent behavior
+- preserve enough intermediate structure that every meaningful finding can be traced back to its source artifact and supporting evidence
+- support both specs-forward and optional source-backed analysis without conflating their evidence models
+- make canonical spec identifiers and traced verification first-class inputs to the design
+
+#### Non-Goals
+
+- support arbitrary spec schemas or arbitrary Markdown conventions in v1
+- build a hosted service, daemon, or multi-user workflow
+- optimize for monorepo-scale scanning or very large input catalogs in the initial version
+- provide incremental resume or cache-coordination semantics in v1
+- turn the tool into a full formal verification system for the entire implementation
+
+### 2.4 Source-of-Truth Boundaries
+
+| Concern | Authoritative Source | Consequence |
+|---|---|---|
+| specification intent | committed OpenSpec artifacts (proposal, design, spec files) | the tool reads but never mutates specification inputs |
+| code-derived guarantees | source directory and its tests/contracts | code-derived analysis is bounded to the declared `--src` scope |
+| analysis conclusions | preserved evidence under the output directory | no final verdict rests on an unpreserved opaque LLM response |
+| run completion | manifest file written last | manifest presence is the atomic completion marker |
+
+### 2.5 Nondeterministic Boundaries
+
+- **`opencode` boundary**: LLM-backed qualitative analysis, formalization sampling, code-derived spec generation, code-derived formalization, and blind comparison
+- **`z3` boundary**: equivalence clustering, per-spec solver analysis, code-derived solver analysis, and cross-side implication checks
+
+All other processing between these boundaries is modeled as deterministic transformation, validation, clustering, or report assembly.
+
+---
+
+## 3. Architecture
+
+### 3.1 High-Level Architecture Diagram
+
+```mermaid
+flowchart TD
+  A[CLI argv and config] --> B[Catalog]
+  B --> C[Structured Parser]
+  C --> D[Claim Graph]
+  D --> E[Specs-forward analysis]
+  D --> F[Formalization pipeline]
+  F --> G[Z3 logic analysis]
+  D --> H[Source traceability]
+  H --> H2[Code-derived spec generation]
+  H2 --> H3[Code-derived formalization]
+  H3 --> H4[Code-derived Z3 analysis]
+  H4 --> H5[Cross-side implication]
+  H5 --> I[Blind comparison - explanatory]
+  E --> J[Report synthesis]
+  G --> J
+  H --> J
+  H4 --> J
+  H5 --> J
+  I --> J
+  J --> K[Manifest and output directory]
+
+  X[opencode boundary] -. qualitative and formalization .-> E
+  X -. formalization samples .-> F
+  X -. code-derived generation and formalization .-> H2
+  X -. code-derived formalization samples .-> H3
+  X -. blind comparison rationale .-> I
+  Y[Z3 boundary] -. solver checks .-> G
+  Y -. code-derived solver checks .-> H4
+  Y -. cross-side implication checks .-> H5
+```
+
+The architecture is layered:
+
+- The **CLI layer** parses argv, loads config, validates paths, selects modes, and coordinates exit behavior.
+- The **domain layer** owns deterministic reasoning: parsing, claim normalization, coverage analysis, formalization validation, clustering, logic analysis coordination, report assembly, and all type definitions.
+- The **adapter layer** owns side effects: filesystem operations, `opencode` subprocess execution, `z3` subprocess execution, and child-process management.
+
+This split matters for assurance. The more the decision logic is isolated from the side-effecting mechanics, the easier it is to express invariants, encode state machines, and mechanically test the behavior that matters. The domain depends on the adapter layer only through types, never through calls.
+
+### 3.2 Component Descriptions
+
+| Component | Responsibility | Key Invariant |
+|---|---|---|
+| **CLI layer** (`src/cli/`) | Parse argv, load config, validate inputs, orchestrate pipeline, coordinate exit | No analysis logic; only routing, orchestration, and I/O |
+| **Catalog** (`src/domain/parser/catalog.ts`) | Resolve input set, capability mapping, active spec state, optional source directory | Deterministic given the same input paths and filesystem state |
+| **Structured Parser** (`src/domain/parser/`) | Line-oriented parsing for proposal, design, spec, and task documents; structural validation; loss-aware capture | Every input line is either classified or preserved as unparsed evidence |
+| **Claim Graph Builder** (`src/domain/claim-graph.ts`) | Normalize parsed content into typed claims with provenance and obligation levels | No claim exists without provenance; extraction is deterministic |
+| **Qualitative Analysis** (`src/domain/spec-forward/qualitative.ts`) | Package parsed content for LLM-backed review passes; validate response schemas | `opencode` responses are schema-validated before acceptance |
+| **Coverage Module** (`src/domain/spec-forward/coverage.ts`) | Compare proposal/design claims against capability specs for gaps, contradictions, mismatches | Deterministic given the same claim graph |
+| **Formalization Module** (`src/domain/formal/formalize.ts`) | Request LLM-backed formalization samples; validate against logic IR schema | Invalid samples are rejected, not silently admitted |
+| **Clustering Module** (`src/domain/formal/clustering.ts`) | Compare formalization candidates with solver-backed implication checks | Ambiguity is a finding, not a failure |
+| **Logic Analysis** (`src/domain/formal/logic-analysis.ts`) | Per-spec combined solver analysis with named assertions and two-phase approach | Solver inputs and outputs are persisted verbatim |
+| **Source Traceability** (`src/domain/code-backwards/trace.ts`) | Relate claims to source files, tests, and contracts via canonical identifiers | Scanning is confined to declared source directory |
+| **Code-Derived Spec Generator** (`src/domain/code-backwards/derive.ts`) | Produce EARS-preferring specs per capability from source evidence, blind to original text | Original requirement text never crosses the generation boundary |
+| **Code-Derived Formalization** (`src/domain/code-backwards/gen-formal.ts`) | Same formalization pipeline applied to code-derived specs | Same schema validation and clustering as specs-forward |
+| **Cross-Side Implication** (`src/domain/code-backwards/cross-implication.ts`) | Bidirectional solver-backed implication between original and code-derived formalizations | Primary strength classifier; all queries persisted verbatim |
+| **Blind Comparison** (`src/domain/code-backwards/blind-compare.ts`) | Explanatory LLM rationale layer for formal classification; fallback when solver is inconclusive | Code-derived side never receives original requirement text |
+| **Reporting** (`src/domain/reporting/`) | Render Markdown reports, write intermediate artifacts, produce final manifest | Reports never contain findings without provenance; manifest is last |
+| **Filesystem adapter** (`src/adapters/fs.ts`) | Path resolution, output confinement, atomic writes, file reading with UTF-8/LF normalization | All writes confined to configured output directory |
+| **Process adapter** (`src/adapters/process.ts`) | Generic child-process execution with argv arrays, timeout handling | No shell interpolation |
+| **`opencode` adapter** (`src/adapters/opencode.ts`) | `opencode` subprocess integration with bounded timeout, JSON event stream parsing, schema validation | Bounded retries per call; invalid responses consume a retry |
+| **`z3` adapter** (`src/adapters/z3.ts`) | SMT-LIB piped via stdin, stdout/stderr capture, per-query timeout, exit classification | Results classified as sat/unsat/timeout/unknown/error |
+
+### 3.3 Design Principles
+
+- Make important invariants explicit.
+- Keep the core deterministic and push nondeterminism to the edges.
+- Reject invalid input before crossing LLM, solver, or filesystem boundaries.
+- Bound all waits and surface timeouts explicitly.
+- Treat parser loss, unsupported references, and provenance gaps as surfaced defects rather than invisible degradation.
+- Preserve evidence for every conclusion; no final verdict rests on an opaque unpreserved response.
+- Keep packaging and traceability in the product contract.
+
+---
+
+## 4. Domain Model
+
+### 4.1 Conceptual Entity-Relationship Diagram
+
+```mermaid
+erDiagram
+    Document ||--o{ Claim : produces
+    Document ||--o{ Finding : "structural findings"
+    Capability ||--o{ Claim : groups
+    Claim ||--o{ FormalizationSample : "formalization"
+    FormalizationSample ||--o{ EquivalenceCluster : "clustering"
+    EquivalenceCluster ||--|| SolverArtifact : "compiled"
+    Claim ||--o{ Finding : "analysis findings"
+    Finding ||--o{ Report : "rendered in"
+    Report ||--|| Manifest : "recorded by"
+    SourceCode ||--o{ CodeDerivedSpec : produces
+    CodeDerivedSpec ||--o{ Claim : "code-derived claims"
+    Claim }o--o{ CrossSideImplication : compared
+```
+
+### 4.2 Primary Domain Entities
+
+| Entity | Meaning | Authority | Key Invariants |
+|---|---|---|---|
+| Document | A proposal, design, capability spec, or task file | input filesystem | read-only; never mutated by analysis |
+| Capability | A logical behavior group represented by one spec file and its purpose | active catalog | resolved from finalized specs plus at most one in-development delta |
+| Requirement | A capability-level behavioral obligation in EARS format | parsed spec file | must carry a canonical bracketed identifier |
+| Scenario | A concrete, testable behavioral case that refines a requirement | parsed spec file | must carry a canonical bracketed identifier |
+| Claim | A normalized statement derived from requirements, scenarios, properties, or code | claim graph builder | always carries provenance and obligation level |
+| Finding | An analysis result with severity, rationale, provenance, and evidence | analysis phases | never exists without provenance; never silently removed |
+| Formalization Sample | One candidate formal encoding of a claim | LLM-backed formalization | schema-validated before acceptance |
+| Equivalence Cluster | A group of mutually implying formalization samples | solver-backed clustering | represents one interpretation of a claim |
+| Solver Artifact | Generated SMT-LIB file, model, unsat core, timeout result, or error diagnostic | solver analysis | persisted verbatim under the output directory |
+| Code-Derived Specification | EARS-preferring behavioral spec generated from source evidence, blind to original text | code-derived generation | persisted as Markdown in `gen_specs/` |
+| Cross-Side Implication Result | Solver-backed classification (same, stronger, weaker, different, uncertain) | cross-side analysis | primary strength classifier; queries persisted verbatim |
+| Report | Human-readable Markdown artifact summarizing one analysis pass | reporting phase | never contains findings without provenance |
+| Manifest | Completion record listing all produced output files and checksums | reporting phase | written last; presence marks completed run |
+| Traceability Identifier | Canonical bracketed identifier linking claims to tests and source evidence | spec files and test harness | `[A-Z][A-Z0-9]*(-[A-Z0-9]+)+` format |
+
+### 4.3 Conceptual Relationships
+
+```text
+Document ──────────────────────────────────────────┐
+  (proposal, design, spec, task)                   │
+       │                                           │
+       v                                           │
+  Structured Parser ──> Unparsed Lines (evidence)  │
+       │                                           │
+       v                                           │
+     Claim ───────────────────────────────┐        │
+  (requirement, scenario, property,       │        │
+   assumption, invariant, failure mode)   │        │
+       │                                  │        │
+       ├──> Formalization Sample ─────────┤        │
+       │        │                         │        │
+       │        v                         │        │
+       │   Equivalence Cluster            │        │
+       │        │                         │        │
+       │        v                         │        │
+       │   Solver Artifact                │        │
+       │        │                         │        │
+       v        v                         v        │
+     Finding <────────────────────────────┘        │
+       │                                           │
+       v                                           │
+     Report <──────────────────────────────────────┘
+       │
+       v
+    Manifest
+
+Source Code ─────────────────────────────────────────────────┐
+  (implementation, verified contracts, traced tests)         │
+       │                                                     │
+       v                                                     │
+  Code-Derived Specification ─────────────────────────┐      │
+  (EARS-preferring, per capability, blind to specs)   │      │
+       │                                              │      │
+       v                                              │      │
+  Code-Derived Formalization ─────────────────────────┤      │
+  (same pipeline: sampling, validation, clustering)   │      │
+       │                                              │      │
+       v                                              │      │
+  Cross-Side Implication ─────────────────────────────┤      │
+  (bidirectional solver checks: original vs derived)  │      │
+       │                                              │      │
+       v                                              v      │
+     Finding <────────────────────────────────────────┘      │
+  (same, stronger, weaker, different, uncertain)             │
+       │                                                     │
+       v                                                     │
+     Report <────────────────────────────────────────────────┘
+```
+
+Conceptually, documents produce claims, claims produce findings and formal artifacts, and findings are synthesized into evidence-preserving reports.
+
+### 4.4 EARS Requirement Format
+
+All spec.md files define verifiable behavior using EARS format and RFC 2119 keywords:
+
+| Pattern | Template | When to use |
+|---|---|---|
+| Ubiquitous | `THE <system> SHALL <response>.` | Always active |
+| State-driven | `WHILE <precondition>, THE <system> SHALL <response>.` | Active in a continuous state |
+| Event-driven | `WHEN <trigger>, THE <system> SHALL <response>.` | Discrete event causes behavior |
+| Unwanted-behavior | `IF <trigger>, THEN THE <system> SHALL <response>.` | Error/failure mitigation |
+| Complex | `WHILE <precondition>, WHEN <trigger>, THE <system> SHALL <response>.` | Both state and event required |
+| Optional | `WHERE <feature is included>, THE <system> SHALL <response>.` | Optional/configurable behavior |
+
+RFC 2119: SHALL/MUST = absolute requirement (mandatory), SHOULD = recommended (advisory), MAY = optional (informational).
+
+Escape hatch: When a requirement has more than 3 preconditions or is mathematical/tabular, it MAY use decision tables, lists, or other formats. The requirement MUST include a justification for why EARS is insufficient.
+
+### 4.5 Branded Types and Encoding Constraints
+
+The domain uses compile-time branded types to prevent accidental interchange of semantically distinct values that share the same runtime representation:
+
+| Type | Validation Rule | Construction |
+|---|---|---|
+| `OutputDirPath` | Absolute directory path | Validated construction function |
+| `RelativePath` | Path relative to an OutputDirPath, confined within output directory | Validated construction function |
+| `SmtlibFilePath` | Relative path with `.smt2` extension | Validated construction function |
+| `ClaimId` | Canonical requirement/scenario identifier (e.g., `CAT-PARSE-EARS`) | Validated construction function |
+| `CapabilityName` | Lowercase kebab-case capability name (e.g., `catalog-and-parse`) | Validated construction function |
+| `SanitizedClaimId` | SMT-safe identifier produced by sanitization from a ClaimId | Sanitization function |
+| `ModelName` | LLM model identifier passed to the `opencode` adapter | Validated construction function |
+| `SmtlibContent` | SMT-LIB formula text content (not a file path) | Validated construction function |
+
+Branded values are constructed only through validated construction functions at trust boundaries. Interior code passes branded values through without casting.
+
+**Encoding:** Input artifacts are read as UTF-8 text with line ending normalization to LF. Logic artifacts are emitted as ASCII-safe SMT-LIB files with sanitized identifiers and reversible mapping comments. The manifest is UTF-8 JSON.
+
+Relevant code: [`src/domain/branded.ts`](src/domain/branded.ts)
+
+### 4.6 Data Invariants
+
+| ID | Invariant | Enforced By | Failure Mode |
+|----|-----------|-------------|--------------|
+| **D-1** | Every claim has provenance linking it to a source file and heading | Claim graph builder | `AnalysisDefect` finding |
+| **D-2** | Claims carry obligation level (mandatory, advisory, informational) | EARS keyword extraction | Derived from SHALL/SHOULD/MAY |
+| **D-3** | Canonical identifiers follow `[A-Z][A-Z0-9]*(-[A-Z0-9]+)+` format | Parser validation | Structural finding |
+| **D-4** | Findings include severity, category, provenance, description, rationale, and evidence | Finding shape validation | Report rendering suppresses unsupported verdicts |
+| **D-5** | Findings are never silently removed by later phases | Run-state accumulator | Monotonic accumulation |
+| **D-6** | SMT-LIB identifiers use only sanitized characters | Sanitization function | Reversible mapping comments preserved |
+| **D-7** | Parser output is deterministic given the same input content | Module-level invariant | Property tests |
+| **D-8** | The manifest is the last file written | Output write ordering | Manifest absence signals incomplete run |
+
+**Spec references:** [`catalog-and-parse`](openspec/specs/catalog-and-parse/spec.md) -- `[CAT-PARSE-DETERMINISM]`, `[CAT-PRESERVE-LOSS]`; [`reporting-and-evidence`](openspec/specs/reporting-and-evidence/spec.md) -- `[RAE-FINDING-SHAPE]`, `[RAE-FINDINGS-IMMUTABLE]`, `[RAE-ATOMIC-MANIFEST]`.
+
+---
+
+## 5. Preconditions, Postconditions, and Invariants
+
+### 5.1 System-Wide Invariants
+
+| ID | Invariant | How Maintained |
+|----|-----------|----------------|
+| **I-1** | Input specs, task files, and source files are never mutated | Read-only access throughout all phases |
+| **I-2** | No final verdict relies on a single opaque LLM response without preserved evidence | Schema validation at boundaries; full response preservation |
+| **I-3** | Every LLM response used by the system is schema-validated before it influences downstream phases | Adapter-level validation with bounded retries |
+| **I-4** | Solver inputs and outputs are persisted verbatim | Adapter-level persistence |
+| **I-5** | Findings are never silently erased by later phases | Run-state accumulator with monotonic semantics |
+| **I-6** | Re-running with identical inputs and fixed/cached LLM responses produces identical outputs | Deterministic core between nondeterministic boundaries |
+| **I-7** | All writes remain confined to the configured output directory | Path resolution and confinement in filesystem adapter |
+| **I-8** | No shell interpolation in subprocess calls | Argv-based execution via `execFile`, never `exec` |
+| **I-9** | Prompt construction fences document content; analyzed spec text is never elevated into system-level instruction position | Prompt assembly rules in qualitative and formalization modules |
+| **I-10** | The resolved run configuration is immutable once analysis begins | CLI layer freezes config before pipeline starts |
+
+### 5.2 Per-Phase Contracts
+
+| Phase | Preconditions | Postconditions | Error Outcomes |
+|-------|---------------|----------------|----------------|
+| CLI validation | Process can read argv | Valid args produce resolved run config; invalid args exit with code `2` | `ArgumentError`, `ConfigError` |
+| Catalog | At least one input path resolves to readable artifacts | Catalog identifies every document and its classification; archived specs excluded | `CatalogError` |
+| Structured parsing | Cataloged documents are readable UTF-8 | Each document produces a typed model; all lines classified or preserved as unparsed evidence | Structural findings with provenance |
+| Claim graph | At least one document parsed with recognizable structure | Every recognized element normalized into a typed claim with provenance | Orphaned claims surfaced as defects |
+| Qualitative analysis | Claim graph has at least one claim; `opencode` available | Schema-validated findings with severity, rationale, provenance, and evidence | `QualitativeError` after bounded retries |
+| Coverage analysis | Claims from proposal/design and at least one spec | Missing coverage, contradictions, and unsupported references reported | Deterministic; no external dependencies |
+| Formalization | Eligible claims exist; `opencode` available | Each claim produces validated logic IR and compiled SMT-LIB artifacts | `FormalizationError` after bounded retries |
+| Solver analysis | Formalized claims with SMT-LIB artifacts; `z3` available | Obligation-aware contradiction and gap detection; evidence persisted verbatim | `AdapterError` on solver failure |
+| Source traceability | `--src` provided and readable | Each claim traced to source evidence or gap finding emitted | `CatalogError` on unreadable source |
+| Code-backwards | Source evidence available per capability | Code-derived specs generated, formalized, and compared via cross-side implication | `FormalizationError`, `AdapterError` |
+| Reporting | At least one phase completed | Phase reports, synthesized summary, and manifest written | `OutputError` on write failure |
+
+### 5.3 Global Preconditions
+
+- At least one input specification artifact exists and is readable.
+- The analyzed project follows the `srs-driven` artifact conventions closely enough to admit structured parsing.
+- Required local dependencies for the selected analysis mode are available: `opencode` for LLM-backed phases and `z3` for solver-backed phases.
+- When `--src` is used, the source directory is readable and within the intended project scope.
+
+### 5.4 Global Postconditions
+
+- The tool produces a bounded, evidence-preserving set of reports and intermediate artifacts under the output directory.
+- Every surfaced finding includes provenance and enough supporting evidence for a reviewer to inspect the basis of the conclusion.
+- When analysis completes successfully, a manifest is written last and identifies the produced artifacts.
+- When source-backed analysis is requested, the output includes traceability or comparison results that explain the relationship between spec intent and code-derived guarantees.
+- Successful runs exit with code `0` (no findings) or `1` (findings present).
+
+**Spec references:** [`catalog-and-parse`](openspec/specs/catalog-and-parse/spec.md), [`claim-graph-and-coverage`](openspec/specs/claim-graph-and-coverage/spec.md), [`formalization-and-logic-analysis`](openspec/specs/formalization-and-logic-analysis/spec.md), [`reporting-and-evidence`](openspec/specs/reporting-and-evidence/spec.md).
+
+---
+
+## 6. State Machines
+
+State machines are implemented using discriminated unions with exhaustive switch statements and `assertNever` guards.
+
+### 6.1 CLI Layer
+
+Relevant code: [`src/index.ts`](src/index.ts), [`src/cli/run-cli.ts`](src/cli/run-cli.ts)
+
+```mermaid
+stateDiagram-v2
+  [*] --> ReadingArgv
+  ReadingArgv --> LoadingConfig: argv parsed
+  ReadingArgv --> FatalExit: invalid argv
+  LoadingConfig --> ValidatingInputs: config loaded
+  LoadingConfig --> FatalExit: invalid config
+  ValidatingInputs --> ReadyToRun: inputs valid
+  ValidatingInputs --> FatalExit: unreadable path or missing dependency
+  ReadyToRun --> RunningPipeline: run requested
+  RunningPipeline --> SuccessExit: no fatal error
+  RunningPipeline --> FindingsExit: findings present
+  RunningPipeline --> FatalExit: unrecoverable phase failure
+  SuccessExit --> [*]
+  FindingsExit --> [*]
+  FatalExit --> [*]
+```
+
+#### Decision Table
+
+| Invocation Shape | Action | Side Effects |
+|---|---|---|
+| `--help` | print help | none; exit `0` |
+| `--version` | print version | none; exit `0` |
+| valid inputs | run full analysis pipeline | output directory populated |
+| invalid inputs | report error | stderr message; exit `2` |
+
+#### Invariants
+
+| Invariant | Meaning |
+|---|---|
+| CLI-1 | Help and version do not run analysis or contact external tools |
+| CLI-2 | Invalid arguments produce exit code `2` before any output is written |
+| CLI-3 | CLI flags take precedence over config file values |
+
+**Spec reference:** [`catalog-and-parse`](openspec/specs/catalog-and-parse/spec.md) -- `[CAT-CLI-ARGS]`, `[CAT-CLI-CONFIG]`.
+
+### 6.2 Domain Layer
+
+Relevant code: [`src/domain/`](src/domain/)
+
+```mermaid
+stateDiagram-v2
+  [*] --> EmptyRunState
+  EmptyRunState --> Cataloged: catalog built
+  Cataloged --> Parsed: documents parsed
+  Parsed --> ClaimsBuilt: claim graph normalized
+  ClaimsBuilt --> Formalized: logic artifacts accepted
+  ClaimsBuilt --> Analyzed: qualitative or coverage analysis complete
+  Formalized --> Analyzed: solver or comparison analysis complete
+  Analyzed --> ReportReady: findings and evidence assembled
+  Parsed --> DomainDefect: missing provenance or invalid model
+  ClaimsBuilt --> DomainDefect: orphaned claim or invariant breach
+  Formalized --> DomainDefect: invalid formalization admitted
+  ReportReady --> [*]
+  DomainDefect --> [*]
+```
+
+### 6.3 Adapter Layer
+
+Relevant code: [`src/adapters/`](src/adapters/)
+
+```mermaid
+stateDiagram-v2
+  [*] --> Idle
+  Idle --> ResolvingPath: fs request
+  Idle --> SpawningProcess: external tool request
+  ResolvingPath --> ReadingOrWriting: path validated
+  ResolvingPath --> AdapterFailure: unsafe or invalid path
+  ReadingOrWriting --> Idle: operation complete
+  ReadingOrWriting --> AdapterFailure: io failure
+  SpawningProcess --> WaitingForResult: argv launched
+  SpawningProcess --> AdapterFailure: spawn failure
+  WaitingForResult --> ValidatingResponse: process exit received
+  WaitingForResult --> AdapterFailure: timeout
+  ValidatingResponse --> Idle: response accepted
+  ValidatingResponse --> AdapterFailure: schema invalid or unusable output
+  AdapterFailure --> [*]
+```
+
+### 6.4 Analysis Submodules
+
+Relevant code: [`src/domain/spec-forward/`](src/domain/spec-forward/), [`src/domain/formal/`](src/domain/formal/), [`src/domain/code-backwards/`](src/domain/code-backwards/)
+
+```mermaid
+stateDiagram-v2
+  [*] --> Pending
+  Pending --> PreparingInputs: phase selected
+  PreparingInputs --> RunningDeterministicChecks: typed inputs ready
+  RunningDeterministicChecks --> CallingBoundaryTool: llm or solver needed
+  RunningDeterministicChecks --> Completed: deterministic phase complete
+  CallingBoundaryTool --> ValidatingBoundaryResult: result returned
+  CallingBoundaryTool --> Failed: timeout or tool unavailable
+  ValidatingBoundaryResult --> Completed: result accepted
+  ValidatingBoundaryResult --> Failed: invalid schema or contradictory evidence
+  Completed --> [*]
+  Failed --> [*]
+```
+
+### 6.5 Reporting Layer
+
+Relevant code: [`src/domain/reporting/`](src/domain/reporting/)
+
+```mermaid
+stateDiagram-v2
+  [*] --> CollectingSections
+  CollectingSections --> RenderingReports: inputs complete
+  CollectingSections --> ReportingFailure: missing required evidence
+  RenderingReports --> WritingArtifacts: markdown rendered
+  RenderingReports --> ReportingFailure: unsupported verdict
+  WritingArtifacts --> WritingManifest: all selected outputs finalized
+  WritingArtifacts --> ReportingFailure: write failure
+  WritingManifest --> Complete: manifest written last
+  WritingManifest --> ReportingFailure: manifest write failure
+  Complete --> [*]
+  ReportingFailure --> [*]
+```
+
+**Spec reference:** [`reporting-and-evidence`](openspec/specs/reporting-and-evidence/spec.md) -- `[RAE-ATOMIC-MANIFEST]`, `[RAE-OUTPUT-ATOMIC]`.
+
+---
+
+## 7. Interaction Protocols
+
+### 7.1 Pipeline Orchestration Flow
+
+Relevant code: [`src/cli/run-cli.ts`](src/cli/run-cli.ts)
+
+The pipeline is decomposed into `runIngestionPhases`, `runAnalysisPhases`, and `runReportingPhase` for phase-group isolation. `PipelineAbortError` is used for typed error propagation between phase groups.
+
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant C as CLI
+    participant Cat as Catalog
+    participant P as Parser
+    participant CG as Claim Graph
+    participant A as Analysis Phases
+    participant R as Reporting
+    participant M as Manifest
+
+    U->>C: spec-check [OPTIONS] [INPUT FILES]
+    C->>C: parseArgv and loadConfig
+    C->>Cat: discover and classify documents
+    Cat-->>C: typed catalog
+    C->>P: parse each cataloged document
+    P-->>C: typed parsed models + structural findings
+    C->>CG: normalize into claim graph
+    CG-->>C: typed claims with provenance
+    C->>A: run qualitative, coverage, formalization, solver
+    A-->>C: analysis findings with evidence
+    C->>R: render reports and write artifacts
+    R->>M: write manifest last
+    alt no findings
+        C-->>U: exit 0
+    else findings present
+        C-->>U: exit 1
+    else fatal error
+        C-->>U: exit 2-11
+    end
+```
+
+### 7.2 CLI to Catalog
+
+The CLI passes validated argv-derived configuration into catalog building. Invalid paths, missing inputs, or malformed config stop the run before deeper phases begin.
+
+### 7.3 Catalog to Parser
+
+The catalog passes a canonical set of document descriptors. The parser returns typed document models plus deterministic structural findings.
+
+### 7.4 Core to `opencode`
+
+Qualitative and formalization phases send bounded prompt payloads and require schema-valid JSON responses before acceptance. The `opencode` adapter builds argv (`opencode run --model <name> --format json <prompt>`), parses newline-delimited JSON event output, extracts `type:"text"` event payloads, detects `type:"error"` events as failures, and returns typed results or retry-eligible failures.
+
+### 7.5 Formalization to `z3`
+
+Clustering and logic analysis compile solver-ready files and pass them to the solver adapter with explicit timeouts. The `z3` adapter pipes SMT-LIB content via stdin, captures stdout/stderr, handles per-query timeout, and classifies exit into sat/unsat/timeout/unknown/error.
+
+### 7.6 Code-Derived Generation Boundary
+
+The code-derived spec generator receives only source-scoped evidence and capability metadata (including the list of known capability names from the active catalog, provided as naming suggestions only -- no requirement text or spec content). It never receives original requirement text, proposal text, or design text.
+
+### 7.7 Cross-Side Implication Boundary
+
+The cross-side implication module receives both original and code-derived SMT-LIB artifacts but generates implication queries without mixing claim text; it operates purely on formal artifacts.
+
+### 7.8 Blind Comparison Boundary
+
+The blind LLM comparison side receives only code-derived artifacts and supporting metadata, not original requirement text. It provides explanatory rationale for the formal classification.
+
+**Spec references:** [`source-traceability-and-code-backwards`](openspec/specs/source-traceability-and-code-backwards/spec.md) -- `[STC-GEN-SPECS]`, `[STC-CROSS-IMPLY]`, `[STC-BLIND-COMPARE]`.
+
+---
+
+## 8. Failure Modes and Error Model
+
+### 8.1 Error Categories and Exit Codes
+
+Relevant code: [`src/domain/errors.ts`](src/domain/errors.ts)
+
+The domain defines a structured error hierarchy using a generic `ErrorBase<C>` discriminated union pattern:
+
+| Exit Code | Category | Meaning |
+|---|---|---|
+| 0 | -- | Analysis completed without findings |
+| 1 | FindingsPresent | Analysis completed and surfaced one or more findings |
+| 2 | ArgumentError | CLI argument parsing failure |
+| 3 | ConfigError | Configuration loading or validation failure |
+| 4 | DependencyError | Missing external binary dependency |
+| 5 | CatalogError | Input document discovery or reading failure |
+| 6 | AdapterError | External process adapter failure |
+| 7 | ValidationError | Schema or structure validation failure |
+| 8 | QualitativeError | LLM-backed qualitative review failure |
+| 9 | FormalizationError | LLM-backed formalization failure |
+| 10 | PipelineError | Pipeline phase orchestration failure |
+| 11 | OutputError | File or manifest output failure |
+
+**Invariant:** Exit codes 2-11 correspond to the `ErrorCategory` discriminated union. Fatal errors in any category prevent the tool from producing a trustworthy evidence set.
+
+Narrowed boundary unions (`PipelinePhaseError`, `AdapterBoundaryError`, `CliResolutionError`) constrain which categories can appear at specific subsystem boundaries.
+
+### 8.2 Stderr and Stdout Formats
+
+**Stderr:** Diagnostic and error output. Fatal errors follow this format:
+```
+[spec-check] <Category>: <concise message>
+```
+
+**Stdout:** Structured JSON progress events. Each event is a single JSON line with at least:
+- `phase`: the pipeline phase name
+- `status`: one of `started`, `completed`, `failed`, `skipped`
+- `timestamp`: ISO-8601 UTC timestamp
+
+Phase completion events include `duration_ms` and summary counts where applicable.
+
+### 8.3 Failure Mode Analysis
+
+| Failure Mode | Detection | Impact | Mitigation |
+|---|---|---|---|
+| **False negative analysis** | Missed by tool | Undermines core product value | Multi-layer analysis (qualitative + formal + coverage) |
+| **Nondeterministic material divergence** | Repeated runs surface different findings | Weakens trust in dependability cases | Deterministic core; nondeterminism isolated at boundaries |
+| **Evidence loss** | Reports omit provenance or evidence | Weakens findings even when correct | Provenance propagation; evidence preservation invariants |
+| **`opencode` unavailable** | Adapter timeout or spawn failure | Critical phases cannot complete | Fail fast with `QualitativeError` or `FormalizationError` |
+| **`z3` unavailable** | Binary absent or non-executable | Solver phases cannot complete | Fail fast with `DependencyError` |
+| **Solver timeout/unknown** | No definitive sat/unsat result | Incomplete formal analysis | Preserve as findings; classify as `uncertain` |
+| **Solver error diagnostic** | `(error ...)` in Z3 output | Malformed SMT-LIB from formalization | Surface as `logic.solver_error` finding |
+| **Invalid LLM response** | Schema validation failure | Retry consumed | Bounded retries (default 3); fail hard after exhaustion |
+| **Prompt injection** | Analyzed text elevated to system position | Distorted analysis | Prompt fencing in all LLM-backed phases |
+| **SMT-LIB syntax collision** | User-derived identifiers with reserved chars | Malformed solver inputs | Identifier sanitization with hex escaping |
+| **Blind boundary violation** | Original text exposed to code-derived side | Undermines comparison methodology | Structural enforcement; violations surfaced as analysis defects |
+| **Manifest written prematurely** | Manifest before all outputs finalized | Partial output trusted as complete | Manifest written last; manifest-last invariant |
+| **Output write failure** | Filesystem error | Incomplete evidence set | Exit with `OutputError`; no manifest written |
+| **Conflicting in-development deltas** | Multiple deltas modify same capability | Hidden coordination failure | Surface as findings, not silent resolution |
+
+### 8.4 Failure Taxonomy
+
+**Unsafe inputs:** Malformed identifiers, missing sections, unreadable files, invalid config, malformed task content.
+
+**Fragile formats:** OpenSpec files are close to structured prose. Minor heading or identifier drift can silently distort meaning unless the parser is loss-aware and validates structure explicitly.
+
+**Inadequate control actions:** Continuing after invalid LLM responses, missing solver binaries, or provenance-free claims would create misleading output.
+
+**Process model flaws:** False negatives, nondeterministic divergence between runs, and blind trust in opaque heuristics.
+
+**Coordination failures:** Timeouts, retries, and optional phases can produce confusing results unless phase boundaries and skipped-scope reporting are explicit.
+
+### 8.5 Control and Recovery
+
+- Validate early: reject invalid paths, malformed config, missing dependencies, and empty input conditions before deeper processing.
+- Retry bounded external calls with explicit timeouts and fail hard when required evidence-producing phases remain unavailable.
+- Preserve inconclusive states (timeouts, unknown solver responses) as findings rather than treating them as success.
+- Treat parser loss, unsupported references, and provenance gaps as surfaced defects rather than invisible degradation.
+- Use atomic writes plus manifest-last semantics so interrupted runs cannot impersonate complete output.
+
+### 8.6 Result Type and Assertion Utilities
+
+**Result type:** All error paths in domain code are expressed as `Result<T, E>` values with typed error unions. Adapter code catches system exceptions and wraps them into `Result` before returning.
+
+**Assertion utilities:** Runtime invariant enforcement uses four assertion functions for programmer errors (not expected domain failures):
+
+| Function | Purpose |
+|---|---|
+| `precondition()` | Asserts caller contract obligations at function boundaries |
+| `invariant()` | Asserts structural invariants within functions or modules |
+| `postcondition()` | Asserts guaranteed outcomes before returning |
+| `assertNever()` | Asserts exhaustive handling in discriminated union switches |
+
+Relevant code: [`src/domain/errors.ts`](src/domain/errors.ts), [`src/domain/assert.ts`](src/domain/assert.ts)
+
+### 8.7 Signal Handling
+
+- During LLM or solver calls: SIGINT/SIGTERM immediately abort the current external call and exit without writing the manifest. Intermediate artifacts already written remain under the output directory.
+- During report writing: If killed between artifact write and manifest write, intermediate artifacts may be present but the manifest is absent, signaling an incomplete run.
+- The tool does not trap SIGKILL. Under SIGKILL, no cleanup occurs and manifest absence is the only indicator of incompleteness.
+
+---
+
+## 9. Safety and Liveness Claims
+
+### 9.1 Safety Properties
+
+| Claim | Mechanism | Verification |
+|-------|-----------|--------------|
+| **No analysis proceeds with incomplete catalog** | Catalog validation before deeper phases | Contract tests; property tests |
+| **No claim enters the graph without provenance** | Claim graph builder validation | Property tests; orphaned-claim detection |
+| **No formalization sample enters clustering without schema validation** | Validation module | Contract tests |
+| **No solver conclusion from unvalidated formalization** | Pipeline ordering enforced by domain types | Integration tests |
+| **No blind comparison exposes original requirement text** | Structural boundary enforcement | Property tests; boundary violation detection |
+| **No code-derived generation exposes original requirement text** | Generation boundary enforcement | Property tests |
+| **No manifest written before all outputs finalized** | Manifest-last write ordering | Integration tests |
+| **No unsupported verdict reaches final report** | Report rendering suppresses provenance-free findings | Contract tests |
+| **No shell injection** | Argv-based `execFile` only; no `exec` | Codebase invariant |
+| **No writes outside output directory** | Path confinement in filesystem adapter | Contract tests |
+| **Solver inputs/outputs always persisted** | Adapter-level persistence | Integration tests |
+| **Findings never silently removed** | Monotonic run-state accumulator | Property tests |
+
+### 9.2 Liveness Properties
+
+| Claim | Mechanism | Bound |
+|-------|-----------|-------|
+| **Qualitative analysis completes** | If `opencode` responds with valid output within retry bounds | Bounded retries (default 3) with per-call timeout |
+| **Formalization completes** | If `opencode` responds with valid output within retry bounds | Bounded retries per claim |
+| **Solver analysis completes** | If `z3` responds within per-query timeout | Per-query timeout (default 30 seconds) |
+| **Cross-side implication completes** | If `z3` responds within per-query timeout | Per-query timeout; pair budget bounds total work |
+| **Code-derived generation and formalization complete** | If `opencode` responds within retry bounds | Bounded retries per capability |
+| **Manifest is written** | If all required phases complete | Pipeline completion triggers manifest write |
+| **Signal handlers fire cleanup** | Process-level SIGINT/SIGTERM listeners | Immediate (kernel delivery) |
+
+---
+
+## 10. Quality Attributes
+
+| Attribute | Target | How Achieved |
+|-----------|--------|--------------|
+| **Reliability** | Never silently drop findings or evidence; hard-fail when required external-tool responses are unavailable | Fail-fast at boundaries; explicit failure policy; preserved intermediate artifacts |
+| **Observability** | Every finding includes provenance; every run emits progress; every successful run writes a manifest | Structured progress events; manifest-based completion; preserved solver and model artifacts |
+| **Security** | Argv-only subprocesses; write-confinement to `--output`; prompt fencing | Subprocess adapter design; output-path confinement; identifier sanitization |
+| **Bounded responsiveness** | Bounded retries (default 3) with per-call timeout; solver queries with per-query timeout (default 30s) | Explicit timeout handling in adapters; retry constants; non-blocking failure outcomes |
+| **Determinism** | Identical inputs and cached LLM responses produce byte-identical outputs | Deterministic core; nondeterminism isolated at boundaries; deterministic claim graph, parser, coverage |
+| **Maintainability** | Changes localized by pipeline phase and architecture layer | Phase-based specs; explicit code map; deterministic domain-core design; isolated adapter boundaries |
+| **Testability** | All domain logic testable without external tools | Domain/adapter separation; injectable adapters |
+
+---
+
+## 11. Verification Strategy
+
+The project follows the **verification pyramid** from [`docs/lfm.md`](docs/lfm.md):
+
+```mermaid
+graph BT
+    Claims[Explicit Claims and Invariants] --> Models[Spec Models and Checkable Kernels]
+    Models --> PBT[Property-Based Tests]
+    PBT --> CT[Unit / Contract Tests]
+    CT --> IT[Integration and Determinism Tests]
+    IT --> Trace[Traceability and CI Re-checking]
+```
+
+### 11.1 Claims and Evidence Sources
+
+| Layer | Focus | Primary Sources |
+|---|---|---|
+| capability requirements | normative behavior | [`openspec/specs/`](openspec/specs/) |
+| design claims | architecture, sequencing, invariants, safety, liveness | this document |
+| implementation structure | where behavior lives and architectural boundaries | code map below |
+| executable evidence | tests and traceability runs | `test/contract/`, `test/property/`, `test/integration/`, `test/determinism/` |
+
+### 11.2 Evidence Layers
+
+| Layer | Coverage Focus |
+|---|---|
+| **Formal models** | State machine correctness, safety/liveness (Alloy 6 models embedded in capability specs) |
+| **Property-based tests** | Parser invariants, claim extraction invariants, clustering determinism, implication classification symmetry, blind boundary enforcement |
+| **Contract tests** | CLI argument handling, parser structural checks, LLM schema validation, manifest semantics, boundary violation detection |
+| **Integration tests** | End-to-end analyses with fixture specs plus fake `opencode` and fake `z3` adapters |
+| **Determinism tests** | Re-run with fixed inputs and cached responses, then diff outputs byte-for-byte |
+| **Fault injection tests** | Graceful degradation when adapters fail or timeout |
+| **Adversarial input tests** | Malformed, hostile, or boundary-case inputs handled without crash or misleading results |
+| **Regression fixtures** | Every discovered ambiguity pattern, counterexample, and parser-loss issue as a permanent fixture |
+
+### 11.3 Key Test Categories
+
+**Contract tests** validate per-spec requirements:
+- CLI argv parsing accepts valid flags and rejects invalid arguments
+- Config loading and merge with CLI precedence
+- Catalog discovery, classification, archived exclusion, delta conflict detection
+- Parser EARS extraction, identifier validation, loss-aware capture
+- Claim graph provenance attachment, obligation levels, orphaned-claim detection
+- Coverage gap, contradiction, and unsupported reference detection
+- `opencode` adapter schema validation and bounded retries
+- `z3` adapter timeout handling and exit classification
+- SMT-LIB identifier sanitization
+- Formalization sample validation
+- Clustering stability threshold and ambiguity findings
+- Logic analysis obligation-aware severity and evidence persistence
+- Source traceability gap findings and scope confinement
+- Code-derived generation blind boundary enforcement
+- Cross-side implication classification (same/stronger/weaker/different/uncertain)
+- Blind comparison boundary enforcement
+- Report rendering, manifest checksums, manifest-last ordering
+
+**Property-based tests** exercise invariants over generated inputs:
+- Parser: every input line is classified or preserved as unparsed evidence
+- Claim graph: every claim has provenance; no orphaned claims
+- Clustering: deterministic representative selection; symmetry invariant
+- SMT-LIB compilation: valid syntax after sanitization for arbitrary identifiers
+- Manifest: every listed file exists and has correct checksum
+- Run-state: findings never removed by later phases
+- Blind boundary: original requirement text never exposed to code-derived side
+- Cross-side classification: deterministic and symmetric
+- Greedy matching: deterministic given same classification scores
+
+**Spec traceability:** Every testable requirement in `openspec/specs/` carries a bracketed identifier (e.g., `[CAT-PARSE-EARS]`). Contract tests reference these identifiers via `traceSpec(...)`, and the traceability tooling validates coverage.
+
+**Spec reference:** [`spec-traceability`](openspec/specs/spec-traceability/spec.md)
+
+---
+
+## 12. Distribution and Packaging
+
+| Artifact | Format | Target |
+|----------|--------|--------|
+| npm package | Standard npm tarball | `npm install -g` or `npx` |
+| `dist/spec-check.js` | Single-file ESM bundle (esbuild) | Node >= 20 |
+
+**Build invariants:**
+- The bundle is a single `.js` file with no external dependencies at runtime.
+- `#!/usr/bin/env node` shebang is prepended.
+- Source maps are excluded from the distribution artifact.
+- The bundled artifact passes the same integration tests as the source tree.
+- Both distribution forms preserve the same help/version surface, output contracts, and exit-code behavior.
+
+**Parity requirement:** help/version behavior, outputs, exit codes, and command contracts match across supported forms.
+
+Relevant code: [`build/esbuild.ts`](build/esbuild.ts)
+
+---
+
+## 13. Security and Trust Boundaries
+
+The tool has no end-user authentication or authorization model because it is a local CLI, but it has meaningful security boundaries:
+
+| Concern | Design Constraint |
+|---|---|
+| subprocess invocation | argv-based execution via `execFile`; no shell interpolation |
+| prompt injection | document content fenced in prompts; analyzed spec text never elevated into system-level instruction position |
+| filesystem overreach | all writes confined to `--output` directory; output paths resolved and validated up front |
+| SMT-LIB identifier injection | user-derived identifiers sanitized before writing SMT-LIB artifacts (unsafe characters replaced with `_` + hex escape) |
+| blind comparison boundary | original requirement text never crosses to the code-derived comparison or generation side |
+| subprocess output | captured via stdout/stderr; no ambient shell risk |
+| evidence integrity | solver inputs/outputs persisted verbatim; LLM responses preserved with full content |
+
+---
+
+## 14. Operational Concerns
+
+### 14.1 Observability
+
+| Concern | Design Choice |
+|---|---|
+| phase progress | structured JSON events on stdout with phase name, status, timestamp |
+| human diagnostics | normalized first-line stderr in the form `[spec-check] <Category>: <message>` |
+| evidence visibility | per-phase reports preserved; provenance, identifiers, and evidence references visible |
+| intermediate artifacts | solver files, clustering inputs, formalization samples, comparison artifacts preserved under output directory |
+| run completion | manifest presence is the atomic completion marker |
+
+### 14.2 Deployment and Rollout
+
+| Concern | Design Choice |
+|---|---|
+| primary release path | standard npm package installation |
+| additional artifact | bundled `dist/spec-check.js` |
+| rollback model | version-based; no persistent mutable state in v1 |
+| feature flags | none required in v1; rollout is repository-local |
+
+### 14.3 Capacity and Scaling
+
+`spec-check` is a local single-user CLI. Scaling concerns are bounded-work and subprocess-behavior concerns rather than server-side throughput.
+
+| Concern | Design Choice |
+|---|---|
+| v1 capacity targets | up to 10 spec files, low hundreds of requirements/scenarios total, modest source trees |
+| LLM call cost | proportional to document count and claim count; bounded retries per call |
+| formalization cost | multiplied by sample count per claim; bounded by capability count |
+| solver cost | per-query timeout (default 30s); pairwise pair budget (default 200) |
+| cross-side cost | 2 Z3 calls per matched capability (aggregate) + bounded pairwise |
+| evidence volume | disk output grows with preserved artifacts; cost accepted because retained evidence is central to product value |
+
+---
+
+## 15. Forward Evolution
+
+### 15.1 Evolution Paths
+
+- The parser is specialized to the current schema but isolated enough that future schema support could be introduced behind new parser and catalog branches.
+- The claim graph creates a stable internal model that can support richer analyses later without rewriting input parsing.
+- Report synthesis is separated from analysis phases so new evidence types can be added with additive report sections.
+- Source-backed analysis is optional and bounded so future capability growth can happen without complicating the base specs-forward pipeline.
+
+### 15.2 Risks and Mitigations
+
+| Risk | Mitigation |
+|---|---|
+| LLM dependence can block required phases | Bound retries, validate schemas, fail hard when evidence-producing phases cannot complete |
+| Strict failure posture may frustrate users who want partial results | Preserve intermediate diagnostics and make failure causes explicit so reruns are actionable |
+| Specialized parsing may need maintenance as schema evolves | Keep parser logic modular and loss-aware so drift is surfaced early |
+| Evidence preservation increases disk output | Accept the cost because retained evidence is central to product value |
+| Source-backed comparison can overstate confidence if evidence boundaries are loose | Keep declared source scope explicit and enforce the blind-comparison boundary |
+| Code-derived formalization doubles LLM and solver cost with `--src` | Symmetric formal pipeline is necessary for solver-backed classification; cost bounded by capability and claim count |
+| Cross-side implication may be inconclusive for complex claims | Preserve uncertainty honestly and fall back to blind comparison as the explanatory layer |
+
+### 15.3 Alternatives Considered
+
+| Alternative | Why Rejected |
+|---|---|
+| Generic Markdown AST first | Schema is constrained; product needs deterministic, loss-aware structural extraction more than generic Markdown completeness |
+| LLM-heavy end-to-end analysis | Would weaken determinism, auditability, and failure isolation |
+| Single-pass formalization without clustering | Ambiguity in formalization is itself useful evidence and must be surfaced rather than hidden |
+| Best-effort partial success when critical phases fail | Incomplete evidence could be mistaken for a trustworthy result |
+
+---
+
+## 16. Pipeline and Output Summary
+
+### 16.1 Specs-Forward Pipeline
+
+| Step | Output | Description |
+|---|---|---|
+| Qualitative review (pass 1) | `report_1.1.md` | Independent evaluation of proposal, design, and spec files for inconsistencies, contradictions, ambiguity |
+| Qualitative review (pass 2) | `report_1.2.md` | Rigorous assessment ensuring proposal and design capture all preconditions, postconditions, invariants, failure modes |
+| Coverage analysis | `report_1.3.md` | Cross-artifact coverage, contradiction, and semantic alignment |
+| Formalization | `smt/` directory | SMT-LIB artifacts from formalized claims |
+| Solver analysis | `report_1.logic.md` | Z3 evaluation including counterexamples |
+| Source traceability | `report_1.src.md` | Requirement/scenario tracing to code (when `--src` provided) |
+| Tasks analysis | `report_1.tasks.md` | Task consistency with specs (when `tasks.md` provided) |
+| Synthesized summary | `report_1.md` | Combined findings from all specs-forward passes |
+
+### 16.2 Code-Backwards Pipeline (when `--src` provided)
+
+| Step | Output | Description |
+|---|---|---|
+| Code-derived spec generation | `gen_specs/` directory | EARS-preferring specs per capability from source evidence |
+| Code-derived formalization | `gen_specs_smt/` directory | SMT-LIB artifacts from code-derived specs |
+| Code-derived solver analysis | `report_2.logic.md` | Internal consistency of code-derived formalizations |
+| Cross-side implication | persisted queries | Solver-backed classification (same/stronger/weaker/different/uncertain) |
+| Blind comparison | `report_2.compare.md` | Explanatory rationale with dual-layer evidence |
+| Synthesized summary | `report_2.md` | Combined findings from all code-backwards passes |
+
+### 16.3 Completion
+
+| Artifact | Description |
+|---|---|
+| `report_summary.md` | Synthesized summary across all phases |
+| `manifest.json` | Completion record listing all produced files with SHA-256 checksums; written last |
+
+### 16.4 CLI Interface
+
+```
+spec-check [OPTIONS] [INPUT FILES]
+```
+
+| Flag | Purpose | Default |
+|---|---|---|
+| `--output` | Output directory for reports | `./build/spec-check` |
+| `--src` | Source code directory (enables code-backwards mode) | not set |
+| `--caps` | Capability listing file | inferred from input files |
+| `--z3` | Path to Z3 binary | `z3` on PATH |
+| `--config` | JSON configuration file for model and prompt settings | not set |
+| `--pair-budget` | Maximum N*M pairwise comparisons per capability | `200` |
+| `--help` | Print help and exit | -- |
+| `--version` | Print version and exit | -- |
+
+### 16.5 Cross-Side Implication Tiering
+
+| Tier | When | Cost | Output |
+|---|---|---|---|
+| Tier 1 (Aggregate) | Always for matched capabilities | 2 Z3 calls per matched capability | `capability_aggregate` classification |
+| Tier 2 (Pairwise) | When N*M within `--pair-budget` | Up to N*M*2 Z3 calls | `cross_implication` per matched pair; `unmatched_original` and `unmatched_generated` for surplus |
+
+Classification rules: both directions hold = same; only code->original = stronger; only original->code = weaker; neither = different; any inconclusive = uncertain.
+
+Greedy matching is deterministic: sorted by classification score (same=4, stronger=3, uncertain=2, weaker=1, different=0), with lexicographic claim ID as tiebreaker.
+
+---
+
+## 17. Relationship to Other Documents
+
+| Document | Relationship |
+|---|---|
+| [`openspec/specs/`](openspec/specs/) | Defines the normative behavior for each capability |
+| [`docs/lfm.md`](docs/lfm.md) | Explains the assurance posture and evidence model |
+| [`docs/spec_traceability.md`](docs/spec_traceability.md) | Explains the traceability contract between specs, tests, and identifiers |
+| [`docs/typescript_style.md`](docs/typescript_style.md) | Explains how the implementation should embody the design |
+| Archived core change under [`openspec/changes/archive/2026-06-18-spec-check-core/`](openspec/changes/archive/2026-06-18-spec-check-core/) | Historical source material for the initial design baseline |
+| [`pasture/concept.md`](pasture/concept.md) | Original concept document; superseded by this design and the normative specs |
+
+---
+
+## 18. Maintenance Rules
+
+This is a living document.
+
+Update it when:
+
+- pipeline phases or analysis modes change
+- state machines change
+- evidence preservation or output format rules change
+- invariants or source-of-truth boundaries change
+- failure contracts or exit codes change
+- safety or liveness guarantees change
+- verification expectations change
+- new capabilities are added or existing capabilities are modified
+- the CLI interface changes
+
+Maintenance guidance:
+
+- Summarize durable design intent rather than copying every requirement from the specs verbatim.
+- Keep capability-specific sections linked to the relevant OpenSpec specs.
+- Prefer stable module links over line-number-heavy implementation commentary.
+- Ensure new code, tests, and specs continue to support the claims made in this document.
+- Keep the numbered section structure when adding new sections.
+- Preserve the separation between design intent here and normative behavior in the capability specs.

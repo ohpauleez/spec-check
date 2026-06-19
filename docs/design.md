@@ -34,6 +34,8 @@
 
 `spec-check` is a local TypeScript CLI that analyzes OpenSpec specification artifacts -- proposals, designs, capability specs, and optional task files -- to catch defects, ambiguity, contradictions, and missing assumptions before implementation begins. When a source directory is provided, it optionally compares original specification intent against code-derived guarantees using solver-backed formal analysis.
 
+This project is strongly influenced by [AWS's Requirements Analysis tool](https://kiro.dev/blog/deep-spec-analysis/) and by [Midspiral's claimcheck](https://midspiral.com/blog/claimcheck-narrowing-the-gap-between-proof-and-intent/).
+
 ### 1.2 Why It Exists
 
 Agent-assisted development can produce plausible code faster than developers can produce trustworthy evidence. `spec-check` supports evidence-based dependability cases through the full software development lifecycle by surfacing specification defects early enough that developers can correct them before they spread. The product value comes from surfacing evidence, assumptions, counterexamples, and residual uncertainty -- not from opaque verdicts.

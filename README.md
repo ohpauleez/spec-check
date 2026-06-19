@@ -4,6 +4,8 @@
 
 It is intentionally narrow: `spec-check` is a read-only analysis tool, not a code generator or specification editor. Specifications are the source of truth for intended behavior, source code is the source of truth for implemented behavior, and SMT-backed formal analysis bridges the two.
 
+This project is strongly influenced by [AWS's Requirements Analysis tool](https://kiro.dev/blog/deep-spec-analysis/) and by [Midspiral's claimcheck](https://midspiral.com/blog/claimcheck-narrowing-the-gap-between-proof-and-intent/).
+
 Canonical project docs:
 - [Technical design](docs/design.md)
 - [Architecture codemap](ARCHITECTURE.md)

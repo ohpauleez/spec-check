@@ -54,7 +54,7 @@ spec-check [OPTIONS] [INPUT FILES...]
 
 ```sh
 node dist/spec-check.js \
-  openspec/changes/archive/spec-check-core/proposal.md \
+  openspec/changes/archive/2026-06-18-spec-check-core/proposal.md \
   openspec/changes/archive/2026-06-18-spec-check-core/design.md \
   openspec/changes/archive/2026-06-18-spec-check-core/specs/catalog-and-parse/spec.md \
   openspec/changes/archive/2026-06-18-spec-check-core/specs/claim-graph-and-coverage/spec.md \

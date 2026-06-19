@@ -427,10 +427,10 @@ All spec.md files define verifiable behavior using EARS format and RFC 2119 keyw
 | Ubiquitous | `THE <system> SHALL <response>.` | Always active |
 | State-driven | `WHILE <precondition>, THE <system> SHALL <response>.` | Active in a continuous state |
 | Event-driven | `WHEN <trigger>, THE <system> SHALL <response>.` | Discrete event causes behavior |
-| Unwanted-behavior | `IF <trigger>, THEN THE <system> SHALL <response>.` | Error/failure mitigation |
+| Unwanted-behavior | `IF <trigger>, THEN THE <system> SHALL <response>.` | Error/failure mitigation with Negation qualifier |
 | Complex | `WHILE <precondition>, WHEN <trigger>, THE <system> SHALL <response>.` | Both state and event required |
 | Optional | `WHERE <feature is included>, THE <system> SHALL <response>.` | Optional/configurable behavior |
-| Conditional | `IF <condition>, THE <system> SHALL <response>.` | Conditional without unwanted behavior |
+| Conditional | `IF <condition>, THEN THE <system> SHALL <response>.` | Conditional without unwanted behavior / Negation qualifier |
 | Non-EARS | Free-form with justification | When EARS is insufficient (> 3 preconditions, mathematical, tabular) |
 
 RFC 2119: SHALL/MUST = absolute requirement (mandatory), SHOULD = recommended (advisory), MAY = optional (informational).

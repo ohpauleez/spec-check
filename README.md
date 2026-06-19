@@ -153,7 +153,7 @@ Key expectations include:
 - `Result`-style error handling for expected failures
 - strong boundary validation
 - strict TypeScript and zero normalized lint debt
-- complete TSDoc for public code
+- complete TSDoc for all code
 
 ## Canonical Documents
 

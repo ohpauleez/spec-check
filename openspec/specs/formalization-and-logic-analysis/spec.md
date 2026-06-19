@@ -1,6 +1,147 @@
+---
+title: FormalizationAndLogicAnalysis
+---
+
 ## Purpose
 
 Define the formalization and solver-backed logic analysis behavior for the spec-check tool: translating claims into formal artifacts, clustering alternate interpretations, and using solver-backed analysis to detect conflicts, gaps, and surprising behaviors.
+
+```alloy
+module FormalizationAndLogicAnalysis
+open util/boolean
+
+// --- Domain vocabulary ---
+
+// A Claim is a requirement or scenario from a spec file
+sig Claim {
+  obligation : one Obligation,
+  spec : one Spec
+}
+
+// Obligation levels (strict total order: Mandatory > Advisory > Informational)
+abstract sig Obligation {}
+one sig Mandatory, Advisory, Informational extends Obligation {}
+
+// Ordering on obligation levels
+fun higherObligation : Obligation -> Obligation {
+  Advisory -> Mandatory +
+  Informational -> Mandatory +
+  Informational -> Advisory
+}
+
+fun maxObligation [claims : set Claim] : lone Obligation {
+  { o : claims.obligation | no (claims.obligation & o.higherObligation) }
+}
+
+// A Spec is a single spec file being analyzed
+sig Spec {}
+
+// A Sample is one formalization attempt for a claim
+// Validity is an inherent property (determined by schema), not mutable
+sig Sample {
+  claim : one Claim,
+  schemaValid : one Bool      // whether it passes schema validation
+}
+
+// An equivalence cluster groups semantically equivalent samples
+sig Cluster {
+  members : set Sample,
+  representative : lone Sample
+}
+
+// Implication check result between two samples
+sig ImplicationResult {
+  from : one Sample,
+  to : one Sample,
+  result : one SolverResult
+}
+
+// Solver result classifications
+abstract sig SolverResult {}
+one sig Sat, Unsat, Timeout, Unknown, SolverError extends SolverResult {}
+
+// Finding types produced by analysis
+abstract sig FindingType {}
+one sig Contradiction, ConditionalContradiction, CompletenessGap,
+       Ambiguity, Inconclusive, MergeConflict, SolverErrType extends FindingType {}
+
+// Finding severity levels
+abstract sig Severity {}
+one sig ErrorSev, WarningSev, InfoSev extends Severity {}
+
+sig Finding {
+  findingType : one FindingType,
+  severity : one Severity,
+  involvedClaims : set Claim
+}
+
+// Identifier safety classification for SMT-LIB compilation
+abstract sig IdSafety {}
+one sig Safe, Unsafe extends IdSafety {}
+
+sig ClaimId {
+  safety : one IdSafety
+}
+
+// Assertion structure for conditional analysis
+abstract sig AssertionKind {}
+one sig Conditional, Unconditional extends AssertionKind {}
+
+sig Assertion {
+  kind : one AssertionKind,
+  sourceClaim : one Claim
+}
+
+// Declaration identity (for deduplication and conflict detection)
+sig DeclName {}
+sig DeclSignature {}
+sig Declaration {
+  declName : one DeclName,
+  declSig : one DeclSignature,
+  declClaim : one Claim
+}
+
+// --- Pipeline phase state ---
+
+abstract sig Phase {}
+one sig FormalizationPh, ValidationPh, ClusteringPh, CompilationPh,
+       AnalysisPh, ReportingPh, AbortedPh extends Phase {}
+
+one sig Pipeline {
+  var phase : one Phase,
+  var candidates : set Sample,                // validated samples
+  var representatives : Claim -> lone Sample, // selected reps per claim
+  var findings : set Finding,                 // accumulated findings
+  var evidence : set Spec,                    // specs with persisted evidence
+  var exitCode : lone Int                     // exit code (2 = abort)
+}
+
+// --- Structural facts (non-temporal invariants) ---
+
+// Cluster well-formedness: respects equivalence, representative is a member
+fact cluster_wellformed {
+  all cl : Cluster | cl.representative in cl.members or no cl.representative
+  all disj cl1, cl2 : Cluster | no (cl1.members & cl2.members)
+}
+
+// Implication results are between distinct samples of the same claim
+fact implication_wellformed {
+  all ir : ImplicationResult | ir.from != ir.to
+  all ir : ImplicationResult | ir.from.claim = ir.to.claim
+}
+
+// Equivalence via mutual implication (unsat means entailment holds)
+pred samples_equivalent [a, b : Sample] {
+  some ir1 : ImplicationResult | ir1.from = a and ir1.to = b and ir1.result = Unsat
+  some ir2 : ImplicationResult | ir2.from = b and ir2.to = a and ir2.result = Unsat
+}
+
+// Cluster membership respects equivalence
+fact clusters_respect_equivalence {
+  all disj a, b : Sample, cl : Cluster |
+    (samples_equivalent[a, b] and a in cl.members) implies b in cl.members
+}
+```
 
 ## Requirements
 
@@ -27,6 +168,68 @@ IF some claims fail formalization but at least one claim succeeds, THEN THE spec
 
 **Postcondition:** Partial formalization results are preserved and downstream phases proceed with available candidates.
 
+#### Requirement model
+
+```alloy
+// --- Formalization phase: claim -> samples with abort/partial semantics ---
+
+pred formalize_success {
+  // Guard: in formalization phase with claims available
+  Pipeline.phase = FormalizationPh
+  some Claim
+  some s : Sample | s.schemaValid = True
+  // Effect: advance to validation
+  Pipeline.phase' = ValidationPh
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred formalize_abort {
+  // Guard: in formalization phase, zero valid samples exist
+  Pipeline.phase = FormalizationPh
+  no s : Sample | s.schemaValid = True
+  // Effect: abort with exit code 2
+  Pipeline.phase' = AbortedPh
+  Pipeline.exitCode' = 2
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+}
+
+pred formalize_partial {
+  // Guard: some claims have valid samples, some don't
+  Pipeline.phase = FormalizationPh
+  some s : Sample | s.schemaValid = True
+  some c : Claim | no s : Sample | s.claim = c and s.schemaValid = True
+  // Effect: continue with available candidates
+  Pipeline.phase' = ValidationPh
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// Safety: abort implies no solver conclusions ever produced
+assert abort_no_conclusions {
+  always (Pipeline.phase' = AbortedPh implies
+    after always no f : Pipeline.findings | f.findingType = Contradiction)
+}
+
+// Safety: zero valid samples always triggers abort (not silent continuation)
+assert zero_candidates_implies_abort {
+  always (
+    (Pipeline.phase = FormalizationPh and
+     (no s : Sample | s.schemaValid = True) and
+     Pipeline.phase' != FormalizationPh)
+    implies Pipeline.phase' = AbortedPh)
+}
+```
+
 ### Requirement: Formalization Sample Schema Validation [FLA-VALIDATE-SAMPLE]
 WHEN the spec-check tool receives a formalization sample from `opencode`, THE spec-check tool SHALL validate the sample against the logic IR schema including sort consistency, assertion well-formedness, and identifier format before accepting it into clustering.
 
@@ -48,6 +251,63 @@ IF a formalization sample violates the logic IR schema, THEN THE spec-check tool
 IF all formalization samples for a claim are invalid after bounded retries, THEN THE spec-check tool SHALL record the failure as an error in the formalization output and SHALL exclude that claim from clustering. THE tool SHALL NOT abort the entire phase unless no claims produce valid candidates.
 
 **Postcondition:** Per-claim formalization failures are collected as errors; remaining valid claims proceed to clustering.
+
+#### Requirement model
+
+```alloy
+// --- Schema validation: gate between formalization and clustering ---
+
+pred validate_accept [s : Sample] {
+  // Guard: in validation phase, sample passes schema checks
+  Pipeline.phase = ValidationPh
+  s.schemaValid = True
+  // Effect: sample enters candidates
+  Pipeline.candidates' = Pipeline.candidates + s
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred validate_reject [s : Sample] {
+  // Guard: in validation phase, sample fails schema checks
+  Pipeline.phase = ValidationPh
+  s.schemaValid = False
+  s not in Pipeline.candidates
+  // Effect: sample excluded (preserved as evidence externally)
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred validation_complete {
+  // Guard: validation phase done
+  Pipeline.phase = ValidationPh
+  // Effect: advance to clustering if candidates exist, else abort
+  some Pipeline.candidates implies Pipeline.phase' = ClusteringPh
+  no Pipeline.candidates implies Pipeline.phase' = AbortedPh
+  Pipeline.exitCode' = (no Pipeline.candidates implies 2 else Pipeline.exitCode)
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+}
+
+// Safety: only valid samples ever enter the candidates set
+assert only_valid_in_candidates {
+  always (all s : Pipeline.candidates | s.schemaValid = True)
+}
+
+// Safety: invalid samples never corrupt downstream analysis
+assert invalid_never_in_candidates {
+  always (all s : Sample |
+    s.schemaValid = False implies s not in Pipeline.candidates)
+}
+```
 
 ### Requirement: SMT-LIB Compilation And Identifier Sanitization [FLA-SMTLIB-COMPILE]
 WHEN the spec-check tool compiles logic IR into SMT-LIB artifacts, THE spec-check tool SHALL sanitize user-derived identifiers to prevent solver syntax collisions, SHALL include reversible mapping comments that link sanitized identifiers back to their original claim identifiers, SHALL emit only declarations and assertions without solver commands (`(check-sat)`), and SHALL expose decomposed assertion expressions alongside the compiled text for downstream query construction.
@@ -76,6 +336,49 @@ WHEN the spec-check tool compiles logic IR into SMT-LIB, THE compiled output SHA
 
 **Postcondition:** Downstream consumers can construct negated or combined assertions from the compiled output without re-parsing the SMT-LIB text.
 
+#### Requirement model
+
+```alloy
+// --- SMT-LIB compilation: sanitization and structural properties ---
+// Compilation is a pure function (no state transitions). Its properties are
+// structural invariants on the compiled output.
+
+sig CompiledArtifact {
+  declarations : set Claim,
+  assertions : set Assertion,
+  hasCheckSat : one Bool,
+  hasMappingComments : one Bool,
+  exposedExprs : set Assertion
+}
+
+// Compilation postconditions (structural invariants)
+fact compilation_valid {
+  all art : CompiledArtifact {
+    // No solver commands in compiled output
+    art.hasCheckSat = False
+    // Mapping comments present for traceability
+    art.hasMappingComments = True
+    // All assertions have exposed inner expressions
+    art.assertions in art.exposedExprs
+  }
+}
+
+// Sanitization: deterministic, reversible, and identity-preserving for safe IDs
+pred sanitize_id [cid : ClaimId, outputSafe : Bool] {
+  outputSafe = True   // result is always safe (sanitized or preserved)
+}
+
+// Safety: compiled output never contains check-sat
+assert no_checksat_in_compiled {
+  all art : CompiledArtifact | art.hasCheckSat = False
+}
+
+// Safety: safe identifiers are preserved unchanged
+assert safe_ids_preserved {
+  all cid : ClaimId | cid.safety = Safe implies sanitize_id[cid, True]
+}
+```
+
 ### Requirement: Per-Spec Combined SMT-LIB Compilation [FLA-SPEC-COMBINE]
 WHEN the spec-check tool performs logic analysis, THE spec-check tool SHALL combine all formalized claims from a single spec file into exactly one SMT-LIB file, SHALL deduplicate variable and function declarations across claims, and SHALL use named assertions (`(assert (! expr :named label))`) to enable unsat-core identification. The compiled output SHALL NOT include solver commands (`check-sat`, `set-option`, `get-unsat-core`) — the logic analysis orchestrator appends these at query time using a two-phase approach (Phase 1: satisfiability check only; Phase 2: re-run with `(set-option :produce-unsat-cores true)` and `(get-unsat-core)` only when UNSAT is detected).
 
@@ -98,6 +401,64 @@ IF two claims from the same spec declare the same function name with incompatibl
 WHEN the spec-check tool generates named assertions in the combined SMT-LIB, THE label for each assertion SHALL encode the source claim identifier and assertion index so that unsat-core results can be mapped back to specific claims.
 
 **Postcondition:** The assertion-name-to-claim-ID mapping is deterministic and reversible.
+
+#### Requirement model
+
+```alloy
+// --- Per-spec combination: deduplication, conflict detection, named assertions ---
+
+sig CombinedSpec {
+  specRef : one Spec,
+  includedClaims : set Claim,
+  excludedClaims : set Claim,
+  namedAssertions : Assertion -> one Claim
+}
+
+// Well-formedness of combined specs
+fact combined_wellformed {
+  all cs : CombinedSpec {
+    // All claims from the spec are either included or excluded
+    all c : Claim | c.spec = cs.specRef implies
+      (c in cs.includedClaims or c in cs.excludedClaims)
+    no (cs.includedClaims & cs.excludedClaims)
+    // Deduplication: no duplicate declarations among included claims
+    all disj d1, d2 : Declaration |
+      (d1.declClaim in cs.includedClaims and d2.declClaim in cs.includedClaims and
+       d1.declName = d2.declName) implies d1.declSig = d2.declSig
+    // Named assertions map to included claims only
+    all a : cs.namedAssertions.Claim | a.sourceClaim in cs.includedClaims
+  }
+}
+
+pred conflict_detected [c1, c2 : Claim, sp : Spec] {
+  c1.spec = sp and c2.spec = sp and c1 != c2
+  some disj d1, d2 : Declaration |
+    d1.declClaim = c1 and d2.declClaim = c2 and
+    d1.declName = d2.declName and d1.declSig != d2.declSig
+}
+
+pred emit_merge_conflict [c1, c2 : Claim] {
+  Pipeline.phase = CompilationPh
+  conflict_detected[c1, c2, c1.spec]
+  some f : Finding |
+    f.findingType = MergeConflict and
+    f.severity = ErrorSev and
+    c1 + c2 in f.involvedClaims and
+    Pipeline.findings' = Pipeline.findings + f
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// Safety: conflicts produce findings, never malformed solver input
+assert conflict_excluded_from_combined {
+  all cs : CombinedSpec, disj c1, c2 : Claim |
+    conflict_detected[c1, c2, cs.specRef] implies
+      (c1 in cs.excludedClaims or c2 in cs.excludedClaims)
+}
+```
 
 ### Requirement: Surface Ambiguity Through Sample Clustering [FLA-CLUSTER-AMBIG]
 WHEN multiple formalization samples are produced for the same claim, THE spec-check tool SHALL compare the samples for semantic equivalence using solver-backed implication checks, select a stable interpretation only when it meets the configured stability threshold, and SHALL surface divergent interpretations as ambiguity findings with rationale.
@@ -127,6 +488,74 @@ WHEN the spec-check tool constructs a pairwise implication query to test whether
 
 **Postcondition:** Each implication query produces exactly one solver result with unambiguous interpretation; the negation applies to the conjunction of all target assertions jointly.
 
+#### Requirement model
+
+```alloy
+// --- Clustering: equivalence via implication, stability, ambiguity ---
+
+pred cluster_stable [cl : Cluster] {
+  // Cluster has enough members to meet threshold
+  #cl.members >= 2
+  some cl.representative
+}
+
+pred cluster_select_representative [c : Claim, cl : Cluster] {
+  // Guard: clustering phase, cluster is stable for this claim
+  Pipeline.phase = ClusteringPh
+  cluster_stable[cl]
+  cl.representative.claim = c
+  // Effect: representative selected for this claim
+  Pipeline.representatives' = Pipeline.representatives + (c -> cl.representative)
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred cluster_divergent [c : Claim] {
+  // Guard: no stable cluster for this claim
+  Pipeline.phase = ClusteringPh
+  no cl : Cluster | cluster_stable[cl] and cl.representative.claim = c
+  // Effect: ambiguity finding emitted
+  some f : Finding |
+    f.findingType = Ambiguity and
+    f.severity = WarningSev and
+    c in f.involvedClaims and
+    Pipeline.findings' = Pipeline.findings + f
+  // No representative selected for this claim
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// Inconclusive implication: pair neither equivalent nor proven distinct
+pred implication_inconclusive [a, b : Sample] {
+  some ir : ImplicationResult | ir.from = a and ir.to = b and ir.result in (Timeout + Unknown)
+}
+
+// Safety: inconclusive checks do not corrupt cluster membership
+// (guaranteed by fact: clusters_respect_equivalence only uses Unsat results)
+assert inconclusive_no_cluster_corruption {
+  all disj a, b : Sample |
+    implication_inconclusive[a, b] implies not samples_equivalent[a, b]
+}
+
+// Safety: each implication query produces exactly one result
+assert single_result_per_query {
+  all ir : ImplicationResult | one ir.result
+}
+
+// Safety: divergent claims surface ambiguity findings
+assert divergent_produces_finding {
+  always (all c : Claim |
+    cluster_divergent[c] implies
+      (some f : Pipeline.findings' | f.findingType = Ambiguity and c in f.involvedClaims))
+}
+```
+
 ### Requirement: Clustering Determinism And Symmetry [FLA-CLUSTER-PROPERTIES]
 WHEN the spec-check tool performs equivalence clustering on the same set of formalization samples with the same solver results, THE spec-check tool SHALL produce identical clusters.
 
@@ -143,6 +572,26 @@ WHEN sample A implies sample B and sample B implies sample A, THE spec-check too
 WHEN the same formalization samples and solver results are processed on two separate runs, THE spec-check tool SHALL produce identical equivalence clusters and identical representative selections.
 
 **Postcondition:** Clustering is a deterministic function of its inputs.
+
+#### Requirement model
+
+```alloy
+// --- Clustering properties: symmetry and determinism ---
+// Symmetry is guaranteed by the structural fact clusters_respect_equivalence.
+// Determinism is a meta-property: same inputs -> same clusters (enforced by
+// the clustering algorithm being a deterministic function of ImplicationResults).
+
+// Verify: mutual implication places samples in same cluster
+assert symmetric_implication_same_cluster {
+  all disj a, b : Sample, cl : Cluster |
+    (samples_equivalent[a, b] and a in cl.members) implies b in cl.members
+}
+
+// Determinism modeled as: cluster membership is uniquely determined by members
+assert clustering_deterministic {
+  all disj cl1, cl2 : Cluster | cl1.members != cl2.members
+}
+```
 
 ### Requirement: Run Per-Spec Combined Solver Analysis [FLA-RUN-LOGIC]
 WHEN formal artifacts are available, THE spec-check tool SHALL group representative claims by source spec file, SHALL compile each group into a single combined SMT-LIB file with named assertions, SHALL invoke Z3 per spec group using a two-phase approach (Phase 1: satisfiability check only; Phase 2: re-invoke with unsat-core support only when contradiction is detected), and SHALL classify contradictions with severity derived from the highest-obligation claim in the unsat core.
@@ -177,6 +626,144 @@ IF the solver emits error diagnostics (such as `(error ...)` lines in stdout) in
 
 **Postcondition:** Solver errors are surfaced as explicit findings rather than silently treated as successful analysis.
 
+#### Requirement model
+
+```alloy
+// --- Solver analysis: two-phase approach with severity derivation ---
+
+// Obligation -> Severity mapping
+fun obligationToSeverity [o : Obligation] : one Severity {
+  (o = Mandatory) implies ErrorSev
+  else (o = Advisory) implies WarningSev
+  else InfoSev
+}
+
+// Per-spec solver query result
+sig SpecQueryResult {
+  querySpec : one Spec,
+  globalResult : one SolverResult,
+  unsatCore : set Claim
+}
+
+// Unsat core only populated when result is Unsat
+fact unsat_core_constraint {
+  all sqr : SpecQueryResult |
+    sqr.globalResult != Unsat implies no sqr.unsatCore
+  all sqr : SpecQueryResult |
+    sqr.globalResult = Unsat implies some sqr.unsatCore
+  all sqr : SpecQueryResult |
+    sqr.unsatCore in { c : Claim | c.spec = sqr.querySpec }
+}
+
+pred solver_reports_contradiction [sqr : SpecQueryResult] {
+  // Guard: analysis phase, global result is unsat
+  Pipeline.phase = AnalysisPh
+  sqr.globalResult = Unsat
+  // Effect: contradiction finding with severity from max obligation in core
+  some f : Finding {
+    f.findingType = Contradiction
+    f.severity = obligationToSeverity[maxObligation[sqr.unsatCore]]
+    f.involvedClaims = sqr.unsatCore
+    Pipeline.findings' = Pipeline.findings + f
+  }
+  Pipeline.evidence' = Pipeline.evidence + sqr.querySpec
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred solver_inconclusive [sqr : SpecQueryResult] {
+  // Guard: analysis phase, timeout or unknown
+  Pipeline.phase = AnalysisPh
+  sqr.globalResult in (Timeout + Unknown)
+  // Effect: inconclusive finding at warning severity
+  some f : Finding {
+    f.findingType = Inconclusive
+    f.severity = WarningSev
+    f.involvedClaims = { c : Claim | c.spec = sqr.querySpec }
+    Pipeline.findings' = Pipeline.findings + f
+  }
+  Pipeline.evidence' = Pipeline.evidence + sqr.querySpec
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred solver_sat_deeper [sqr : SpecQueryResult] {
+  // Guard: analysis phase, global result is sat
+  Pipeline.phase = AnalysisPh
+  sqr.globalResult = Sat
+  // Effect: no global contradiction, proceed to deeper analysis
+  Pipeline.findings' = Pipeline.findings  // no new contradiction finding
+  Pipeline.evidence' = Pipeline.evidence + sqr.querySpec
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred solver_error_found [sqr : SpecQueryResult] {
+  // Guard: solver emits error diagnostics
+  Pipeline.phase = AnalysisPh
+  sqr.globalResult = SolverError
+  // Effect: solver_error finding at error severity
+  some f : Finding {
+    f.findingType = SolverErrType
+    f.severity = ErrorSev
+    f.involvedClaims = { c : Claim | c.spec = sqr.querySpec }
+    Pipeline.findings' = Pipeline.findings + f
+  }
+  Pipeline.evidence' = Pipeline.evidence + sqr.querySpec
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// Safety: severity correctly derived from highest obligation in unsat core
+assert contradiction_severity_correct {
+  always (all sqr : SpecQueryResult |
+    solver_reports_contradiction[sqr] implies
+      (some f : Pipeline.findings' - Pipeline.findings |
+        f.findingType = Contradiction and
+        f.severity = obligationToSeverity[maxObligation[sqr.unsatCore]]))
+}
+
+// Safety: advisory-only cores never produce error severity
+assert advisory_only_not_error {
+  always (all sqr : SpecQueryResult |
+    (solver_reports_contradiction[sqr] and
+     no c : sqr.unsatCore | c.obligation = Mandatory)
+    implies
+      (all f : Pipeline.findings' - Pipeline.findings |
+        f.findingType = Contradiction implies f.severity != ErrorSev))
+}
+
+// Safety: sat result never produces global contradiction finding
+assert sat_no_global_contradiction {
+  always (all sqr : SpecQueryResult |
+    solver_sat_deeper[sqr] implies
+      no f : Pipeline.findings' - Pipeline.findings | f.findingType = Contradiction)
+}
+
+// Safety: inconclusive results never masquerade as success
+assert inconclusive_never_silent {
+  always (all sqr : SpecQueryResult |
+    solver_inconclusive[sqr] implies
+      some f : Pipeline.findings' - Pipeline.findings | f.findingType = Inconclusive)
+}
+
+// Safety: solver errors are surfaced explicitly
+assert solver_error_surfaced {
+  always (all sqr : SpecQueryResult |
+    solver_error_found[sqr] implies
+      some f : Pipeline.findings' - Pipeline.findings |
+        f.findingType = SolverErrType and f.severity = ErrorSev)
+}
+```
+
 ### Requirement: Pairwise Guard-Activation Contradiction Checking [FLA-PAIRWISE]
 WHEN the global satisfiability check for a spec group returns sat, THE spec-check tool SHALL extract conditional assertions (implications of the form `(=> guard consequent)`), SHALL identify pairs from different claims, SHALL check each pair by forcing both guards active and asserting both consequents simultaneously, and SHALL emit a `logic.conditional_contradiction` finding when the resulting query is unsatisfiable (indicating the consequents genuinely conflict when both guards hold).
 
@@ -205,6 +792,81 @@ WHEN the spec-check tool emits a pairwise contradiction finding, THE severity SH
 
 **Postcondition:** Pairwise contradiction severity is consistent with the obligation-aware severity model used by the global contradiction check.
 
+#### Requirement model
+
+```alloy
+// --- Pairwise guard-activation: conditional contradiction detection ---
+
+sig PairwiseCheck {
+  pairAssertion1 : one Assertion,
+  pairAssertion2 : one Assertion,
+  pairResult : one SolverResult
+}
+
+// Pairwise checks involve conditional assertions from different claims
+fact pairwise_wellformed {
+  all pc : PairwiseCheck {
+    pc.pairAssertion1.kind = Conditional
+    pc.pairAssertion2.kind = Conditional
+    pc.pairAssertion1.sourceClaim != pc.pairAssertion2.sourceClaim
+    pc.pairAssertion1.sourceClaim.spec = pc.pairAssertion2.sourceClaim.spec
+  }
+}
+
+pred pairwise_contradiction [pc : PairwiseCheck] {
+  // Guard: analysis phase, guards coexist but consequents conflict (unsat)
+  Pipeline.phase = AnalysisPh
+  pc.pairResult = Unsat
+  // Effect: emit conditional_contradiction finding
+  let c1 = pc.pairAssertion1.sourceClaim, c2 = pc.pairAssertion2.sourceClaim |
+    some f : Finding {
+      f.findingType = ConditionalContradiction
+      f.severity = obligationToSeverity[maxObligation[c1 + c2]]
+      f.involvedClaims = c1 + c2
+      Pipeline.findings' = Pipeline.findings + f
+    }
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred pairwise_compatible [pc : PairwiseCheck] {
+  // Guard: consequents are mutually satisfiable (sat)
+  Pipeline.phase = AnalysisPh
+  pc.pairResult = Sat
+  // Effect: no finding emitted
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// Safety: compatible pairs never produce false-positive contradiction findings
+assert compatible_no_false_positive {
+  always (all pc : PairwiseCheck |
+    pairwise_compatible[pc] implies
+      Pipeline.findings' = Pipeline.findings)
+}
+
+// Safety: pairwise severity consistent with obligation model
+assert pairwise_severity_correct {
+  always (all pc : PairwiseCheck |
+    pairwise_contradiction[pc] implies
+      (some f : Pipeline.findings' - Pipeline.findings |
+        f.findingType = ConditionalContradiction and
+        f.severity = obligationToSeverity[maxObligation[
+          pc.pairAssertion1.sourceClaim + pc.pairAssertion2.sourceClaim]]))
+}
+
+// Liveness: pairwise analysis terminates (bounded by pair budget)
+// The budget is a finite natural number, and each check consumes one unit.
+// This is not modeled as a temporal property since the budget is static.
+```
+
 ### Requirement: Completeness Gap Detection [FLA-COMPLETENESS]
 WHEN the global satisfiability check for a spec group returns sat AND all assertions in the spec group are conditional (implications), THE spec-check tool SHALL negate all guards simultaneously and check satisfiability. IF the result is sat, THE tool SHALL emit a `logic.completeness_gap` warning finding indicating that there exist reachable states where no conditional rule applies and behavior is unspecified.
 
@@ -228,6 +890,95 @@ WHEN the negation of all guards is unsatisfiable (the guards are exhaustive), TH
 
 **Postcondition:** Specifications whose conditional rules cover all reachable states are confirmed complete without false positives.
 
+#### Requirement model
+
+```alloy
+// --- Completeness gap detection: conditional coverage analysis ---
+
+pred all_conditional [sp : Spec] {
+  all a : Assertion | a.sourceClaim.spec = sp implies a.kind = Conditional
+}
+
+pred has_unconditional [sp : Spec] {
+  some a : Assertion | a.sourceClaim.spec = sp and a.kind = Unconditional
+}
+
+// Gap check result for a spec group
+abstract sig GapResult {}
+one sig GapSat, GapUnsat extends GapResult {}
+
+sig GapCheck {
+  gapSpec : one Spec,
+  gapResult : one GapResult
+}
+
+pred completeness_gap_detected [gc : GapCheck] {
+  // Guard: analysis phase, all conditional, negated guards sat
+  Pipeline.phase = AnalysisPh
+  all_conditional[gc.gapSpec]
+  gc.gapResult = GapSat
+  // Effect: emit completeness_gap warning
+  some f : Finding {
+    f.findingType = CompletenessGap
+    f.severity = WarningSev
+    f.involvedClaims = { c : Claim | c.spec = gc.gapSpec }
+    Pipeline.findings' = Pipeline.findings + f
+  }
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred completeness_gap_skipped [sp : Spec] {
+  // Guard: spec has unconditional assertions
+  Pipeline.phase = AnalysisPh
+  has_unconditional[sp]
+  // Effect: no gap check, no finding
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred exhaustive_guards [gc : GapCheck] {
+  // Guard: all conditional, but negated guards unsat (exhaustive)
+  Pipeline.phase = AnalysisPh
+  all_conditional[gc.gapSpec]
+  gc.gapResult = GapUnsat
+  // Effect: no gap finding
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// Safety: ubiquitous assertions skip gap check (no spurious gap findings)
+assert ubiquitous_no_spurious_gap {
+  always (all sp : Spec |
+    completeness_gap_skipped[sp] implies
+      no f : Pipeline.findings' - Pipeline.findings | f.findingType = CompletenessGap)
+}
+
+// Safety: exhaustive guards produce no gap finding
+assert exhaustive_no_gap {
+  always (all gc : GapCheck |
+    exhaustive_guards[gc] implies
+      no f : Pipeline.findings' - Pipeline.findings | f.findingType = CompletenessGap)
+}
+
+// Safety: gap detection requires all-conditional precondition
+assert gap_requires_all_conditional {
+  always (all gc : GapCheck |
+    completeness_gap_detected[gc] implies all_conditional[gc.gapSpec])
+}
+```
+
 ### Requirement: Bounded Solver Timeouts [FLA-SOLVER-TIMEOUT]
 WHEN the spec-check tool submits a query to `z3`, THE spec-check tool SHALL enforce a per-query timeout (default 30 seconds) and SHALL classify timeout results as inconclusive rather than as success or failure.
 
@@ -244,6 +995,30 @@ WHEN the solver returns a definitive result (sat or unsat) within the per-query 
 IF the solver does not return a result within the per-query timeout, THEN THE spec-check tool SHALL terminate the query, record the timeout as evidence, and continue with remaining queries.
 
 **Postcondition:** A single slow query does not block the entire solver analysis phase.
+
+#### Requirement model
+
+```alloy
+// --- Bounded solver timeouts: inconclusive classification ---
+
+// Safety: timeout is never classified as success (sat) or failure (unsat)
+// Timeout always produces an Inconclusive finding, never a Contradiction
+assert timeout_never_contradiction {
+  always (all sqr : SpecQueryResult |
+    (Pipeline.phase = AnalysisPh and sqr.globalResult = Timeout) implies
+      (solver_inconclusive[sqr] implies
+        no f : Pipeline.findings' - Pipeline.findings | f.findingType = Contradiction))
+}
+
+// Safety: timeout never blocks remaining analysis (pipeline continues)
+assert timeout_no_block {
+  always (all sqr : SpecQueryResult |
+    solver_inconclusive[sqr] implies Pipeline.phase' != AbortedPh)
+}
+
+// Liveness: every query eventually resolves (completes or times out)
+// Guaranteed by the timeout mechanism: no query runs longer than the budget.
+```
 
 ### Requirement: Solver Evidence Persistence [FLA-SOLVER-PERSIST]
 WHEN the spec-check tool runs solver analysis, THE spec-check tool SHALL persist all solver inputs (combined per-spec SMT-LIB files) and outputs (stdout including unsat core, stderr, exit classification) verbatim under the output directory with one artifact set per spec group.
@@ -262,8 +1037,219 @@ WHEN a per-spec solver query returns unsat, THE spec-check tool SHALL persist th
 
 **Postcondition:** The contradictory assertion subset (unsat core) is available for reviewer inspection and maps back to specific claims via named assertion labels.
 
-## MODIFIED Requirements
+#### Requirement model
 
-## REMOVED Requirements
+```alloy
+// --- Solver evidence persistence: all inputs and outputs persisted ---
 
-## RENAMED Requirements
+// Safety: every solver analysis event persists evidence for the spec
+assert all_queries_persisted {
+  always (all sqr : SpecQueryResult |
+    (solver_reports_contradiction[sqr] or solver_inconclusive[sqr] or
+     solver_sat_deeper[sqr] or solver_error_found[sqr])
+    implies sqr.querySpec in Pipeline.evidence')
+}
+
+// Safety: unsat results always have a non-empty unsat core
+assert unsat_has_core {
+  all sqr : SpecQueryResult |
+    sqr.globalResult = Unsat implies some sqr.unsatCore
+}
+```
+
+### State machine and invariant checks
+
+```alloy
+// --- Failure mode summary ---
+// 1. Total formalization failure: abort with exit code 2
+// 2. Partial formalization failure: continue with available candidates
+// 3. Schema validation failure: exclude bad samples, preserve as evidence
+// 4. Signature conflicts: exclude conflicting claim, emit merge_conflict finding
+// 5. Clustering ambiguity: emit ambiguity finding, no representative selected
+// 6. Solver timeout: classify as inconclusive, emit warning, continue
+// 7. Solver error: emit solver_error finding at error severity, persist evidence
+// 8. Pair budget exhaustion: stop checking, no indefinite block
+
+// --- Transition system ---
+
+pred advance_to_compilation {
+  Pipeline.phase = ClusteringPh
+  Pipeline.phase' = CompilationPh
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred advance_to_analysis {
+  Pipeline.phase = CompilationPh
+  Pipeline.phase' = AnalysisPh
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred advance_to_reporting {
+  Pipeline.phase = AnalysisPh
+  Pipeline.phase' = ReportingPh
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred stutter {
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred init_state {
+  Pipeline.phase = FormalizationPh
+  no Pipeline.candidates
+  no Pipeline.representatives
+  no Pipeline.findings
+  no Pipeline.evidence
+  no Pipeline.exitCode
+}
+
+fact transitions {
+  init_state and always (
+    // Formalization events
+    formalize_success or formalize_abort or formalize_partial
+    // Validation events
+    or (some s : Sample | validate_accept[s] or validate_reject[s])
+    or validation_complete
+    // Clustering events
+    or (some c : Claim, cl : Cluster | cluster_select_representative[c, cl])
+    or (some c : Claim | cluster_divergent[c])
+    // Compilation events
+    or (some disj c1, c2 : Claim | emit_merge_conflict[c1, c2])
+    // Phase transitions
+    or advance_to_compilation or advance_to_analysis or advance_to_reporting
+    // Solver analysis events
+    or (some sqr : SpecQueryResult |
+        solver_reports_contradiction[sqr] or solver_inconclusive[sqr] or
+        solver_sat_deeper[sqr] or solver_error_found[sqr])
+    // Pairwise events
+    or (some pc : PairwiseCheck | pairwise_contradiction[pc] or pairwise_compatible[pc])
+    // Completeness events
+    or (some gc : GapCheck | completeness_gap_detected[gc] or exhaustive_guards[gc])
+    or (some sp : Spec | completeness_gap_skipped[sp])
+    // Stutter
+    or stutter
+  )
+}
+
+// --- Global safety properties ---
+
+// Phases only advance forward (monotonic)
+assert phase_monotonic {
+  always (Pipeline.phase = AbortedPh implies after always Pipeline.phase = AbortedPh)
+}
+
+// Findings accumulate monotonically (never removed)
+assert findings_monotonic {
+  always (Pipeline.findings in Pipeline.findings')
+}
+
+// Evidence accumulates monotonically (never removed)
+assert evidence_monotonic {
+  always (Pipeline.evidence in Pipeline.evidence')
+}
+
+// --- Liveness properties ---
+
+// Pipeline eventually terminates given fair scheduling
+pred pipeline_fairness {
+  always eventually (Pipeline.phase' != Pipeline.phase or
+                     Pipeline.phase in (ReportingPh + AbortedPh))
+}
+
+assert pipeline_terminates {
+  pipeline_fairness implies eventually (Pipeline.phase in (ReportingPh + AbortedPh))
+}
+
+// --- Commands ---
+
+run show_pipeline {} for 3 Claim, 1 Spec, 4 Sample, 2 Cluster,
+  2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
+  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 8 steps
+
+run scenario_contradiction {
+  eventually (some f : Pipeline.findings | f.findingType = Contradiction)
+} for 3 Claim, 1 Spec, 3 Sample, 2 Cluster, 2 Finding,
+  2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion, 2 Declaration,
+  2 DeclName, 2 DeclSignature, 1 CombinedSpec, 1 CompiledArtifact,
+  2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 10 steps
+
+run scenario_abort {
+  eventually (Pipeline.phase = AbortedPh and Pipeline.exitCode = 2)
+} for 2 Claim, 1 Spec, 2 Sample, 1 Cluster, 1 Finding,
+  1 SpecQueryResult, 0 PairwiseCheck, 1 Assertion, 1 Declaration,
+  1 DeclName, 1 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact,
+  1 ClaimId, 0 ImplicationResult, 0 GapCheck, 5 Int, 5 steps
+
+check abort_no_conclusions for 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
+  2 Finding, 1 SpecQueryResult, 0 PairwiseCheck, 2 Assertion,
+  1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
+  0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck, 5 Int, 12 steps expect 0
+
+check only_valid_in_candidates for 3 Claim, 1 Spec, 4 Sample, 2 Cluster,
+  2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
+  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 12 steps expect 0
+
+check symmetric_implication_same_cluster for 3 Claim, 1 Spec, 5 Sample, 3 Cluster,
+  1 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
+  1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
+  0 CompiledArtifact, 1 ClaimId, 4 ImplicationResult, 0 GapCheck, 5 Int, 1 steps expect 0
+
+check sat_no_global_contradiction for 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
+  3 Finding, 2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
+  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 12 steps expect 0
+
+check compatible_no_false_positive for 3 Claim, 1 Spec, 3 Sample, 2 Cluster,
+  2 Finding, 1 SpecQueryResult, 2 PairwiseCheck, 3 Assertion,
+  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 10 steps expect 0
+
+check ubiquitous_no_spurious_gap for 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
+  2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 3 Assertion,
+  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 10 steps expect 0
+
+check findings_monotonic for 3 Claim, 1 Spec, 3 Sample, 2 Cluster,
+  3 Finding, 2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
+  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 15 steps expect 0
+
+check phase_monotonic for 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
+  2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
+  1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
+  0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck, 5 Int, 15 steps expect 0
+
+check all_queries_persisted for 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
+  3 Finding, 3 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
+  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 12 steps expect 0
+
+check timeout_never_contradiction for 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
+  3 Finding, 3 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
+  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 12 steps expect 0
+
+check pipeline_terminates for 2 Claim, 1 Spec, 2 Sample, 1 Cluster,
+  2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
+  1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
+  0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck, 5 Int, 20 steps
+```

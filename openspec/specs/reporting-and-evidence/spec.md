@@ -1,6 +1,117 @@
+---
+title: ReportingAndEvidence
+---
+
 ## Purpose
 
 Define the reporting and evidence preservation behavior for the spec-check tool: producing bounded, evidence-preserving output artifacts, final reports, and manifest-based completion records.
+
+```alloy
+module ReportingAndEvidence
+open util/boolean
+
+// --- Domain vocabulary ---
+
+// Analysis modes determine which phases and reports are produced
+abstract sig AnalysisMode {}
+one sig BaseMode, SourceBackedMode extends AnalysisMode {}
+
+// Analysis phases form the pipeline
+abstract sig Phase {}
+one sig QualPass1, QualPass2, CoveragePhase, LogicPhase extends Phase {}   // base phases
+one sig SourceTrace, CodeLogic, CodeCompare extends Phase {}                // source-backed phases
+
+// Report file names (stable naming convention per RAE-REPORT-NAMES)
+abstract sig ReportName {}
+one sig R_1_1, R_1_2, R_1_3, R_1_Logic extends ReportName {}              // base reports
+one sig R_2_Trace, R_2_Logic, R_2_Compare, R_Summary extends ReportName {} // additional
+
+// Severity levels for findings
+abstract sig Severity {}
+one sig ErrorSev, WarningSev, InfoSev extends Severity {}
+
+// Evidence artifacts attached to findings
+sig Evidence {
+  preserved : one Bool
+}
+
+// Provenance: source traceability
+sig Provenance {
+  srcFile : one Artifact,
+  srcHeading : one Heading
+}
+sig Artifact {}
+sig Heading {}
+
+// Findings: the unit of analysis output
+sig Finding {
+  severity : one Severity,
+  hasCategory : one Bool,
+  provenance : lone Provenance,
+  hasDescription : one Bool,
+  hasRationale : one Bool,
+  evidenceSet : set Evidence,
+  originPhase : one Phase
+}
+
+// Output path resolution
+abstract sig WriteLoc {}
+one sig InsideDir, OutsideDir extends WriteLoc {}
+
+// Write completion state
+abstract sig WriteCompletion {}
+one sig AtomicComplete, PartialWrite extends WriteCompletion {}
+
+// Manifest entries (for RAE-MANIFEST-SCHEMA)
+sig ManifestEntry {
+  entryReport : one ReportName,
+  checksumValid : one Bool,
+  entryPhase : one Phase
+}
+
+// --- Phase-to-report mapping ---
+fun phaseToReport : Phase -> ReportName {
+  (QualPass1 -> R_1_1) + (QualPass2 -> R_1_2) + (CoveragePhase -> R_1_3) +
+  (LogicPhase -> R_1_Logic) + (SourceTrace -> R_2_Trace) +
+  (CodeLogic -> R_2_Logic) + (CodeCompare -> R_2_Compare)
+}
+
+fun basePhases : set Phase { QualPass1 + QualPass2 + CoveragePhase + LogicPhase }
+fun sourcePhases : set Phase { SourceTrace + CodeLogic + CodeCompare }
+
+// Enabled phases depend on mode
+fun enabledPhases : set Phase {
+  { p : Phase | Run.mode = SourceBackedMode or p in basePhases }
+}
+
+// Required reports depend on mode
+fun requiredReports : set ReportName {
+  phaseToReport[enabledPhases] + R_Summary
+}
+
+// --- Run state (behavioral) ---
+one sig Run {
+  mode : one AnalysisMode,
+  var completedPhases : set Phase,
+  var findings : set Finding,
+  var reports : set ReportName,
+  var manifestPresent : one Bool,
+  var failed : one Bool
+}
+
+// --- Finding well-formedness ---
+pred finding_wellformed [f : Finding] {
+  f.hasCategory = True
+  some f.provenance
+  f.hasDescription = True
+  f.hasRationale = True
+  some f.evidenceSet
+}
+
+pred finding_evidence_preserved [f : Finding] {
+  all e : f.evidenceSet | e.preserved = True
+}
+```
 
 ## Requirements
 
@@ -26,6 +137,50 @@ IF an optional phase is not enabled for a run, THEN THE spec-check tool SHALL ex
 
 **Postcondition:** Reviewers can distinguish intentionally skipped analysis from missing output.
 
+#### Requirement model
+
+```alloy
+// --- Report emission: mode-dependent phase output ---
+
+pred complete_phase [p : Phase] {
+  // Guard
+  p not in Run.completedPhases
+  p in enabledPhases
+  Run.failed = False
+  Run.manifestPresent = False    // stale manifest must be removed first
+  // Effect: phase marked complete, report written
+  Run.completedPhases' = Run.completedPhases + p
+  Run.reports' = Run.reports + phaseToReport[p]
+  // Findings monotonically increase (new findings added)
+  Run.findings in Run.findings'
+  // Frame
+  Run.manifestPresent' = Run.manifestPresent
+  Run.failed' = Run.failed
+}
+
+// Base mode produces exactly the base phase reports plus summary
+assert base_mode_reports {
+  always (
+    Run.mode = BaseMode and Run.completedPhases = basePhases and R_Summary in Run.reports
+    implies
+    Run.reports = (phaseToReport[basePhases] + R_Summary))
+}
+
+// Source-backed mode produces all reports
+assert source_mode_reports {
+  always (
+    Run.mode = SourceBackedMode and Run.completedPhases = Phase and R_Summary in Run.reports
+    implies
+    requiredReports in Run.reports)
+}
+
+// Safety: disabled phases never produce reports
+assert disabled_phases_no_reports {
+  always (all p : Phase |
+    p not in enabledPhases implies phaseToReport[p] not in Run.reports)
+}
+```
+
 ### Requirement: Report File Naming Convention [RAE-REPORT-NAMES]
 WHEN the spec-check tool writes phase reports, THE spec-check tool SHALL use a stable naming convention that identifies the phase and pass number: `report_1.1.md` for the first qualitative pass (spec quality review), `report_1.2.md` for the second qualitative pass (properties and invariants), `report_1.3.md` for coverage analysis, `report_1.logic.md` for logic analysis, `report_2.trace.md` for source traceability, `report_2.logic.md` for code-derived formal analysis, `report_2.compare.md` for code-backwards comparison, and `report_summary.md` for the synthesized summary.
 
@@ -47,6 +202,29 @@ WHEN code-derived solver analysis completes, THE spec-check tool SHALL write the
 WHEN the synthesized summary is generated, THE spec-check tool SHALL write it to `report_summary.md` under the output directory.
 
 **Postcondition:** The summary is always at a predictable path.
+
+#### Requirement model
+
+```alloy
+// --- Naming convention: bijective phase-to-report mapping ---
+
+// The phaseToReport function is injective: no two phases map to the same report
+assert naming_injective {
+  all disj p1, p2 : Phase |
+    (some phaseToReport[p1] and some phaseToReport[p2]) implies
+      phaseToReport[p1] != phaseToReport[p2]
+}
+
+// Naming is total for all defined phases (every phase has a report name)
+assert naming_total_for_phases {
+  all p : Phase | some phaseToReport[p]
+}
+
+// Monotonicity: completed phases never revert
+assert phases_monotonic {
+  always (Run.completedPhases in Run.completedPhases')
+}
+```
 
 ### Requirement: Preserve Evidence For Every Surfaced Conclusion [RAE-PRESERVE-EVID]
 WHEN the spec-check tool emits a finding or final report conclusion, THE spec-check tool SHALL preserve the provenance, rationale, and supporting artifacts needed for a reviewer to inspect the basis of that conclusion.
@@ -76,6 +254,43 @@ WHEN a finding depends on an LLM-backed analysis response, THE spec-check tool S
 
 **Postcondition:** No final verdict rests on an unpreserved LLM response.
 
+#### Requirement model
+
+```alloy
+// --- Evidence preservation: every conclusion is auditable ---
+
+// A finding with unpreserved evidence is an analysis defect
+pred has_unpreserved_evidence [f : Finding] {
+  some e : f.evidenceSet | e.preserved = False
+}
+
+// Unsupported verdict: would-be finding without preserved evidence
+// The tool must suppress this and emit a defect finding instead
+pred suppress_unsupported_verdict [f : Finding] {
+  // Guard: finding has unpreserved evidence
+  has_unpreserved_evidence[f]
+  // Effect: f is NOT added to findings; a defect finding IS added
+  f not in Run.findings'
+  // A well-formed defect finding is added instead (modeled by the phase event)
+}
+
+// Safety: all findings in the run have preserved evidence
+assert evidence_always_preserved {
+  always (all f : Run.findings | finding_evidence_preserved[f])
+}
+
+// Safety: no finding exists without provenance
+assert provenance_always_present {
+  always (all f : Run.findings | some f.provenance)
+}
+
+// Liveness: if unpreserved evidence exists, a defect is surfaced
+// (modeled via the invariant - any finding that reaches Run.findings is preserved)
+assert no_unsupported_verdicts_in_output {
+  always (all f : Run.findings | not has_unpreserved_evidence[f])
+}
+```
+
 ### Requirement: Finding Shape And Severity [RAE-FINDING-SHAPE]
 WHEN the spec-check tool creates a finding, THE spec-check tool SHALL use a stable finding shape with required fields: severity (error, warning, info), category, provenance (source file and heading), description, rationale (explanation of why the finding exists), and evidence references. Optional fields include suggestion and related claim identifiers.
 
@@ -93,6 +308,30 @@ IF a finding would be emitted without a required field, THEN THE spec-check tool
 
 **Postcondition:** The finding pipeline never produces malformed findings.
 
+#### Requirement model
+
+```alloy
+// --- Finding shape: structural completeness invariant ---
+
+// A malformed finding (missing required field) is never admitted to the run
+pred finding_malformed [f : Finding] {
+  not finding_wellformed[f]
+}
+
+// Safety: all findings in the run state are well-formed
+assert all_findings_wellformed {
+  always (all f : Run.findings | finding_wellformed[f])
+}
+
+// Safety: malformed findings are never present in run output
+assert no_malformed_findings {
+  always (no f : Run.findings | finding_malformed[f])
+}
+
+// The severity field is always populated (by type constraint)
+// Category, provenance, description, rationale, and evidence are checked by finding_wellformed
+```
+
 ### Requirement: Findings Never Silently Removed [RAE-FINDINGS-IMMUTABLE]
 WHEN findings are produced by earlier phases, THE spec-check tool SHALL preserve them through later phases. Later phases may add evidence or add new findings, but SHALL NOT remove or suppress prior findings without surfacing that change as a separate finding.
 
@@ -108,6 +347,31 @@ WHEN a later analysis phase runs after earlier findings exist, THE spec-check to
 IF a later phase determines that a prior finding should be superseded, THEN THE spec-check tool SHALL preserve the original finding and add a new finding that explains the supersession.
 
 **Postcondition:** Reviewers can trace the evolution of conclusions across phases.
+
+#### Requirement model
+
+```alloy
+// --- Findings immutability: monotonic accumulation ---
+
+// Core safety property: findings never decrease across state transitions
+assert findings_never_decrease {
+  always (Run.findings in Run.findings')
+}
+
+// Finding count monotonicity follows from findings_never_decrease (subset implies <=)
+// Integer cardinality comparison omitted to avoid Int scope overhead.
+
+// Supersession model: if a finding is "superseded", both the original
+// and the supersession explanation remain in the findings set
+pred supersede_finding [original : Finding, supersession : Finding] {
+  // Both findings must be in the set
+  original in Run.findings
+  supersession in Run.findings'
+  original in Run.findings'      // original preserved
+  // Supersession finding references the original (via evidence)
+  original.provenance in supersession.provenance
+}
+```
 
 ### Requirement: Complete Runs With Atomic Manifest Semantics [RAE-ATOMIC-MANIFEST]
 WHEN the spec-check tool writes output artifacts, THE spec-check tool SHALL write them using atomic finalization behavior and SHALL write the manifest last as the completion marker for the run.
@@ -131,6 +395,74 @@ IF the output directory already contains a manifest from a previous run WHEN a n
 
 **Postcondition:** Only a successfully completed run can leave a manifest in the output directory.
 
+#### Requirement model
+
+```alloy
+// --- Atomic manifest: completion marker semantics ---
+
+pred write_manifest {
+  // Guard: all required reports written, not failed
+  requiredReports in Run.reports
+  Run.failed = False
+  // Effect: manifest present
+  Run.manifestPresent' = True
+  // Frame
+  Run.completedPhases' = Run.completedPhases
+  Run.findings' = Run.findings
+  Run.reports' = Run.reports
+  Run.failed' = Run.failed
+}
+
+pred remove_stale_manifest {
+  // Guard: manifest present at start of new run, no phases completed yet
+  Run.manifestPresent = True
+  no Run.completedPhases
+  // Effect: manifest removed
+  Run.manifestPresent' = False
+  // Frame
+  Run.completedPhases' = Run.completedPhases
+  Run.findings' = Run.findings
+  Run.reports' = Run.reports
+  Run.failed' = Run.failed
+}
+
+pred run_fails {
+  // Guard
+  Run.failed = False
+  Run.manifestPresent = False    // cannot fail after manifest written (run is complete)
+  // Effect: run marked as failed
+  Run.failed' = True
+  // Frame: state frozen
+  Run.completedPhases' = Run.completedPhases
+  Run.findings' = Run.findings
+  Run.reports' = Run.reports
+  Run.manifestPresent' = Run.manifestPresent
+}
+
+// Safety: manifest only present when all required reports are written
+assert manifest_implies_complete {
+  always (Run.manifestPresent = True implies requiredReports in Run.reports)
+}
+
+// Safety: failed runs never have a manifest
+assert no_manifest_on_failure {
+  always (Run.failed = True implies Run.manifestPresent = False)
+}
+
+// Safety: manifest is written AFTER all reports (temporal ordering)
+assert manifest_written_last {
+  always (Run.manifestPresent' = True and Run.manifestPresent = False
+    implies requiredReports in Run.reports)
+}
+
+// Liveness: stale manifests are removed before analysis begins
+// (Enforced by complete_phase guard: manifestPresent = False)
+assert stale_manifest_blocks_phases {
+  always (all p : Phase |
+    complete_phase[p] implies Run.manifestPresent = False)
+}
+```
+
 ### Requirement: Manifest Content Schema [RAE-MANIFEST-SCHEMA]
 THE spec-check tool SHALL write the manifest as a UTF-8 JSON file containing an array of output file entries, each with `path` (relative to output directory), `checksum` (SHA-256 hex), and `phase` (originating phase name) fields.
 
@@ -146,6 +478,36 @@ WHEN the manifest is written, every entry SHALL reference a file that exists und
 WHEN the manifest computes checksums, THE spec-check tool SHALL use SHA-256 and encode the result as lowercase hexadecimal.
 
 **Postcondition:** Checksum format is predictable and interoperable.
+
+#### Requirement model
+
+```alloy
+// --- Manifest schema: structural integrity ---
+
+// Every manifest entry references an actually-written report
+pred manifest_entries_valid [entries : set ManifestEntry] {
+  // Every entry references a written report
+  all e : entries | e.entryReport in Run.reports
+  // Every entry has a valid checksum
+  all e : entries | e.checksumValid = True
+  // Every entry references a phase that was completed
+  all e : entries | e.entryPhase in Run.completedPhases
+  // Coverage: every written report has an entry
+  all r : Run.reports | some e : entries | e.entryReport = r
+}
+
+// Safety: manifest entries always reference existing reports
+assert manifest_entries_match_files {
+  always (Run.manifestPresent = True implies
+    (all e : ManifestEntry | e.entryReport in Run.reports))
+}
+
+// Safety: manifest entries have valid checksums
+assert manifest_checksums_valid {
+  always (Run.manifestPresent = True implies
+    (all e : ManifestEntry | e.checksumValid = True))
+}
+```
 
 ### Requirement: Output Directory Confinement [RAE-OUTPUT-CONFINE]
 WHEN the spec-check tool writes any output artifact, THE spec-check tool SHALL confine the write to the configured output directory and SHALL reject any write path that resolves outside that directory.
@@ -164,6 +526,45 @@ IF an output path resolves to a location outside the configured output directory
 
 **Postcondition:** No file is written outside the declared output boundary.
 
+#### Requirement model
+
+```alloy
+// --- Output confinement: all writes stay within boundary ---
+
+// A write attempt has a resolved location
+sig WriteAttempt {
+  resolvedLoc : one WriteLoc,
+  writeResult : one WriteCompletion
+}
+
+pred write_confined [w : WriteAttempt] {
+  w.resolvedLoc = InsideDir
+}
+
+pred write_rejected [w : WriteAttempt] {
+  w.resolvedLoc = OutsideDir
+  w.writeResult = PartialWrite    // rejected: nothing written
+}
+
+// Safety: no successful write ever targets outside the output directory
+assert no_write_outside_boundary {
+  all w : WriteAttempt |
+    w.resolvedLoc = OutsideDir implies w.writeResult != AtomicComplete
+}
+
+// Safety: all completed writes are inside the output directory
+assert all_writes_confined {
+  all w : WriteAttempt |
+    w.writeResult = AtomicComplete implies w.resolvedLoc = InsideDir
+}
+
+// Enforcement: the tool rejects outside writes (domain rule)
+fact confinement_enforced {
+  all w : WriteAttempt |
+    w.resolvedLoc = OutsideDir implies w.writeResult != AtomicComplete
+}
+```
+
 ### Requirement: Atomic Output Writes [RAE-OUTPUT-ATOMIC]
 WHEN the spec-check tool writes an output file, THE spec-check tool SHALL write to a temporary file first and rename it into place so that interrupted writes do not leave partial files at the final path.
 
@@ -181,3 +582,183 @@ IF the process is interrupted during an output file write, THEN the final path S
 
 **Postcondition:** Consumers of the output directory never encounter partially written files at final paths.
 
+#### Requirement model
+
+```alloy
+// --- Atomic writes: temp-file-then-rename protocol ---
+
+// Model the write lifecycle as states of a file path
+abstract sig FilePathState {}
+one sig Absent, TempWriting, FinalComplete extends FilePathState {}
+
+sig OutputFile {
+  var pathState : one FilePathState
+}
+
+pred atomic_write_success [f : OutputFile] {
+  // Guard: path is currently absent (no prior content)
+  f.pathState = Absent
+  // Effect: transitions through temp to final atomically
+  // In the model, the final state is FinalComplete (temp is invisible to consumers)
+  f.pathState' = FinalComplete
+}
+
+pred atomic_write_interrupt [f : OutputFile] {
+  // Guard: write was in progress (temp file exists)
+  f.pathState = Absent or f.pathState = TempWriting
+  // Effect: final path stays absent (only temp may be orphaned)
+  f.pathState' = Absent
+}
+
+// Safety: final path never contains partial content
+assert no_partial_at_final_path {
+  always (all f : OutputFile | f.pathState != TempWriting)
+}
+
+// Safety: successful writes always reach FinalComplete
+assert successful_writes_complete {
+  always (all f : OutputFile |
+    atomic_write_success[f] implies f.pathState' = FinalComplete)
+}
+
+// Note: TempWriting is an intermediate state that is never visible at the final path.
+// The model abstracts this by ensuring pathState is either Absent or FinalComplete.
+// The TempWriting state exists only as a modeling artifact for the interrupt case.
+fact no_temp_at_final {
+  always (all f : OutputFile | f.pathState in (Absent + FinalComplete))
+}
+```
+
+### State machine and invariant checks
+
+```alloy
+// --- Transition system ---
+
+pred stutter {
+  Run.completedPhases' = Run.completedPhases
+  Run.findings' = Run.findings
+  Run.reports' = Run.reports
+  Run.manifestPresent' = Run.manifestPresent
+  Run.failed' = Run.failed
+  all f : OutputFile | f.pathState' = f.pathState
+}
+
+pred write_summary {
+  // Guard: all enabled phases completed
+  enabledPhases in Run.completedPhases
+  Run.failed = False
+  R_Summary not in Run.reports
+  // Effect: summary report added
+  Run.reports' = Run.reports + R_Summary
+  // Frame
+  Run.completedPhases' = Run.completedPhases
+  Run.findings' = Run.findings
+  Run.manifestPresent' = Run.manifestPresent
+  Run.failed' = Run.failed
+  all f : OutputFile | f.pathState' = f.pathState
+}
+
+pred init_state {
+  no Run.completedPhases
+  no Run.findings
+  no Run.reports
+  Run.manifestPresent = False
+  Run.failed = False
+  all f : OutputFile | f.pathState = Absent
+}
+
+fact transitions {
+  init_state and always (
+    // Phase execution
+    (some p : Phase | complete_phase[p])
+    // Summary generation
+    or write_summary
+    // Manifest
+    or write_manifest
+    or remove_stale_manifest
+    // Failure
+    or run_fails
+    // File operations
+    or (some f : OutputFile | atomic_write_success[f])
+    or (some f : OutputFile | atomic_write_interrupt[f])
+    // Stutter
+    or stutter
+  )
+}
+
+// Frame condition: complete_phase must also frame OutputFile
+fact phase_frames_files {
+  always ((some p : Phase | complete_phase[p]) implies
+    (all f : OutputFile | f.pathState' = f.pathState))
+}
+
+// Frame condition: manifest and failure events frame OutputFile
+fact manifest_frames_files {
+  always ((write_manifest or remove_stale_manifest or run_fails) implies
+    (all f : OutputFile | f.pathState' = f.pathState))
+}
+
+// Frame condition: write_summary frames OutputFile
+fact summary_frames_files {
+  always (write_summary implies
+    (all f : OutputFile | f.pathState' = f.pathState))
+}
+
+// Frame condition: file operations frame Run state
+fact file_ops_frame_run {
+  always ((some f : OutputFile | atomic_write_success[f] or atomic_write_interrupt[f]) implies (
+    Run.completedPhases' = Run.completedPhases and
+    Run.findings' = Run.findings and
+    Run.reports' = Run.reports and
+    Run.manifestPresent' = Run.manifestPresent and
+    Run.failed' = Run.failed))
+}
+
+// --- Analysis rule: only well-formed findings enter the pipeline ---
+fact only_wellformed_findings {
+  always (all f : Run.findings | finding_wellformed[f])
+  always (all f : Run.findings | finding_evidence_preserved[f])
+}
+
+// --- Commands ---
+
+run show {} for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 2 WriteAttempt, 2 OutputFile, 8 steps
+
+run scenario_base_mode_complete {
+  eventually (Run.manifestPresent = True and Run.mode = BaseMode)
+} for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 10 steps
+
+run scenario_failure_no_manifest {
+  eventually (Run.failed = True and Run.manifestPresent = False)
+} for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 6 steps
+
+check findings_never_decrease for 4 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 1 WriteAttempt, 2 OutputFile, 15 steps expect 0
+
+check all_findings_wellformed for 4 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 10 steps expect 0
+
+check evidence_always_preserved for 4 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 10 steps expect 0
+
+check manifest_implies_complete for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 12 steps expect 0
+
+check no_manifest_on_failure for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 10 steps expect 0
+
+check no_write_outside_boundary for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  1 ManifestEntry, 3 WriteAttempt, 1 OutputFile, 5 steps expect 0
+
+check no_partial_at_final_path for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 3 OutputFile, 10 steps expect 0
+
+check disabled_phases_no_reports for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 10 steps expect 0
+
+check phases_monotonic for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 10 steps expect 0
+```

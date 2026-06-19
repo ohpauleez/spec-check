@@ -144,10 +144,35 @@ WHEN the tool derives a claim from a requirement, scenario, design section, or t
 
 **Postcondition:** Every derived claim can be traced back to its originating artifact section.
 
+##### Evidence
+- Implementation: [claim-graph.ts:152 buildClaimGraph()](/src/domain/claim-graph.ts#L152), [claim-graph.ts:208 claimFromRequirement()](/src/domain/claim-graph.ts#L208), [claim-graph.ts:229 claimFromScenario()](/src/domain/claim-graph.ts#L229)
+- Test: [claim-graph.test.ts:7 assigns obligation levels and keeps provenance](/test/contract/claim-graph.test.ts#L7), [safety-liveness.invariant.test.ts:45 no claim enters graph without provenance](/test/invariant/safety-liveness.invariant.test.ts#L45)
+- Test (property): [claim-graph.property.test.ts:9 every claim has provenance with a file](/test/property/claim-graph.property.test.ts#L9)
+- Example:
+```typescript
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const req = { title: "R1", identifier: "R1", body: "THE system SHALL respond", earsType: "event-driven", references: [], provenance: { file: "spec.md", line: 1 } };
+const spec = { file: "spec.md", requirements: [req], scenarios: [], deltaSections: ["ADDED"], structuralFindings: [], unparsed: [] };
+const { graph } = buildClaimGraph({ specs: [spec] }); //*
+graph.claims[0].provenance.file; //=> spec.md
+```
+
 #### Scenario: Reject Provenance-Free Finding Input [CGC-CLAIM-FAIL]
 IF a downstream analysis step would consume a claim without sufficient provenance, THEN THE spec-check tool SHALL treat that condition as an analysis defect and SHALL surface it as a finding instead of issuing an untraceable conclusion.
 
 **Postcondition:** Downstream analysis does not rely on orphaned claims.
+
+##### Evidence
+- Implementation: [claim-graph.ts:396 detectOrphanClaims()](/src/domain/claim-graph.ts#L396)
+- Test: [claim-graph.test.ts:48 surfaces orphaned claim without provenance](/test/contract/claim-graph.test.ts#L48)
+- Example:
+```typescript
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const req = { title: "R1", identifier: "R1", body: "SHALL do X", earsType: "event-driven", references: [], provenance: { file: "", line: 1 } };
+const spec = { file: "", requirements: [req], scenarios: [], deltaSections: ["ADDED"], structuralFindings: [], unparsed: [] };
+const result = buildClaimGraph({ specs: [spec] }); //*
+result.findings[0].category; //=> claim_graph.orphaned_claim
+```
 
 #### Requirement model
 
@@ -231,20 +256,70 @@ WHEN a requirement uses the keyword SHALL without qualification, THE spec-check 
 
 **Postcondition:** Mandatory claims produce higher-severity findings in downstream analysis when violated.
 
+##### Evidence
+- Implementation: [claim-graph.ts:376 deriveObligation()](/src/domain/claim-graph.ts#L376)
+- Test: [claim-graph.test.ts:7 assigns obligation levels and keeps provenance](/test/contract/claim-graph.test.ts#L7)
+- Test (property): [claim-graph.property.test.ts:39 obligation assignment is consistent across EARS patterns](/test/property/claim-graph.property.test.ts#L39)
+- Example:
+```typescript
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const req = { title: "R1", identifier: "R1", body: "THE system SHALL process it", earsType: "event-driven", references: [], provenance: { file: "s.md", line: 1 } };
+const spec = { file: "s.md", requirements: [req], scenarios: [], deltaSections: ["ADDED"], structuralFindings: [], unparsed: [] };
+const { graph } = buildClaimGraph({ specs: [spec] }); //*
+graph.claims[0].obligation; //=> mandatory
+```
+
 #### Scenario: SHOULD Requirement Classified As Advisory [CGC-OBLIG-ADVISORY]
 WHEN a requirement uses the keyword SHOULD, THE spec-check tool SHALL assign the advisory obligation level to that claim.
 
 **Postcondition:** Advisory claims produce lower-severity findings than mandatory claims when violated.
+
+##### Evidence
+- Implementation: [claim-graph.ts:376 deriveObligation()](/src/domain/claim-graph.ts#L376)
+- Test: [claim-graph.test.ts:7 assigns obligation levels and keeps provenance](/test/contract/claim-graph.test.ts#L7)
+- Test (property): [claim-graph.property.test.ts:39 obligation assignment is consistent across EARS patterns](/test/property/claim-graph.property.test.ts#L39)
+- Example:
+```typescript
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const req = { title: "R1", identifier: "R1", body: "THE system SHOULD log events", earsType: "event-driven", references: [], provenance: { file: "s.md", line: 1 } };
+const spec = { file: "s.md", requirements: [req], scenarios: [], deltaSections: ["ADDED"], structuralFindings: [], unparsed: [] };
+const { graph } = buildClaimGraph({ specs: [spec] }); //*
+graph.claims[0].obligation; //=> advisory
+```
 
 #### Scenario: Informational Content Classified [CGC-OBLIG-INFO]
 WHEN a claim is derived from a design property, assumption, or informational section that does not use obligation keywords, THE spec-check tool SHALL assign the informational obligation level.
 
 **Postcondition:** Informational claims contribute to coverage analysis without triggering mandatory-severity findings.
 
+##### Evidence
+- Implementation: [claim-graph.ts:376 deriveObligation()](/src/domain/claim-graph.ts#L376), [claim-graph.ts:251 extractProposalClaims()](/src/domain/claim-graph.ts#L251)
+- Test: [claim-graph.test.ts:102 classifies informational content at informational obligation](/test/contract/claim-graph.test.ts#L102), [safety-liveness.invariant.test.ts:130 claims with non-standard obligation produce only informational findings](/test/invariant/safety-liveness.invariant.test.ts#L130)
+- Test (property): [claim-graph.property.test.ts:39 obligation assignment is consistent across EARS patterns](/test/property/claim-graph.property.test.ts#L39)
+- Example:
+```typescript
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const proposal = { file: "proposal.md", sections: new Map([["Scope", { heading: "Scope", lines: ["analysis covers formal methods"], startLine: 1, endLine: 2 }]]), unparsed: [] };
+const { graph } = buildClaimGraph({ proposal, specs: [] }); //*
+graph.claims[0].obligation; //=> informational
+```
+
 #### Scenario: MAY Requirement Classified As Informational [CGC-OBLIG-OPTIONAL]
 WHEN a requirement uses the keyword MAY, THE spec-check tool SHALL assign the informational obligation level to that claim.
 
 **Postcondition:** Optional behavior does not trigger mandatory- or advisory-severity findings when absent or deviated from.
+
+##### Evidence
+- Implementation: [claim-graph.ts:376 deriveObligation()](/src/domain/claim-graph.ts#L376)
+- Test: [claim-graph.test.ts:74 classifies MAY requirement as informational obligation](/test/contract/claim-graph.test.ts#L74)
+- Example:
+```typescript
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const req = { title: "R1", identifier: "R1", body: "THE system MAY include color formatting", earsType: "event-driven", references: [], provenance: { file: "s.md", line: 1 } };
+const spec = { file: "s.md", requirements: [req], scenarios: [], deltaSections: ["ADDED"], structuralFindings: [], unparsed: [] };
+const { graph } = buildClaimGraph({ specs: [spec] }); //*
+graph.claims[0].obligation; //=> informational
+```
 
 #### Requirement model
 
@@ -312,15 +387,60 @@ WHEN a proposal or design claim has no corresponding capability requirement or s
 
 **Postcondition:** Reviewers can see which upstream intent remains unspecified at the capability level.
 
+##### Evidence
+- Implementation: [coverage.ts:212 detectCoverageGaps()](/src/domain/spec-forward/coverage.ts#L212)
+- Test: [coverage.test.ts:44 detects uncovered upstream claims](/test/contract/coverage.test.ts#L44)
+- Test (integration): [pipeline.integration.test.ts:70 coverage gaps produce expected findings](/test/integration/pipeline.integration.test.ts#L70)
+- Example:
+```typescript
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const { analyzeCoverage } = await import("./src/domain/spec-forward/coverage.ts");
+const proposal = { file: "proposal.md", sections: new Map([["Scope", { heading: "Scope", lines: ["handles requests"], startLine: 1, endLine: 2 }]]), unparsed: [] };
+const graph = buildClaimGraph({ proposal, specs: [] }); //*
+const findings = analyzeCoverage({ claimGraph: graph.graph, proposal, specs: [] }); //*
+findings.some(f => f.category === "coverage.uncovered_upstream_claim"); //=> true
+```
+
 #### Scenario: Report Conflicting Requirement Meaning [CGC-COVER-CONFLICT]
 IF a capability requirement contradicts a proposal or design claim, THEN THE spec-check tool SHALL emit a contradiction or semantic-mismatch finding that cites both conflicting sources.
 
 **Postcondition:** The conflict is visible with both sides of the disagreement preserved.
 
+##### Evidence
+- Implementation: [coverage.ts:253 detectContradictionsAndDrift()](/src/domain/spec-forward/coverage.ts#L253)
+- Test: [coverage.test.ts:52 detects contradictions between upstream and downstream](/test/contract/coverage.test.ts#L52)
+- Test (integration): [pipeline.integration.test.ts:96 contradictions produce expected findings](/test/integration/pipeline.integration.test.ts#L96)
+- Example:
+```typescript
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const { analyzeCoverage } = await import("./src/domain/spec-forward/coverage.ts");
+const proposal = { file: "proposal.md", sections: new Map([["Scope", { heading: "Scope", lines: ["the system should never timeout"], startLine: 1, endLine: 2 }]]), unparsed: [] };
+const req = { title: "R1", identifier: "R1", body: "WHEN analysis runs, THE system SHALL timeout after 30 seconds.", earsType: "event-driven", references: [], provenance: { file: "specs/cap/spec.md", line: 1 } };
+const spec = { file: "specs/cap/spec.md", requirements: [req], scenarios: [], deltaSections: ["ADDED"], structuralFindings: [], unparsed: [] };
+const graph = buildClaimGraph({ proposal, specs: [spec] }); //*
+const findings = analyzeCoverage({ claimGraph: graph.graph, proposal, specs: [spec] }); //*
+findings.some(f => f.category === "coverage.contradiction"); //=> true
+```
+
 #### Scenario: Report Design-To-Spec Semantic Drift [CGC-COVER-DRIFT]
 IF a capability requirement partially implements a design claim but omits documented constraints, failure modes, or boundary conditions, THEN THE spec-check tool SHALL emit a semantic-drift finding that identifies the omission.
 
 **Postcondition:** Partial implementations are surfaced rather than mistaken for complete coverage.
+
+##### Evidence
+- Implementation: [coverage.ts:253 detectContradictionsAndDrift()](/src/domain/spec-forward/coverage.ts#L253)
+- Test: [coverage.test.ts:89 detects semantic drift for failure modes](/test/contract/coverage.test.ts#L89)
+- Example:
+```typescript
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const { analyzeCoverage } = await import("./src/domain/spec-forward/coverage.ts");
+const proposal = { file: "proposal.md", sections: new Map([["Failure Modes", { heading: "Failure Modes", lines: ["analysis timeout causes abort"], startLine: 1, endLine: 2 }]]), unparsed: [] };
+const req = { title: "R1", identifier: "R1", body: "WHEN analysis completes, THE system SHALL report.", earsType: "event-driven", references: [], provenance: { file: "specs/cap/spec.md", line: 1 } };
+const spec = { file: "specs/cap/spec.md", requirements: [req], scenarios: [], deltaSections: ["ADDED"], structuralFindings: [], unparsed: [] };
+const graph = buildClaimGraph({ proposal, specs: [spec] }); //*
+const findings = analyzeCoverage({ claimGraph: graph.graph, proposal, specs: [spec] }); //*
+findings.some(f => f.category === "coverage.semantic_drift"); //=> true
+```
 
 #### Requirement model
 
@@ -475,10 +595,40 @@ WHEN the proposal declares a capability and no corresponding active spec file ex
 
 **Postcondition:** Proposal-to-spec contract gaps are explicitly surfaced.
 
+##### Evidence
+- Implementation: [coverage.ts:100 detectMissingSpecFiles()](/src/domain/spec-forward/coverage.ts#L100)
+- Test: [coverage.test.ts:33 detects missing spec files for declared capabilities](/test/contract/coverage.test.ts#L33)
+- Test (integration): [pipeline.integration.test.ts:70 coverage gaps produce expected findings](/test/integration/pipeline.integration.test.ts#L70)
+- Example:
+```typescript
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const { analyzeCoverage } = await import("./src/domain/spec-forward/coverage.ts");
+const proposal = { file: "proposal.md", sections: new Map([["Capabilities", { heading: "Capabilities", lines: ["- existing-cap", "- missing-cap"], startLine: 1, endLine: 3 }]]), unparsed: [] };
+const req = { title: "R1", identifier: "R1", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", references: [], provenance: { file: "specs/existing-cap/spec.md", line: 1 } };
+const spec = { file: "specs/existing-cap/spec.md", requirements: [req], scenarios: [], deltaSections: ["ADDED"], structuralFindings: [], unparsed: [] };
+const graph = buildClaimGraph({ proposal, specs: [spec] }); //*
+const findings = analyzeCoverage({ claimGraph: graph.graph, proposal, specs: [spec] }); //*
+findings.some(f => f.category === "coverage.missing_spec_file"); //=> true
+```
+
 #### Scenario: Report Unsupported Reference [CGC-REF-BADLINK]
 IF a requirement references an upstream section whose content does not support the claimed behavior, THEN THE spec-check tool SHALL emit a semantic-mismatch finding that names the requirement and the unsupported reference target. References to archived change artifacts (`openspec/changes/archive/`) SHALL be accepted as valid provenance links regardless of whether their content semantically supports the citing requirement, and SHALL NOT be flagged as unsupported.
 
 **Postcondition:** References remain meaningful evidence links rather than decorative citations. Archived change references are preserved as historical provenance without triggering semantic-support validation.
+
+##### Evidence
+- Implementation: [coverage.ts:156 detectUnsupportedReferences()](/src/domain/spec-forward/coverage.ts#L156), [coverage.ts:523 isArchivedChangeReference()](/src/domain/spec-forward/coverage.ts#L523)
+- Test: [coverage.test.ts:69 detects unsupported requirement references](/test/contract/coverage.test.ts#L69), [coverage.test.ts:79 accepts archived change references as valid provenance](/test/contract/coverage.test.ts#L79)
+- Example:
+```typescript
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const { analyzeCoverage } = await import("./src/domain/spec-forward/coverage.ts");
+const req = { title: "R1", identifier: "R1", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", references: ["nonexistent.md#Section"], provenance: { file: "specs/cap/spec.md", line: 1 } };
+const spec = { file: "specs/cap/spec.md", requirements: [req], scenarios: [], deltaSections: ["ADDED"], structuralFindings: [], unparsed: [] };
+const graph = buildClaimGraph({ specs: [spec] }); //*
+const findings = analyzeCoverage({ claimGraph: graph.graph, specs: [spec] }); //*
+findings.some(f => f.category === "coverage.unsupported_reference"); //=> true
+```
 
 #### Requirement model
 
@@ -577,10 +727,38 @@ IF a completed task change summary describes behavior that contradicts a capabil
 
 **Postcondition:** Implementation deviations documented in task summaries are surfaced during specification analysis.
 
+##### Evidence
+- Implementation: [coverage.ts:315 detectTaskEvidenceInconsistency()](/src/domain/spec-forward/coverage.ts#L315), [tasks-analysis.ts:29 analyzeTaskSourceConsistency()](/src/domain/tasks-analysis.ts#L29)
+- Test: [tasks-analysis.test.ts:26 reports discrepancy when task text has no matching trace](/test/contract/tasks-analysis.test.ts#L26)
+- Example:
+```typescript
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const { analyzeCoverage } = await import("./src/domain/spec-forward/coverage.ts");
+const taskDoc = { file: "tasks.md", groups: [{ title: "G1", tasks: [{ text: "Implemented feature that never processes input", done: true, provenance: { file: "tasks.md", line: 1 } }] }], changeSummaries: new Map(), unparsed: [] };
+const req = { title: "R1", identifier: "R1", body: "WHEN input arrives, THE system SHALL process it.", earsType: "event-driven", references: [], provenance: { file: "specs/cap/spec.md", line: 1 } };
+const spec = { file: "specs/cap/spec.md", requirements: [req], scenarios: [], deltaSections: ["ADDED"], structuralFindings: [], unparsed: [] };
+const graph = buildClaimGraph({ specs: [spec], tasks: taskDoc }); //*
+const findings = analyzeCoverage({ claimGraph: graph.graph, specs: [spec], tasks: taskDoc }); //*
+findings.some(f => f.category === "coverage.task_conflict"); //=> true
+```
+
 #### Scenario: Task References Missing Spec Coverage [CGC-TASK-GAP]
 IF a completed task change summary references behavior that has no corresponding capability requirement, THEN THE spec-check tool SHALL emit a coverage finding for the undocumented behavior.
 
 **Postcondition:** Implemented but unspecified behavior is visible to reviewers.
+
+##### Evidence
+- Implementation: [coverage.ts:315 detectTaskEvidenceInconsistency()](/src/domain/spec-forward/coverage.ts#L315)
+- Test: [tasks-analysis.test.ts:41 skips non-task-evidence claims](/test/contract/tasks-analysis.test.ts#L41)
+- Example:
+```typescript
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const { analyzeCoverage } = await import("./src/domain/spec-forward/coverage.ts");
+const taskDoc = { file: "tasks.md", groups: [{ title: "G1", tasks: [{ text: "Implemented entirely novel behavior", done: true, provenance: { file: "tasks.md", line: 1 } }] }], changeSummaries: new Map(), unparsed: [] };
+const graph = buildClaimGraph({ specs: [], tasks: taskDoc }); //*
+const findings = analyzeCoverage({ claimGraph: graph.graph, specs: [], tasks: taskDoc }); //*
+findings.some(f => f.category === "coverage.task_gap"); //=> true
+```
 
 #### Requirement model
 
@@ -683,6 +861,19 @@ WHEN the same set of parsed documents is processed on two separate runs, THE spe
 
 **Postcondition:** Claim graph construction is a deterministic function of parsed input.
 
+##### Evidence
+- Implementation: [claim-graph.ts:152 buildClaimGraph()](/src/domain/claim-graph.ts#L152)
+- Test: [extended.determinism.test.ts:103 claim graph is identical across runs for same parsed input](/test/determinism/extended.determinism.test.ts#L103), [run.determinism.test.ts:18 produces stable summary output for same deterministic input](/test/determinism/run.determinism.test.ts#L18)
+- Example:
+```typescript
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const req = { title: "R1", identifier: "R1", body: "THE system SHALL respond", earsType: "event-driven", references: [], provenance: { file: "s.md", line: 1 } };
+const spec = { file: "s.md", requirements: [req], scenarios: [], deltaSections: ["ADDED"], structuralFindings: [], unparsed: [] };
+const a = buildClaimGraph({ specs: [spec] }); //*
+const b = buildClaimGraph({ specs: [spec] }); //*
+JSON.stringify(a.graph.claims) === JSON.stringify(b.graph.claims); //=> true
+```
+
 #### Requirement model
 
 ```alloy
@@ -720,6 +911,22 @@ WHEN the spec-check tool performs coverage analysis on the same claim graph on s
 WHEN the same claim graph is analyzed for coverage on two separate runs, THE spec-check tool SHALL produce byte-identical coverage findings.
 
 **Postcondition:** Coverage analysis is a deterministic function of the claim graph.
+
+##### Evidence
+- Implementation: [coverage.ts:66 analyzeCoverage()](/src/domain/spec-forward/coverage.ts#L66)
+- Test: [extended.determinism.test.ts:235 coverage findings are identical across runs for same claim graph](/test/determinism/extended.determinism.test.ts#L235), [run.determinism.test.ts:18 produces stable summary output for same deterministic input](/test/determinism/run.determinism.test.ts#L18)
+- Test (property): [coverage.property.test.ts:10 same claim graph always produces the same coverage findings](/test/property/coverage.property.test.ts#L10)
+- Example:
+```typescript
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const { analyzeCoverage } = await import("./src/domain/spec-forward/coverage.ts");
+const req = { title: "R1", identifier: "R1", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", references: ["missing.md#Section"], provenance: { file: "s.md", line: 1 } };
+const spec = { file: "s.md", requirements: [req], scenarios: [], deltaSections: ["ADDED"], structuralFindings: [], unparsed: [] };
+const graph = buildClaimGraph({ specs: [spec] }); //*
+const a = analyzeCoverage({ claimGraph: graph.graph, specs: [spec] }); //*
+const b = analyzeCoverage({ claimGraph: graph.graph, specs: [spec] }); //*
+JSON.stringify(a) === JSON.stringify(b); //=> true
+```
 
 #### Requirement model
 

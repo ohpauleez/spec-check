@@ -158,15 +158,28 @@ WHEN a claim is selected for formalization, THE spec-check tool SHALL emit inspe
 
 **Postcondition:** Formal analysis inputs are available as reviewable evidence linked to their source claims.
 
+##### Evidence
+- Implementation: [formalize.ts:154 formalizeClaims()](/src/domain/formal/formalize.ts#L154), [formalize.ts:467 buildFormalizationPrompt()](/src/domain/formal/formalize.ts#L467)
+- Test: [formalize.test.ts:45 formalizeClaims produces valid candidates](/test/contract/formalize.test.ts#L45), [formalize.test.ts:152 buildFormalizationPrompt fences claim text as untrusted](/test/contract/formalize.test.ts#L152)
+- Test (invariant): [safety-liveness.invariant.test.ts:176 LIVE-11: formalization completes with valid output](/test/invariant/safety-liveness.invariant.test.ts#L176)
+
 #### Scenario: Abort On Complete Formalization Failure [FLA-FORMAL-FAIL]
 IF no formalization candidates are produced for the entire phase after bounded retries, THEN THE spec-check tool SHALL abort the run with exit code `2` rather than continue with zero formal evidence.
 
 **Postcondition:** No solver conclusion is produced when the formalization phase yields zero candidates.
 
+##### Evidence
+- Implementation: [formalize.ts:395 sampleFormalizationsForClaim()](/src/domain/formal/formalize.ts#L395)
+- Test: [formalize.test.ts:86 returns error when all samples invalid after max attempts](/test/contract/formalize.test.ts#L86), [formalize.test.ts:108 returns error when callOpencode fails fatally](/test/contract/formalize.test.ts#L108)
+
 #### Scenario: Continue With Partial Formalization Results [FLA-FORMAL-PARTIAL]
 IF some claims fail formalization but at least one claim succeeds, THEN THE spec-check tool SHALL continue with the successful candidates, SHALL collect per-claim failures as errors in the formalization output, and SHALL let callers decide severity based on the ratio of successes to failures.
 
 **Postcondition:** Partial formalization results are preserved and downstream phases proceed with available candidates.
+
+##### Evidence
+- Implementation: [formalize.ts:154 formalizeClaims()](/src/domain/formal/formalize.ts#L154)
+- Test: [formalize.test.ts:162 returns successful candidates alongside errors on partial failure](/test/contract/formalize.test.ts#L162)
 
 #### Requirement model
 
@@ -242,15 +255,41 @@ WHEN a formalization sample passes schema validation for sort consistency, asser
 
 **Postcondition:** Only structurally valid samples enter the clustering phase.
 
+##### Evidence
+- Implementation: [validate.ts:52 validateFormalizationSample()](/src/domain/formal/validate.ts#L52)
+- Test: [validate.test.ts:14 accepts valid sample](/test/contract/validate.test.ts#L14), [validate.test.ts:62 accepts nested balanced parentheses](/test/contract/validate.test.ts#L62)
+- Test (invariant): [safety-liveness.invariant.test.ts:68 SAFE-3: no sample enters clustering without validation](/test/invariant/safety-liveness.invariant.test.ts#L68)
+- Example:
+```typescript
+const { validateFormalizationSample } = await import("./src/domain/formal/validate.ts");
+const result = validateFormalizationSample({ claimId: "REQ-VALID", obligation: "mandatory", variables: [{ name: "State", sort: "Bool" }], functions: [{ name: "ok", args: ["Bool"], returns: "Bool" }], assertions: [{ id: "ASSERT-1", expr: "(ok true)" }] }); //=> type Object
+result.ok; //=> true
+```
+
 #### Scenario: Invalid Sample Rejected [FLA-SAMPLE-REJECT]
 IF a formalization sample violates the logic IR schema, THEN THE spec-check tool SHALL reject it from clustering and preserve the invalid sample as evidence.
 
 **Postcondition:** Invalid formalizations are visible to reviewers without corrupting downstream analysis.
 
+##### Evidence
+- Implementation: [validate.ts:52 validateFormalizationSample()](/src/domain/formal/validate.ts#L52)
+- Test: [validate.test.ts:20 rejects non-object input](/test/contract/validate.test.ts#L20), [validate.test.ts:26 rejects missing claimId](/test/contract/validate.test.ts#L26), [validate.test.ts:32 rejects invalid obligation](/test/contract/validate.test.ts#L32), [validate.test.ts:38 rejects unbalanced assertion parentheses](/test/contract/validate.test.ts#L38), [validate.test.ts:47 rejects function with undeclared sort](/test/contract/validate.test.ts#L47)
+- Test (invariant): [safety-liveness.invariant.test.ts:68 SAFE-3: no sample enters clustering without validation](/test/invariant/safety-liveness.invariant.test.ts#L68)
+- Example:
+```typescript
+const { validateFormalizationSample } = await import("./src/domain/formal/validate.ts");
+const result = validateFormalizationSample({ claimId: "", obligation: "mandatory", variables: [], functions: [], assertions: [] }); //=> type Object
+result.ok; //=> false
+```
+
 #### Scenario: All Samples Invalid After Retries [FLA-SAMPLE-EXHAUST]
 IF all formalization samples for a claim are invalid after bounded retries, THEN THE spec-check tool SHALL record the failure as an error in the formalization output and SHALL exclude that claim from clustering. THE tool SHALL NOT abort the entire phase unless no claims produce valid candidates.
 
 **Postcondition:** Per-claim formalization failures are collected as errors; remaining valid claims proceed to clustering.
+
+##### Evidence
+- Implementation: [formalize.ts:395 sampleFormalizationsForClaim()](/src/domain/formal/formalize.ts#L395)
+- Test: [formalize.test.ts:86 returns error when all samples invalid after max attempts](/test/contract/formalize.test.ts#L86)
 
 #### Requirement model
 
@@ -321,20 +360,68 @@ WHEN a claim identifier contains characters that conflict with SMT-LIB syntax (p
 
 **Postcondition:** The SMT-LIB file is syntactically valid and the original identifier is recoverable from the mapping comment.
 
+##### Evidence
+- Implementation: [smtlib.ts:134 sanitizeIdentifier()](/src/domain/formal/smtlib.ts#L134)
+- Test: [smtlib.test.ts:22 sanitizes unsafe identifiers](/test/contract/smtlib.test.ts#L22)
+- Test (property): [logic.property.test.ts:9 sanitized identifiers remain SMT-safe](/test/property/logic.property.test.ts#L9)
+- Test (integration): [z3-smtlib.integration.test.ts:31 golden samples compile to Z3-accepted SMT-LIB](/test/integration/z3-smtlib.integration.test.ts#L31)
+- Example:
+```typescript
+const { sanitizeIdentifier } = await import("./src/domain/formal/smtlib.ts");
+const safe = sanitizeIdentifier("REQ_VALID_1"); //=> type String
+safe; //=> REQ_VALID_1
+const unsafe = sanitizeIdentifier("REQ(1)|A"); //=> type String
+unsafe.includes("("); //=> false
+unsafe.includes("|"); //=> false
+```
+
 #### Scenario: Valid Identifier Preserved [FLA-SMTLIB-PRESERVE]
 WHEN a claim identifier contains only SMT-LIB-safe characters, THE spec-check tool SHALL use the identifier unchanged in the SMT-LIB output.
 
 **Postcondition:** No unnecessary transformation is applied to safe identifiers.
+
+##### Evidence
+- Implementation: [smtlib.ts:134 sanitizeIdentifier()](/src/domain/formal/smtlib.ts#L134)
+- Test: [smtlib.test.ts:27 compiles logic IR with mapping comments](/test/contract/smtlib.test.ts#L27)
+- Test (property): [logic.property.test.ts:9 sanitized identifiers remain SMT-safe](/test/property/logic.property.test.ts#L9)
+- Example:
+```typescript
+const { sanitizeIdentifier } = await import("./src/domain/formal/smtlib.ts");
+sanitizeIdentifier("CLAIM_ID_42"); //=> CLAIM_ID_42
+```
 
 #### Scenario: Compiled Output Excludes Solver Commands [FLA-SMTLIB-QUERYSAT]
 WHEN the spec-check tool compiles logic IR into SMT-LIB text, THE compiled output SHALL contain variable declarations (`declare-const`), function declarations (`declare-fun`), and assertions (`assert`) but SHALL NOT include `(check-sat)`. THE spec-check tool SHALL append `(check-sat)` at query execution time when submitting the compiled output to the solver.
 
 **Postcondition:** Compiled SMT-LIB is a reusable component that can be composed into different query types (satisfiability, implication) without stripping embedded solver commands.
 
+##### Evidence
+- Implementation: [smtlib.ts:41 compileSmtlib()](/src/domain/formal/smtlib.ts#L41)
+- Test: [smtlib.test.ts:27 compiles logic IR with mapping comments](/test/contract/smtlib.test.ts#L27), [smtlib.test.ts:45 produces single smt2 without solver commands](/test/contract/smtlib.test.ts#L45)
+- Example:
+```typescript
+const { compileSmtlib } = await import("./src/domain/formal/smtlib.ts");
+const { toClaimId } = await import("./src/domain/branded.ts");
+const compiled = compileSmtlib({ claimId: toClaimId("R1"), obligation: "mandatory", variables: [{ name: "S", sort: "Bool" }], functions: [], assertions: [{ id: "A1", expr: "S" }] }); //*
+compiled.smtlib.includes("(check-sat)"); //=> false
+compiled.smtlib.includes("(assert"); //=> true
+```
+
 #### Scenario: Assertion Expressions Exposed [FLA-SMTLIB-ASSERTEXPRS]
 WHEN the spec-check tool compiles logic IR into SMT-LIB, THE compiled output SHALL include the decomposed inner assertion expressions (without the `(assert ...)` wrapper) for use in downstream implication query construction.
 
 **Postcondition:** Downstream consumers can construct negated or combined assertions from the compiled output without re-parsing the SMT-LIB text.
+
+##### Evidence
+- Implementation: [smtlib.ts:41 compileSmtlib()](/src/domain/formal/smtlib.ts#L41)
+- Test: [smtlib.test.ts:27 compiles logic IR with mapping comments](/test/contract/smtlib.test.ts#L27)
+- Example:
+```typescript
+const { compileSmtlib } = await import("./src/domain/formal/smtlib.ts");
+const { toClaimId } = await import("./src/domain/branded.ts");
+const compiled = compileSmtlib({ claimId: toClaimId("R1"), obligation: "mandatory", variables: [{ name: "S", sort: "Bool" }], functions: [], assertions: [{ id: "A1", expr: "S" }] }); //*
+compiled.assertionExprs.length; //=> 1
+```
 
 #### Requirement model
 
@@ -392,15 +479,35 @@ WHEN multiple claims from the same spec declare identical variable or function n
 
 **Postcondition:** The combined SMT-LIB file has no duplicate declarations from compatible claims.
 
+##### Evidence
+- Implementation: [smtlib.ts:265 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L265)
+- Test: [smtlib.test.ts:67 deduplicates identical variable declarations](/test/contract/smtlib.test.ts#L67), [smtlib.test.ts:79 deduplicates identical function declarations](/test/contract/smtlib.test.ts#L79)
+
 #### Scenario: Function Signature Conflict Detection [FLA-SPEC-CONFLICT]
 IF two claims from the same spec declare the same function name with incompatible signatures, THEN THE spec-check tool SHALL emit a `logic.merge_conflict` finding, SHALL exclude the conflicting claim from the combined file, and SHALL preserve both claim identifiers in the finding evidence.
 
 **Postcondition:** Signature conflicts are surfaced as findings rather than producing malformed solver input.
 
+##### Evidence
+- Implementation: [smtlib.ts:265 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L265)
+- Test: [smtlib.test.ts:92 detects function signature conflicts and excludes conflicting claims](/test/contract/smtlib.test.ts#L92)
+
 #### Scenario: Named Assertion Labels Map To Claims [FLA-SPEC-NAMED]
 WHEN the spec-check tool generates named assertions in the combined SMT-LIB, THE label for each assertion SHALL encode the source claim identifier and assertion index so that unsat-core results can be mapped back to specific claims.
 
 **Postcondition:** The assertion-name-to-claim-ID mapping is deterministic and reversible.
+
+##### Evidence
+- Implementation: [smtlib.ts:265 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L265)
+- Test: [smtlib.test.ts:56 uses named assertions with :named labels](/test/contract/smtlib.test.ts#L56), [smtlib.test.ts:107 maps assertion labels back to claim IDs](/test/contract/smtlib.test.ts#L107)
+- Example:
+```typescript
+const { compileSpecSmtlib } = await import("./src/domain/formal/smtlib.ts");
+const { toClaimId } = await import("./src/domain/branded.ts");
+const result = compileSpecSmtlib("spec.md", [{ claimId: toClaimId("R1"), obligation: "mandatory", variables: [{ name: "S", sort: "Bool" }], functions: [], assertions: [{ id: "A1", expr: "S" }] }]); //*
+result.smtlib.includes(":named R1__a0"); //=> true
+result.assertionNameMap.get("R1__a0"); //=> R1
+```
 
 #### Requirement model
 
@@ -473,20 +580,36 @@ WHEN one equivalence cluster exceeds the configured stability threshold, THE spe
 
 **Postcondition:** Downstream solver analysis uses one explicit representative interpretation with preserved clustering evidence.
 
+##### Evidence
+- Implementation: [clustering.ts:97 clusterFormalizationSamples()](/src/domain/formal/clustering.ts#L97)
+- Test: [clustering.test.ts:30 selects representative from stable cluster when threshold met](/test/contract/clustering.test.ts#L30)
+
 #### Scenario: Surface Divergent Interpretations [FLA-CLUSTER-DIVERGE]
 IF no equivalence cluster meets the configured stability threshold, THEN THE spec-check tool SHALL emit an ambiguity finding that preserves the distinct surviving interpretations for reviewer inspection.
 
 **Postcondition:** Weak or unstable claim meaning becomes a surfaced finding instead of a hidden assumption.
+
+##### Evidence
+- Implementation: [clustering.ts:97 clusterFormalizationSamples()](/src/domain/formal/clustering.ts#L97)
+- Test: [clustering.test.ts:53 emits ambiguity finding when no cluster meets stability threshold](/test/contract/clustering.test.ts#L53), [clustering.test.ts:122 two non-equivalent samples produces two clusters](/test/contract/clustering.test.ts#L122)
 
 #### Scenario: Inconclusive Implication Check Preserved [FLA-CLUSTER-INCON]
 IF the solver returns timeout or unknown for a pairwise implication check, THE spec-check tool SHALL record the inconclusive pair as evidence and SHALL NOT treat the pair as either equivalent or distinct.
 
 **Postcondition:** Inconclusive solver results do not corrupt cluster construction.
 
+##### Evidence
+- Implementation: [clustering.ts:290 classifyImplication()](/src/domain/formal/clustering.ts#L290)
+- Test: [clustering.test.ts:79 records inconclusive pairwise result when z3 returns timeout](/test/contract/clustering.test.ts#L79)
+
 #### Scenario: Single Solver Command Per Implication Query [FLA-CLUSTER-QUERY]
 WHEN the spec-check tool constructs a pairwise implication query to test whether sample A entails sample B, THE query SHALL assert A's declarations and assertions as the premise, SHALL assert the negation of the conjunction of B's assertions (i.e., `(assert (not (and b1 b2 ...)))`) as the consequent test, and SHALL contain exactly one `(check-sat)` command at the end. A result of `unsat` means A entails B; a result of `sat` means A does not entail B.
 
 **Postcondition:** Each implication query produces exactly one solver result with unambiguous interpretation; the negation applies to the conjunction of all target assertions jointly.
+
+##### Evidence
+- Implementation: [clustering.ts:244 buildImplicationQuery()](/src/domain/formal/clustering.ts#L244)
+- Test: [implication-query.test.ts:20 contains exactly one check-sat](/test/contract/implication-query.test.ts#L20), [implication-query.test.ts:31 does not directly assert right-side](/test/contract/implication-query.test.ts#L31), [implication-query.test.ts:48 encodes as assert-left + negate-right](/test/contract/implication-query.test.ts#L48)
 
 #### Requirement model
 
@@ -568,10 +691,26 @@ WHEN sample A implies sample B and sample B implies sample A, THE spec-check too
 
 **Postcondition:** Mutual implication is correctly classified as equivalence.
 
+##### Evidence
+- Implementation: [clustering.ts:313 buildEquivalenceClusters()](/src/domain/formal/clustering.ts#L313)
+- Test: [clustering.test.ts:101 mutual unsat produces single cluster](/test/contract/clustering.test.ts#L101)
+- Test (property): [logic.property.test.ts:20 cluster construction is deterministic and symmetric](/test/property/logic.property.test.ts#L20)
+- Example:
+```typescript
+const { buildEquivalenceClusters } = await import("./src/domain/formal/clustering.ts");
+const clusters = buildEquivalenceClusters(2, [{ leftIndex: 0, rightIndex: 1, leftImpliesRight: "yes", rightImpliesLeft: "yes", evidence: { leftToRightQuery: "", rightToLeftQuery: "", leftToRightResult: "", rightToLeftResult: "" } }]); //*
+clusters.length; //=> 1
+clusters[0].members.length; //=> 2
+```
+
 #### Scenario: Deterministic Clustering [FLA-CLUSTER-DETERM]
 WHEN the same formalization samples and solver results are processed on two separate runs, THE spec-check tool SHALL produce identical equivalence clusters and identical representative selections.
 
 **Postcondition:** Clustering is a deterministic function of its inputs.
+
+##### Evidence
+- Implementation: [clustering.ts:313 buildEquivalenceClusters()](/src/domain/formal/clustering.ts#L313)
+- Test (property): [logic.property.test.ts:20 cluster construction is deterministic and symmetric](/test/property/logic.property.test.ts#L20)
 
 #### Requirement model
 
@@ -606,25 +745,53 @@ WHEN a per-spec combined query returns unsat, THE spec-check tool SHALL parse th
 
 **Postcondition:** Reviewers can identify which specific claims within a spec are mutually contradictory.
 
+##### Evidence
+- Implementation: [logic-analysis.ts:208 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L208)
+- Test: [logic-analysis.test.ts:36 mandatory contradiction reported at severity error](/test/contract/logic-analysis.test.ts#L36), [logic-analysis.test.ts:181 unsat core identifies specific conflicting claims](/test/contract/logic-analysis.test.ts#L181)
+- Test (integration): [z3-smtlib.integration.test.ts:75 directly contradictory bare assertions produce UNSAT](/test/integration/z3-smtlib.integration.test.ts#L75)
+
 #### Scenario: Advisory-Only Core Reported At Lower Severity [FLA-LOGIC-ADVISORY]
 WHEN the unsat core contains only advisory or informational claims with no mandatory claims, THE spec-check tool SHALL report the contradiction at warning or info severity respectively.
 
 **Postcondition:** Contradictions among advisory claims are visible but clearly distinguished from mandatory violations.
+
+##### Evidence
+- Implementation: [logic-analysis-sexpr.ts:309 deriveSeverityFromClaims()](/src/domain/formal/logic-analysis-sexpr.ts#L309), [logic-analysis-sexpr.ts:347 obligationToSeverity()](/src/domain/formal/logic-analysis-sexpr.ts#L347)
+- Test: [logic-analysis.test.ts:56 advisory-only contradiction reported at warning](/test/contract/logic-analysis.test.ts#L56), [logic-analysis.test.ts:211 severity derived from highest-obligation in core](/test/contract/logic-analysis.test.ts#L211)
+- Example:
+```typescript
+const { obligationToSeverity } = await import("./src/domain/formal/logic-analysis.ts");
+obligationToSeverity("mandatory"); //=> error
+obligationToSeverity("advisory"); //=> warning
+obligationToSeverity("informational"); //=> info
+```
 
 #### Scenario: Preserve Inconclusive Solver Result [FLA-LOGIC-TIMEOUT]
 IF the solver returns timeout or unknown for a per-spec query, THEN THE spec-check tool SHALL preserve the inconclusive result as evidence and SHALL emit a `logic.inconclusive` finding at warning severity.
 
 **Postcondition:** Inconclusive logic results remain visible to reviewers and do not masquerade as success.
 
+##### Evidence
+- Implementation: [logic-analysis.ts:293 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L293)
+- Test: [logic-analysis.test.ts:76 timeout/unknown result preserved as inconclusive finding](/test/contract/logic-analysis.test.ts#L76)
+
 #### Scenario: Sat Result Triggers Deeper Analysis [FLA-LOGIC-SAT]
 WHEN a per-spec combined query returns sat, THE spec-check tool SHALL NOT emit a global contradiction finding for that spec, but SHALL proceed with pairwise guard-activation contradiction checks and completeness gap detection to identify conditional contradictions and unspecified states that the global satisfiability check cannot surface.
 
 **Postcondition:** A globally satisfiable spec is not assumed free of all issues; deeper conditional analysis follows.
 
+##### Evidence
+- Implementation: [logic-analysis.ts:324 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L324)
+- Test: [logic-analysis.test.ts:140 sat result does not generate contradiction finding](/test/contract/logic-analysis.test.ts#L140)
+
 #### Scenario: Solver Error Produces Finding [FLA-LOGIC-ERROR]
 IF the solver emits error diagnostics (such as `(error ...)` lines in stdout) indicating malformed input, THEN THE spec-check tool SHALL emit a `logic.solver_error` finding at error severity referencing all claims in the affected spec group, and SHALL persist the solver input and output as evidence.
 
 **Postcondition:** Solver errors are surfaced as explicit findings rather than silently treated as successful analysis.
+
+##### Evidence
+- Implementation: [logic-analysis.ts:258 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L258)
+- Test: [logic-analysis.test.ts:232 solver error produces logic.solver_error finding](/test/contract/logic-analysis.test.ts#L232)
 
 #### Requirement model
 
@@ -777,20 +944,37 @@ WHEN two claims from the same spec have conditional assertions whose guards can 
 
 **Postcondition:** Contradictions hidden by vacuous truth in the global check are surfaced with specific guard and claim evidence.
 
+##### Evidence
+- Implementation: [logic-analysis-checks.ts:95 runPairwiseContradictionChecks()](/src/domain/formal/logic-analysis-checks.ts#L95), [logic-analysis-checks.ts:211 checkPairContradiction()](/src/domain/formal/logic-analysis-checks.ts#L211)
+- Test: [logic-analysis.test.ts:253 sat with conditional assertions triggers pairwise checks](/test/contract/logic-analysis.test.ts#L253)
+- Test (integration): [z3-smtlib.integration.test.ts:149 conditional contradiction detected by pairwise check](/test/integration/z3-smtlib.integration.test.ts#L149)
+
 #### Scenario: Compatible Conditional Assertions Produce No Finding [FLA-PAIRWISE-COMPAT]
 WHEN two conditional assertions have guards that can coexist and consequents that are mutually satisfiable, THE spec-check tool SHALL NOT emit a pairwise contradiction finding for that pair.
 
 **Postcondition:** Compatible conditional rules do not produce false-positive contradiction findings.
+
+##### Evidence
+- Implementation: [logic-analysis-checks.ts:211 checkPairContradiction()](/src/domain/formal/logic-analysis-checks.ts#L211)
+- Test: [logic-analysis.test.ts:294 compatible conditional assertions produce no pairwise finding](/test/contract/logic-analysis.test.ts#L294)
 
 #### Scenario: Pairwise Check Bounded By Pair Count [FLA-PAIRWISE-BOUND]
 WHEN the number of candidate pairs exceeds the configured `--pair-budget` (default 200), THE spec-check tool SHALL check only up to the limit and SHALL NOT block indefinitely on quadratic pair explosion. The `--pair-budget` controls pairwise bounds for both specs-forward guard-activation checks and code-backwards cross-side implication checks.
 
 **Postcondition:** Pairwise analysis completes in bounded time regardless of claim count.
 
+##### Evidence
+- Implementation: [logic-analysis-checks.ts:111 runPairwiseContradictionChecks()](/src/domain/formal/logic-analysis-checks.ts#L111)
+- Test: [logic-analysis.test.ts:331 pairwise checks bounded by pair count limit](/test/contract/logic-analysis.test.ts#L331)
+
 #### Scenario: Severity Derived From Paired Claims [FLA-PAIRWISE-SEV]
 WHEN the spec-check tool emits a pairwise contradiction finding, THE severity SHALL be derived from the highest obligation level among the two conflicting claims (mandatory → error, advisory → warning, informational → info).
 
 **Postcondition:** Pairwise contradiction severity is consistent with the obligation-aware severity model used by the global contradiction check.
+
+##### Evidence
+- Implementation: [logic-analysis-checks.ts:131 deriveSeverityFromClaims()](/src/domain/formal/logic-analysis-checks.ts#L131)
+- Test: [logic-analysis.test.ts:253 pairwise severity derived from highest-obligation claim](/test/contract/logic-analysis.test.ts#L253)
 
 #### Requirement model
 
@@ -880,15 +1064,29 @@ WHEN all assertions in a spec group are conditional implications and there exist
 
 **Postcondition:** Specifications with unguarded state gaps are surfaced for reviewer attention.
 
+##### Evidence
+- Implementation: [logic-analysis-checks.ts:302 runCompletenessCheck()](/src/domain/formal/logic-analysis-checks.ts#L302)
+- Test: [logic-analysis.test.ts:357 completeness gap detected when all assertions are conditional](/test/contract/logic-analysis.test.ts#L357)
+- Test (integration): [z3-smtlib.integration.test.ts:173 completeness gap: all-conditional spec has unreachable states](/test/integration/z3-smtlib.integration.test.ts#L173)
+
 #### Scenario: No Gap When Ubiquitous Assertions Exist [FLA-COMPLETENESS-UBIQ]
 WHEN a spec group contains at least one unconditional (ubiquitous) assertion, THE spec-check tool SHALL skip the completeness gap check for that group.
 
 **Postcondition:** Specs with ubiquitous rules that provide baseline coverage in all states do not produce spurious completeness gap findings.
 
+##### Evidence
+- Implementation: [logic-analysis-checks.ts:314 runCompletenessCheck()](/src/domain/formal/logic-analysis-checks.ts#L314)
+- Test: [logic-analysis.test.ts:395 completeness check skipped when ubiquitous assertions exist](/test/contract/logic-analysis.test.ts#L395)
+
 #### Scenario: Exhaustive Guards Produce No Gap Finding [FLA-COMPLETENESS-EXHAUST]
 WHEN the negation of all guards is unsatisfiable (the guards are exhaustive), THE spec-check tool SHALL NOT emit a completeness gap finding.
 
 **Postcondition:** Specifications whose conditional rules cover all reachable states are confirmed complete without false positives.
+
+##### Evidence
+- Implementation: [logic-analysis-checks.ts:302 runCompletenessCheck()](/src/domain/formal/logic-analysis-checks.ts#L302)
+- Test: [logic-analysis.test.ts:427 exhaustive guards produce no completeness gap finding](/test/contract/logic-analysis.test.ts#L427)
+- Test (integration): [z3-smtlib.integration.test.ts:445 exhaustive guards leave no completeness gap](/test/integration/z3-smtlib.integration.test.ts#L445)
 
 #### Requirement model
 
@@ -991,10 +1189,18 @@ WHEN the solver returns a definitive result (sat or unsat) within the per-query 
 
 **Postcondition:** Timely solver results are used normally.
 
+##### Evidence
+- Implementation: [z3.ts:67 runZ3Query()](/src/adapters/z3.ts#L67)
+- Test: [logic-analysis.test.ts:36 mandatory contradiction reported at severity error](/test/contract/logic-analysis.test.ts#L36)
+
 #### Scenario: Query Exceeds Timeout [FLA-TIMEOUT-EXCEED]
 IF the solver does not return a result within the per-query timeout, THEN THE spec-check tool SHALL terminate the query, record the timeout as evidence, and continue with remaining queries.
 
 **Postcondition:** A single slow query does not block the entire solver analysis phase.
+
+##### Evidence
+- Implementation: [z3.ts:88 runZ3Query()](/src/adapters/z3.ts#L88)
+- Test: [logic-analysis.test.ts:76 timeout/unknown preserved as inconclusive](/test/contract/logic-analysis.test.ts#L76)
 
 #### Requirement model
 
@@ -1032,10 +1238,18 @@ WHEN a per-spec solver query returns sat, THE spec-check tool SHALL persist the 
 
 **Postcondition:** The satisfiable result is available for reviewer inspection.
 
+##### Evidence
+- Implementation: [logic-analysis.ts:335 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L335)
+- Test: [logic-analysis.test.ts:96 persists SMT-LIB input, stdout, stderr](/test/contract/logic-analysis.test.ts#L96)
+
 #### Scenario: Unsat Core Persisted [FLA-PERSIST-UNSAT]
 WHEN a per-spec solver query returns unsat, THE spec-check tool SHALL persist the combined SMT-LIB input file, the solver stdout (containing the unsat core), and the solver stderr.
 
 **Postcondition:** The contradictory assertion subset (unsat core) is available for reviewer inspection and maps back to specific claims via named assertion labels.
+
+##### Evidence
+- Implementation: [logic-analysis.ts:226 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L226)
+- Test: [logic-analysis.test.ts:96 persists SMT-LIB input, stdout, stderr](/test/contract/logic-analysis.test.ts#L96)
 
 #### Requirement model
 

@@ -124,15 +124,25 @@ WHEN source code, traced tests, or verified contracts support a requirement or s
 
 **Postcondition:** The output identifies which source artifacts support each traced requirement or scenario.
 
+##### Evidence
+- Implementation: [trace.ts:118 traceClaimsToSource](/src/domain/code-backwards/trace.ts#L118), [trace.ts:344 classifyEvidenceLevel](/src/domain/code-backwards/trace.ts#L344)
+- Test: [traceability.test.ts:12 links canonical identifiers and reports unknown identifier](/test/contract/traceability.test.ts#L12)
+
 #### Scenario: Report Weakly Supported Trace [STC-TRACE-WEAK]
 IF a requirement or scenario identifier appears in source but the located evidence does not demonstrate the behavioral correctness of the claim (e.g., identifier in a comment without corresponding implementation), THEN THE spec-check tool SHALL classify the trace as `weakly supported` and SHALL note that the evidence establishes a link but not behavioral proof.
 
 **Postcondition:** Weak traceability links are distinguished from strong behavioral evidence.
 
+##### Evidence
+- Implementation: [trace.ts:200 traceClaimsToSource](/src/domain/code-backwards/trace.ts#L200) (weakly_supported classification)
+
 #### Scenario: Report Missing Trace [STC-TRACE-MISSING]
 IF a requirement or scenario cannot be traced to any source-backed evidence, THEN THE spec-check tool SHALL emit a traceability gap finding for that claim.
 
 **Postcondition:** Unimplemented or unverified claims remain visible to reviewers.
+
+##### Evidence
+- Implementation: [trace.ts:179 traceClaimsToSource](/src/domain/code-backwards/trace.ts#L179) (missing trace gap finding)
 
 #### Requirement model
 
@@ -190,15 +200,27 @@ WHEN a canonical requirement or scenario identifier appears in a test file withi
 
 **Postcondition:** Test-to-requirement traceability is established through canonical identifiers; the evidence hierarchy determines how strongly this link supports the claim.
 
+##### Evidence
+- Implementation: [trace.ts:259 scanFileForIdentifiers](/src/domain/code-backwards/trace.ts#L259), [trace.ts:344 classifyEvidenceLevel](/src/domain/code-backwards/trace.ts#L344)
+- Test: [traceability.test.ts:12 links canonical identifiers and reports unknown identifier](/test/contract/traceability.test.ts#L12), [traceability.test.ts:48 ignores regex character-class fragments like [A-Z] and [A-Z0-9]](/test/contract/traceability.test.ts#L48)
+
 #### Scenario: Identifier Found In Source Comment [STC-ID-SOURCE]
 WHEN a canonical requirement or scenario identifier appears in a source code comment within the declared source scope, THE spec-check tool SHALL record the source file as a traceability link for that claim. This establishes that the claim was considered during implementation but does not alone constitute proof of behavioral correctness.
 
 **Postcondition:** Implementation-to-requirement traceability is established through canonical identifiers; the evidence hierarchy determines how strongly this link supports the claim.
 
+##### Evidence
+- Implementation: [trace.ts:172 traceClaimsToSource](/src/domain/code-backwards/trace.ts#L172) (claim-to-file matching loop)
+- Test: [traceability.test.ts:12 links canonical identifiers and reports unknown identifier](/test/contract/traceability.test.ts#L12)
+
 #### Scenario: Unknown Identifier In Source [STC-ID-UNKNOWN]
 IF a bracketed identifier is found in source that does not match any known requirement or scenario identifier, THEN THE spec-check tool SHALL emit a finding noting the unknown traceability reference.
 
 **Postcondition:** Orphaned source references are surfaced rather than silently ignored.
+
+##### Evidence
+- Implementation: [trace.ts:226 traceClaimsToSource](/src/domain/code-backwards/trace.ts#L226) (unknown identifier detection loop)
+- Test: [traceability.test.ts:12 links canonical identifiers and reports unknown identifier](/test/contract/traceability.test.ts#L12)
 
 #### Requirement model
 
@@ -227,15 +249,25 @@ WHEN a source file exists within the declared source directory, THE spec-check t
 
 **Postcondition:** All in-scope source files contribute to traceability analysis.
 
+##### Evidence
+- Implementation: [trace.ts:294 collectFiles](/src/domain/code-backwards/trace.ts#L294), [trace.ts:118 traceClaimsToSource](/src/domain/code-backwards/trace.ts#L118)
+- Test: [traceability.test.ts:12 links canonical identifiers and reports unknown identifier](/test/contract/traceability.test.ts#L12)
+
 #### Scenario: Source Outside Scope Excluded [STC-SCOPE-OUT]
 IF a symlink or reference points to a file outside the declared source directory, THEN THE spec-check tool SHALL exclude that file from traceability scanning.
 
 **Postcondition:** Source-backed evidence remains bounded to declared scope.
 
+##### Evidence
+- Implementation: [trace.ts:294 collectFiles](/src/domain/code-backwards/trace.ts#L294) (resolves path and checks `startsWith(root)`)
+
 #### Scenario: Unreadable Source Directory Rejected [STC-SCOPE-FAIL]
 IF the `--src` path does not exist or is not readable, THEN THE spec-check tool SHALL exit with code `2` and a diagnostic message before source-backed analysis begins.
 
 **Postcondition:** No source traceability results are produced from an invalid source path.
+
+##### Evidence
+- Implementation: [trace.ts:118 traceClaimsToSource](/src/domain/code-backwards/trace.ts#L118)
 
 #### Requirement model
 
@@ -307,6 +339,10 @@ WHEN source-backed analysis completes, THE spec-check tool SHALL have made zero 
 
 **Postcondition:** The source tree is identical before and after analysis.
 
+##### Evidence
+- Implementation: [trace.ts:118 traceClaimsToSource](/src/domain/code-backwards/trace.ts#L118) (read-only filesystem operations only)
+- Test (integration): [global.invariant.test.ts:31 INV-1: input files are never mutated by any analysis phase](/test/invariant/global.invariant.test.ts#L31)
+
 #### Requirement model
 
 ```alloy
@@ -332,30 +368,56 @@ WHEN the source tree contains sufficient evidence relevant to a declared capabil
 
 **Postcondition:** A generated spec file exists in `gen_specs/` for each capability with sufficient source evidence.
 
+##### Evidence
+- Implementation: [derive.ts:96 deriveSpecsFromSource](/src/domain/code-backwards/derive.ts#L96)
+- Test: [derive.test.ts:57 produces EARS-preferring markdown from LLM informalization response](/test/contract/derive.test.ts#L57), [derive.test.ts:126 persists gen_specs/{capability}.md via writeOutputAtomic](/test/contract/derive.test.ts#L126), [derive.test.ts:151 returns multiple capabilities from LLM response](/test/contract/derive.test.ts#L151)
+
 #### Scenario: Capability Name Suggestions From Catalog [STC-GEN-SUGGEST]
 WHEN generating code-derived specifications, THE spec-check tool SHALL provide the LLM with the list of known capability names derived from active catalog paths as soft suggestions for capability naming. THE spec-check tool SHALL NOT include requirement text, identifier lists, or spec content in the suggestions.
 
 **Postcondition:** The LLM receives structural metadata (capability names only) that improves naming alignment without violating the blind boundary.
+
+##### Evidence
+- Implementation: [derive.ts:288 buildInformalizationPrompt](/src/domain/code-backwards/derive.ts#L288)
+- Test: [derive.test.ts:234 includes suggested capability names in LLM prompt when provided](/test/contract/derive.test.ts#L234)
 
 #### Scenario: EARS Preference With Structured Fallback [STC-GEN-EARS]
 WHEN code semantics support EARS decomposition, THE spec-check tool SHALL generate requirements using EARS patterns. IF code semantics resist EARS decomposition for a code-derived requirement, THEN THE spec-check tool SHALL use structured behavioral prose and SHALL note the deviation.
 
 **Postcondition:** Generated specs prefer EARS format but do not force unnatural EARS encoding at the expense of accuracy.
 
+##### Evidence
+- Implementation: [derive.ts:96 deriveSpecsFromSource](/src/domain/code-backwards/derive.ts#L96), [derive.ts:502 formatCapabilityMarkdown](/src/domain/code-backwards/derive.ts#L502)
+- Test: [derive.test.ts:57 produces EARS-preferring markdown from LLM informalization response](/test/contract/derive.test.ts#L57)
+
 #### Scenario: Insufficient Source Evidence [STC-GEN-INSUFFICIENT]
 IF a declared capability lacks sufficient source-scoped evidence for meaningful specification generation, THEN THE spec-check tool SHALL emit a limitation finding for that capability and SHALL NOT generate a spec file with unsupported claims.
 
 **Postcondition:** Missing code-derived specs are surfaced as limitations rather than silently skipped.
+
+##### Evidence
+- Implementation: [derive.ts:96 deriveSpecsFromSource](/src/domain/code-backwards/derive.ts#L96)
+- Test: [derive.test.ts:82 returns no specs and warning finding when LLM call fails](/test/contract/derive.test.ts#L82)
 
 #### Scenario: Blind Generation Boundary [STC-GEN-BLIND]
 WHEN generating code-derived specifications, THE spec-check tool SHALL NOT provide original requirement text, proposal text, or design text to the generation process.
 
 **Postcondition:** Code-derived specs reflect what the code actually guarantees rather than restating original intent.
 
+##### Evidence
+- Implementation: [derive.ts:288 buildInformalizationPrompt](/src/domain/code-backwards/derive.ts#L288)
+- Test: [derive.test.ts:102 generated output contains source-derived text only (no original requirements)](/test/contract/derive.test.ts#L102)
+- Test (property): [code-derived.property.test.ts:12 formalization prompts never include original proposal/design text verbatim](/test/property/code-derived.property.test.ts#L12)
+- Test (integration): [global.invariant.test.ts:163 INV-14: code-derived spec generation never receives original requirement text](/test/invariant/global.invariant.test.ts#L163)
+
 #### Scenario: Restrict Unsupported Evidence [STC-GEN-SCOPE]
 IF a candidate code-derived guarantee depends on evidence outside the provided source scope, THEN THE spec-check tool SHALL exclude that unsupported evidence and SHALL surface the resulting limitation.
 
 **Postcondition:** Code-backed guarantees remain bounded to declared source scope and visible evidence.
+
+##### Evidence
+- Implementation: [derive.ts:96 deriveSpecsFromSource](/src/domain/code-backwards/derive.ts#L96)
+- Test: [derive.test.ts:186 returns empty specs when source directory has no scannable files](/test/contract/derive.test.ts#L186)
 
 #### Requirement model
 
@@ -418,15 +480,27 @@ WHEN formalization sampling for a code-derived claim produces an equivalence clu
 
 **Postcondition:** Code-derived claims have representative formalizations suitable for cross-side implication analysis.
 
+##### Evidence
+- Implementation: [gen-formal.ts:64 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L64)
+- Test: [gen-formal.test.ts:40 applies formalizeClaims with schema validation (same pipeline as specs-forward)](/test/contract/gen-formal.test.ts#L40), [gen-formal.test.ts:63 applies clustering with stability threshold 0.6](/test/contract/gen-formal.test.ts#L63)
+
 #### Scenario: Ambiguous Code-Derived Formalization [STC-FORMAL-AMBIG]
 IF no equivalence cluster meets the stability threshold for a code-derived claim, THEN THE spec-check tool SHALL emit an ambiguity finding and SHALL preserve the distinct interpretations as evidence.
 
 **Postcondition:** Ambiguity in code-derived meaning is surfaced rather than hidden behind an arbitrary selection.
 
+##### Evidence
+- Implementation: [gen-formal.ts:64 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L64)
+- Test: [gen-formal.test.ts:111 with single sample clustering never produces ambiguity finding](/test/contract/gen-formal.test.ts#L111)
+
 #### Scenario: Code-Derived Formalization Failure [STC-FORMAL-FAIL]
 IF all formalization samples for a code-derived claim are invalid after bounded retries, THEN THE spec-check tool SHALL record the failure as an error-severity finding for that capability and SHALL continue with remaining capabilities. THE tool SHALL NOT abort the entire pipeline for a per-capability formalization failure.
 
 **Postcondition:** Per-capability formalization failures are surfaced as error findings; remaining capabilities proceed to cross-side analysis.
+
+##### Evidence
+- Implementation: [gen-formal.ts:64 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L64)
+- Test: [gen-formal.test.ts:133 records error finding on formalization failure (all samples invalid)](/test/contract/gen-formal.test.ts#L133)
 
 #### Requirement model
 
@@ -494,15 +568,27 @@ WHEN solver analysis of code-derived formalizations produces an unsatisfied or c
 
 **Postcondition:** Internal inconsistencies in what the code guarantees are visible before cross-side comparison.
 
+##### Evidence
+- Implementation: [gen-logic.ts:40 analyzeGeneratedLogic](/src/domain/code-backwards/gen-logic.ts#L40)
+- Test: [gen-logic.test.ts:55 reports internal contradiction in code-derived formalizations](/test/contract/gen-logic.test.ts#L55)
+
 #### Scenario: Code-Derived Logic Report [STC-LOGIC-REPORT]
 WHEN code-derived solver analysis completes, THE spec-check tool SHALL write the results to `report_2.logic.md` under the output directory.
 
 **Postcondition:** Code-derived formal analysis is available as a distinct reviewable report.
 
+##### Evidence
+- Implementation: [gen-logic.ts:40 analyzeGeneratedLogic](/src/domain/code-backwards/gen-logic.ts#L40)
+- Test: [gen-logic.test.ts:36 delegates to runLogicAnalysis and returns its findings and report](/test/contract/gen-logic.test.ts#L36)
+
 #### Scenario: Solver Timeout On Code-Derived Query [STC-LOGIC-TIMEOUT]
 IF the solver returns timeout or unknown for a code-derived query, THEN THE spec-check tool SHALL preserve the inconclusive result as evidence and SHALL continue with remaining queries.
 
 **Postcondition:** A single slow query does not block code-derived solver analysis.
+
+##### Evidence
+- Implementation: [gen-logic.ts:40 analyzeGeneratedLogic](/src/domain/code-backwards/gen-logic.ts#L40)
+- Test: [gen-logic.test.ts:75 handles solver timeout without blocking](/test/contract/gen-logic.test.ts#L75)
 
 #### Requirement model
 
@@ -551,60 +637,136 @@ WHEN the solver confirms that original claim A implies code-derived claim B and 
 
 **Postcondition:** Mutual implication produces a `same` classification with solver evidence.
 
+##### Evidence
+- Implementation: [cross-implication-smt.ts:203 classifyRelationship](/src/domain/code-backwards/cross-implication-smt.ts#L203)
+- Test: [cross-implication.test.ts:39 mutual unsat classifies as same](/test/contract/cross-implication.test.ts#L39)
+- Test (property): [cross-implication.property.test.ts:8 classification is deterministic and symmetric by inverse strength labels](/test/property/cross-implication.property.test.ts#L8)
+- Test (integration): [safety-liveness.invariant.test.ts:244 LIVE-13: if z3 responds within timeout, cross-side implication completes](/test/invariant/safety-liveness.invariant.test.ts#L244)
+- Example:
+```typescript
+const { classifyRelationship } = await import("./src/domain/code-backwards/cross-implication-smt.ts");
+classifyRelationship("yes", "yes"); //=> same
+```
+
 #### Scenario: Classify Stronger Code-Derived Guarantee [STC-IMPLY-STRONGER]
 WHEN the solver confirms that code-derived claim B implies original claim A but original claim A does not imply code-derived claim B, THE spec-check tool SHALL classify the code-derived guarantee as `stronger` than the original.
 
 **Postcondition:** The code guarantees more than the spec requires, with formal evidence.
+
+##### Evidence
+- Implementation: [cross-implication-smt.ts:203 classifyRelationship](/src/domain/code-backwards/cross-implication-smt.ts#L203)
+- Test: [cross-implication.test.ts:59 forward-sat + reverse-unsat classifies as stronger](/test/contract/cross-implication.test.ts#L59)
+- Example:
+```typescript
+const { classifyRelationship } = await import("./src/domain/code-backwards/cross-implication-smt.ts");
+classifyRelationship("no", "yes"); //=> stronger
+```
 
 #### Scenario: Classify Weaker Code-Derived Guarantee [STC-IMPLY-WEAKER]
 WHEN the solver confirms that original claim A implies code-derived claim B but code-derived claim B does not imply original claim A, THE spec-check tool SHALL classify the code-derived guarantee as `weaker` than the original.
 
 **Postcondition:** The code guarantees less than the spec requires, with formal evidence.
 
+##### Evidence
+- Implementation: [cross-implication-smt.ts:203 classifyRelationship](/src/domain/code-backwards/cross-implication-smt.ts#L203)
+- Test: [cross-implication.test.ts:77 forward-unsat + reverse-sat classifies as weaker](/test/contract/cross-implication.test.ts#L77)
+- Example:
+```typescript
+const { classifyRelationship } = await import("./src/domain/code-backwards/cross-implication-smt.ts");
+classifyRelationship("yes", "no"); //=> weaker
+```
+
 #### Scenario: Classify Different Guarantee [STC-IMPLY-DIFFERENT]
 WHEN the solver determines that neither original claim A implies code-derived claim B nor code-derived claim B implies original claim A, THE spec-check tool SHALL classify the relationship as `different`.
 
 **Postcondition:** Non-comparable guarantees are explicitly identified with solver evidence.
+
+##### Evidence
+- Implementation: [cross-implication-smt.ts:203 classifyRelationship](/src/domain/code-backwards/cross-implication-smt.ts#L203)
+- Test: [cross-implication.test.ts:95 both sat classifies as different](/test/contract/cross-implication.test.ts#L95)
+- Example:
+```typescript
+const { classifyRelationship } = await import("./src/domain/code-backwards/cross-implication-smt.ts");
+classifyRelationship("no", "no"); //=> different
+```
 
 #### Scenario: Classify Uncertain When Solver Inconclusive [STC-IMPLY-UNCERTAIN]
 IF the solver returns timeout or unknown for either direction of an implication check, THEN THE spec-check tool SHALL classify the solver-layer result as `uncertain`, SHALL preserve the inconclusive result as evidence, and SHALL delegate final classification to the blind LLM comparison fallback as defined in [STC-COMPARE-FALLBACK].
 
 **Postcondition:** Inconclusive solver results are preserved as evidence and trigger fallback classification rather than producing a terminal `uncertain` verdict.
 
+##### Evidence
+- Implementation: [cross-implication-smt.ts:170 classifyDirection](/src/domain/code-backwards/cross-implication-smt.ts#L170), [cross-implication-smt.ts:203 classifyRelationship](/src/domain/code-backwards/cross-implication-smt.ts#L203)
+- Test: [cross-implication.test.ts:114 timeout in either direction classifies as uncertain](/test/contract/cross-implication.test.ts#L114)
+- Example:
+```typescript
+const { classifyDirection, classifyRelationship } = await import("./src/domain/code-backwards/cross-implication-smt.ts");
+classifyDirection("timeout"); //=> inconclusive
+classifyRelationship("inconclusive", "yes"); //=> uncertain
+```
+
 #### Scenario: Persist Implication Evidence [STC-IMPLY-PERSIST]
 WHEN cross-side implication checks complete, THE spec-check tool SHALL persist all implication queries and solver results verbatim under the output directory.
 
 **Postcondition:** Every cross-side classification is auditable through preserved solver evidence.
+
+##### Evidence
+- Implementation: [cross-implication.ts:117 runCrossImplication](/src/domain/code-backwards/cross-implication.ts#L117)
+- Test: [cross-implication.test.ts:131 persists forward/reverse queries and outputs](/test/contract/cross-implication.test.ts#L131)
 
 #### Scenario: Single Solver Command Per Cross-Side Query [STC-IMPLY-QUERY]
 WHEN the spec-check tool constructs a cross-side implication query to test whether original claim A entails code-derived claim B, THE query SHALL include declarations from both sides for shared context, SHALL assert A's assertions as the premise, SHALL assert the negation of the conjunction of B's assertions (i.e., `(assert (not (and b1 b2 ...)))`) as the consequent test, and SHALL contain exactly one `(check-sat)` command at the end. A result of `unsat` means A entails B; a result of `sat` means A does not entail B.
 
 **Postcondition:** Each cross-side implication query produces exactly one solver result with unambiguous interpretation.
 
+##### Evidence
+- Implementation: [cross-implication-smt.ts:130 buildImplicationQuery](/src/domain/code-backwards/cross-implication-smt.ts#L130)
+- Test: [implication-query.test.ts:79 contains exactly one (check-sat) command](/test/contract/implication-query.test.ts#L79), [implication-query.test.ts:87 negates the consequent (right-side) assertions](/test/contract/implication-query.test.ts#L87), [implication-query.test.ts:95 preserves left-side assertions directly](/test/contract/implication-query.test.ts#L95)
+
 #### Scenario: Capability-Level Aggregate Comparison [STC-IMPLY-AGGREGATE]
 WHEN a capability is present on both the original and code-derived sides, THE spec-check tool SHALL combine all SMT assertions from each side into a single conjunction per side and SHALL run a bidirectional implication check (2 Z3 calls) to produce a capability-level aggregate classification.
 
 **Postcondition:** Each matched capability receives an aggregate strength classification before pairwise detail is attempted.
+
+##### Evidence
+- Implementation: [cross-implication.ts:181 runCapabilityAggregateComparison](/src/domain/code-backwards/cross-implication.ts#L181)
+- Test: [cross-implication.test.ts:213 aggregate comparison combines per-capability assertions](/test/contract/cross-implication.test.ts#L213)
 
 #### Scenario: Pair Budget Controls Pairwise Scope [STC-IMPLY-BUDGET]
 WHEN the number of pairwise combinations (N original claims times M generated claims) within a capability exceeds the configured `--pair-budget`, THE spec-check tool SHALL emit a `pairwise_skipped` finding for that capability and SHALL NOT run detailed pairwise comparison for it.
 
 **Postcondition:** Pairwise analysis is bounded by configurable budget; over-budget capabilities are honestly reported rather than silently truncated.
 
+##### Evidence
+- Implementation: [cross-implication.ts:353 runBoundedPairwiseComparison](/src/domain/code-backwards/cross-implication.ts#L353)
+- Test: [cross-implication.test.ts:250 pairwise skips when pair count exceeds budget](/test/contract/cross-implication.test.ts#L250)
+
 #### Scenario: Greedy Bipartite Matching Within Budget [STC-IMPLY-GREEDY]
 WHEN pairwise comparison runs within budget for a capability, THE spec-check tool SHALL run all N times M bidirectional implication pairs and SHALL assign best matches using greedy bipartite matching sorted by classification score (same > stronger > uncertain > weaker > different), producing at most one matched pair per original claim and per generated claim.
 
 **Postcondition:** Greedy matching is deterministic given the same inputs and produces the highest-quality cross-side pairings available within the capability.
+
+##### Evidence
+- Implementation: [cross-implication.ts:428 runBoundedPairwiseComparison](/src/domain/code-backwards/cross-implication.ts#L428)
+- Test: [cross-implication.test.ts:273 pairwise uses greedy matching to assign best pairs](/test/contract/cross-implication.test.ts#L273)
 
 #### Scenario: Report Unmatched Capabilities [STC-IMPLY-UNMATCHED-CAP]
 WHEN a capability exists only on the generated side, THE spec-check tool SHALL emit a `novel_capability` finding. WHEN a capability exists only on the original side, THE spec-check tool SHALL emit an `unimplemented_capability` finding.
 
 **Postcondition:** Capabilities present on only one side are surfaced with explanatory context noting possible causes (code gap, context budget limitation, or naming mismatch).
 
+##### Evidence
+- Implementation: [cross-implication.ts:192 runCapabilityAggregateComparison](/src/domain/code-backwards/cross-implication.ts#L192)
+- Test: [cross-implication.test.ts:234 aggregate reports unmatched capabilities on each side](/test/contract/cross-implication.test.ts#L234)
+
 #### Scenario: Report Unmatched Claims Within Capability [STC-IMPLY-UNMATCHED-CLAIM]
 WHEN greedy matching within a capability leaves original claims unpaired, THE spec-check tool SHALL emit `unmatched_original` findings. WHEN generated claims remain unpaired, THE spec-check tool SHALL emit `unmatched_generated` findings.
 
 **Postcondition:** Claim-level pairing gaps within a capability are visible to reviewers.
+
+##### Evidence
+- Implementation: [cross-implication.ts:489 runBoundedPairwiseComparison](/src/domain/code-backwards/cross-implication.ts#L489)
+- Test: [cross-implication.test.ts:308 pairwise reports unmatched claims on both sides](/test/contract/cross-implication.test.ts#L308)
 
 #### Requirement model
 
@@ -707,10 +869,18 @@ WHEN a capability has a majority of claims classified as `different` or `weaker`
 
 **Postcondition:** Significant implementation-to-spec gaps are unmissable in the report.
 
+##### Evidence
+- Implementation: [cross-implication.ts:538 summarizePerCapability](/src/domain/code-backwards/cross-implication.ts#L538)
+- Test: [cross-implication.test.ts:158 high divergence at error severity when majority weaker/different](/test/contract/cross-implication.test.ts#L158)
+
 #### Scenario: Low Divergence Noted [STC-DIVERGE-LOW]
 WHEN a capability has all claims classified as `same` or `stronger`, THE spec-check tool SHALL note the alignment as supporting evidence for spec conformance.
 
 **Postcondition:** Positive alignment is documented alongside gaps.
+
+##### Evidence
+- Implementation: [cross-implication.ts:538 summarizePerCapability](/src/domain/code-backwards/cross-implication.ts#L538)
+- Test: [cross-implication.test.ts:190 low divergence at info severity when all same/stronger](/test/contract/cross-implication.test.ts#L190)
 
 #### Requirement model
 
@@ -746,25 +916,62 @@ WHEN cross-side implication results are available and conclusive (same, stronger
 
 **Postcondition:** Conclusive formal classification takes precedence over qualitative assessment.
 
+##### Evidence
+- Implementation: [cross-implication-smt.ts:203 classifyRelationship](/src/domain/code-backwards/cross-implication-smt.ts#L203)
+- Test: [cross-implication.test.ts:39 mutual unsat classifies as same](/test/contract/cross-implication.test.ts#L39), [safety-liveness.invariant.test.ts:117 SAFE-7: no cross-side classification is produced from unvalidated inputs](/test/invariant/safety-liveness.invariant.test.ts#L117)
+
 #### Scenario: Blind Comparison As Explanatory Rationale [STC-COMPARE-EXPLAIN]
 WHEN both solver implication results and blind LLM comparison results are available, THE spec-check tool SHALL attach the blind comparison rationale as supporting evidence that explains the formal classification in human-readable terms.
 
 **Postcondition:** Reviewers receive both a formal verdict and a human-readable explanation.
+
+##### Evidence
+- Implementation: [blind-compare.ts:54 runBlindComparison](/src/domain/code-backwards/blind-compare.ts#L54), [blind-compare.ts:154 extractRationale](/src/domain/code-backwards/blind-compare.ts#L154)
+- Test: [blind-compare.test.ts:32 attaches rationale finding with classification and LLM-extracted rationale](/test/contract/blind-compare.test.ts#L32), [blind-compare.test.ts:126 extractRationale returns rationale field, falls back to explanation, defaults](/test/contract/blind-compare.test.ts#L126)
+- Test (property): [blind-compare.property.test.ts:45 extractRationale never throws on arbitrary input](/test/property/blind-compare.property.test.ts#L45)
+- Example:
+```typescript
+const { extractRationale } = await import("./src/domain/code-backwards/blind-compare.ts");
+extractRationale({ rationale: "Both express the same constraint." }); //=> Both express the same constraint.
+extractRationale({ explanation: "Alternate field." }); //=> Alternate field.
+extractRationale(null); //=> No rationale provided
+```
 
 #### Scenario: Blind Comparison As Fallback Classifier [STC-COMPARE-FALLBACK]
 IF cross-side implication results are unavailable or the solver-layer classification is `uncertain` for a claim pair, THEN THE spec-check tool SHALL use the blind LLM comparison as the fallback classifier to produce the final verdict for that pair, and SHALL preserve the solver-layer `uncertain` evidence alongside the blind comparison result.
 
 **Postcondition:** Claims without conclusive formal evidence receive a final classification through the blind comparison layer; both the inconclusive solver evidence and the blind comparison verdict are preserved.
 
+##### Evidence
+- Implementation: [blind-compare.ts:54 runBlindComparison](/src/domain/code-backwards/blind-compare.ts#L54)
+- Test: [blind-compare.test.ts:53 uses warning severity for uncertain classifications, info for definitive](/test/contract/blind-compare.test.ts#L53)
+
 #### Scenario: Prevent Requirement-Text Leakage [STC-COMPARE-BLIND]
 IF the blind comparison boundary would expose original requirement text to the code-derived comparison side, THEN THE spec-check tool SHALL prevent that comparison path and SHALL surface the boundary violation as an analysis defect.
 
 **Postcondition:** Blind comparison remains structurally separated from original requirement text.
 
+##### Evidence
+- Implementation: [blind-compare.ts:131 buildBlindPrompt](/src/domain/code-backwards/blind-compare.ts#L131)
+- Test: [blind-compare.test.ts:84 emits blind_boundary_violation error when generated context is missing](/test/contract/blind-compare.test.ts#L84), [blind-compare.test.ts:97 buildBlindPrompt contains only generated-side context](/test/contract/blind-compare.test.ts#L97)
+- Test (property): [blind-compare.property.test.ts:12 buildBlindPrompt never exposes original requirement text](/test/property/blind-compare.property.test.ts#L12)
+- Test (integration): [global.invariant.test.ts:182 INV-15: blind comparison prompts never expose original requirement text](/test/invariant/global.invariant.test.ts#L182), [safety-liveness.invariant.test.ts:99 SAFE-5: no blind comparison exposes original requirement text](/test/invariant/safety-liveness.invariant.test.ts#L99)
+
 #### Scenario: Sanitize Untrusted Content In Code Fences [STC-COMPARE-FENCE]
 WHEN the spec-check tool embeds untrusted document content inside markdown code fences for comparison prompts, THE spec-check tool SHALL sanitize runs of three or more backticks in the content to prevent premature fence closure.
 
 **Postcondition:** Untrusted content cannot break out of its code fence boundary, preserving prompt structure integrity.
+
+##### Evidence
+- Implementation: [fence.ts:12 sanitizeForCodeFence](/src/domain/fence.ts#L12)
+- Test: [blind-compare.test.ts:111 buildBlindPrompt escapes backtick runs in generatedSummary](/test/contract/blind-compare.test.ts#L111)
+- Example:
+```typescript
+const { sanitizeForCodeFence } = await import("./src/domain/fence.ts");
+sanitizeForCodeFence("safe content"); //=> safe content
+sanitizeForCodeFence("a```b").includes("```"); //=> false
+sanitizeForCodeFence("no backticks"); //=> no backticks
+```
 
 #### Requirement model
 
@@ -825,10 +1032,17 @@ WHEN both implementation code and documentation reference the same behavior, THE
 
 **Postcondition:** Comparison verdicts reflect actual implementation rather than documentation claims.
 
+##### Evidence
+- Implementation: [trace.ts:344 classifyEvidenceLevel](/src/domain/code-backwards/trace.ts#L344)
+- Test: [traceability.test.ts:12 links canonical identifiers and reports unknown identifier](/test/contract/traceability.test.ts#L12)
+
 #### Scenario: Documentation-Only Evidence Flagged [STC-HIER-DOCONLY]
 IF a code-derived guarantee is supported only by documentation within the source tree and not by implementation or test evidence, THEN THE spec-check tool SHALL classify that guarantee at lower confidence and surface the limitation.
 
 **Postcondition:** Reviewers are aware when derived guarantees rest on documentation rather than implementation.
+
+##### Evidence
+- Implementation: [trace.ts:200 traceClaimsToSource](/src/domain/code-backwards/trace.ts#L200)
 
 #### Requirement model
 
@@ -874,10 +1088,18 @@ WHEN a completed task change summary describes behavior consistent with source-d
 
 **Postcondition:** Consistent task-source relationships strengthen the overall evidence case.
 
+##### Evidence
+- Implementation: [tasks-analysis.ts:29 analyzeTaskSourceConsistency](/src/domain/tasks-analysis.ts#L29)
+- Test: [tasks-analysis.test.ts:8 reports consistent when task text matches traced identifier](/test/contract/tasks-analysis.test.ts#L8)
+
 #### Scenario: Task Claim Contradicts Source Evidence [STC-TASKSRC-CONFLICT]
 IF a completed task change summary describes behavior that contradicts source-derived evidence, THEN THE spec-check tool SHALL emit a finding citing both the task summary and the conflicting source evidence.
 
 **Postcondition:** Discrepancies between documented and actual behavior are surfaced.
+
+##### Evidence
+- Implementation: [tasks-analysis.ts:54 analyzeTaskSourceConsistency](/src/domain/tasks-analysis.ts#L54)
+- Test: [tasks-analysis.test.ts:26 reports discrepancy when task text has no matching trace](/test/contract/tasks-analysis.test.ts#L26)
 
 #### Requirement model
 

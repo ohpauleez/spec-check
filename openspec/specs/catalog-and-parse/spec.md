@@ -106,30 +106,86 @@ WHEN the user invokes `spec-check --help` or `spec-check -h`, THE spec-check CLI
 
 **Postcondition:** No output directory is created and no analysis phases run.
 
+##### Evidence
+- Implementation: [index.ts:48 main()](/src/index.ts#L48), [index.ts:157 printHelp()](/src/index.ts#L157)
+- Test: [cli.test.ts:59 parses help and version flags](/test/contract/cli.test.ts#L59)
+- Example:
+```typescript
+const { parseArgv } = await import("./src/cli/parse-argv.ts");
+const result = parseArgv(["--help"]); //=> type Object
+result.ok; //=> true
+result.value.help; //=> true
+result.value.inputs.length; //=> 0
+```
+
 #### Scenario: Version Flag Prints Version And Exits [CAT-CLI-VERSION]
 WHEN the user invokes `spec-check --version` or `spec-check -v`, THE spec-check CLI SHALL print the embedded version string and exit with code `0` without running any analysis.
 
 **Postcondition:** No output directory is created and no analysis phases run.
+
+##### Evidence
+- Implementation: [index.ts:53 main()](/src/index.ts#L53), [version.ts:16 SPEC_CHECK_VERSION](/src/version.ts#L16)
+- Test: [cli.test.ts:59 parses help and version flags](/test/contract/cli.test.ts#L59)
+- Example:
+```typescript
+const { parseArgv } = await import("./src/cli/parse-argv.ts");
+const result = parseArgv(["--version"]); //=> type Object
+result.ok; //=> true
+result.value.version; //=> true
+result.value.inputs.length; //=> 0
+```
 
 #### Scenario: Missing Input Paths Rejected [CAT-CLI-NOINPUT]
 IF the user invokes `spec-check` with no positional input paths and no `--help` or `--version` flag, THEN THE spec-check CLI SHALL exit with code `2` and a diagnostic message naming the missing input.
 
 **Postcondition:** No analysis output is produced.
 
+##### Evidence
+- Implementation: [config.ts:162 resolveRunConfig()](/src/cli/config.ts#L162), [index.ts:127 parseConfigError()](/src/index.ts#L127)
+- Test: [cli.test.ts:50 rejects missing input paths](/test/contract/cli.test.ts#L50)
+
 #### Scenario: Unrecognized Flag Rejected [CAT-CLI-BADFLAG]
 IF the user supplies an unrecognized flag, THEN THE spec-check CLI SHALL exit with code `2` and a diagnostic message naming the unrecognized flag.
 
 **Postcondition:** No analysis output is produced.
+
+##### Evidence
+- Implementation: [parse-argv.ts:198 parseArgv()](/src/cli/parse-argv.ts#L198), [index.ts:103 parseArgParseError()](/src/index.ts#L103)
+- Test: [cli.test.ts:40 rejects unrecognized flags](/test/contract/cli.test.ts#L40)
+- Example:
+```typescript
+const { parseArgv } = await import("./src/cli/parse-argv.ts");
+const result = parseArgv(["--unknown"]); //=> type Object
+result.ok; //=> false
+result.error.kind; //=> unknown_flag
+result.error.flag; //=> --unknown
+```
 
 #### Scenario: Flag Value With Equals Syntax Accepted [CAT-CLI-EQSYNTAX]
 WHEN the user supplies a flag using `--flag=value` syntax, THE spec-check CLI SHALL accept the value as equivalent to `--flag value` syntax for all recognized value-bearing flags.
 
 **Postcondition:** Both `--flag value` and `--flag=value` syntaxes are accepted interchangeably.
 
+##### Evidence
+- Implementation: [parse-argv.ts:162 parseArgv()](/src/cli/parse-argv.ts#L162)
+- Test: [cli.test.ts:83 supports equals syntax for flag values](/test/contract/cli.test.ts#L83)
+- Example:
+```typescript
+const { parseArgv } = await import("./src/cli/parse-argv.ts");
+const result = parseArgv(["--output=my-dir", "--z3=/usr/bin/z3"]); //=> type Object
+result.ok; //=> true
+result.value.output; //=> my-dir
+result.value.z3; //=> /usr/bin/z3
+```
+
 #### Scenario: Output Directory Inside Source Directory Rejected [CAT-CLI-OUTSRC]
 IF the resolved `--output` directory is a descendant of or equal to the resolved `--src` directory, THEN THE spec-check CLI SHALL exit with code `2` and a diagnostic message explaining that the output directory must not reside within the source directory.
 
 **Postcondition:** The read-only source guarantee and output confinement constraints cannot conflict.
+
+##### Evidence
+- Implementation: [config.ts:170 resolveRunConfig()](/src/cli/config.ts#L170)
+- Test: [cli.test.ts:92 rejects output directory inside source directory](/test/contract/cli.test.ts#L92), [cli.test.ts:107 rejects output directory equal to source directory](/test/contract/cli.test.ts#L107), [cli.test.ts:122 accepts output directory outside source directory](/test/contract/cli.test.ts#L122)
 
 #### Requirement model
 
@@ -202,10 +258,18 @@ WHEN a valid config file is loaded and CLI flags are also present, THE spec-chec
 
 **Postcondition:** The resolved run configuration reflects CLI precedence.
 
+##### Evidence
+- Implementation: [config.ts:155 resolveRunConfig()](/src/cli/config.ts#L155)
+- Test: [config.test.ts:11 uses CLI flags over config values](/test/contract/config.test.ts#L11)
+
 #### Scenario: Invalid Config Rejected [CAT-CONFIG-FAIL]
 IF the `--config` file exists but contains invalid JSON or violates the expected config structure, THEN THE spec-check CLI SHALL exit with code `2` and a diagnostic message before any analysis begins.
 
 **Postcondition:** No analysis output is produced from an invalid configuration.
+
+##### Evidence
+- Implementation: [config.ts:210 loadConfigFile()](/src/cli/config.ts#L210), [config.ts:260 isConfigFileShape()](/src/cli/config.ts#L260)
+- Test: [config.test.ts:48 rejects invalid config JSON](/test/contract/config.test.ts#L48)
 
 #### Requirement model
 
@@ -260,15 +324,27 @@ WHEN the input set includes finalized capability specs and in-development change
 
 **Postcondition:** The active analysis catalog identifies exactly which capability documents will be analyzed and which conflicting deltas were skipped.
 
+##### Evidence
+- Implementation: [catalog.ts:270 resolveActiveCapabilities()](/src/domain/parser/catalog.ts#L270)
+- Test: [catalog.test.ts:35 resolves active capabilities preferring finals over deltas](/test/contract/catalog.test.ts#L35), [catalog.test.ts:46 emits conflict findings for multiple deltas of same capability](/test/contract/catalog.test.ts#L46)
+
 #### Scenario: Reject Unreadable Input [CAT-DISCOVER-FAIL]
 IF an input path does not exist or is not readable, THEN THE spec-check tool SHALL stop analysis for that run, report the specific unreadable path, and exit with code `2`.
 
 **Postcondition:** No downstream phase runs with an incomplete or ambiguous input catalog.
 
+##### Evidence
+- Implementation: [catalog.ts:149 collectFiles()](/src/domain/parser/catalog.ts#L149), [catalog.ts:96 buildCatalog()](/src/domain/parser/catalog.ts#L96)
+- Test: [catalog.test.ts:56 rejects unreadable input path](/test/contract/catalog.test.ts#L56)
+
 #### Scenario: Exclude Archived Changes [CAT-DISCOVER-ARCHIVE]
 WHEN the input set includes archived change directories, THE spec-check tool SHALL exclude their spec files from the active catalog without emitting a finding.
 
 **Postcondition:** Archived specs do not influence active analysis.
+
+##### Evidence
+- Implementation: [catalog.ts:110 buildCatalog()](/src/domain/parser/catalog.ts#L110)
+- Test: [catalog.test.ts:27 excludes archived change specs](/test/contract/catalog.test.ts#L27)
 
 #### Requirement model
 
@@ -340,10 +416,17 @@ IF `opencode` is required for the selected analysis mode and is not available or
 
 **Postcondition:** No LLM-backed analysis proceeds without a working `opencode` binary.
 
+##### Evidence
+- Implementation: [pipeline-helpers.ts:55 checkDependencies()](/src/cli/pipeline-helpers.ts#L55), [process.ts:44 isCommandAvailable()](/src/adapters/process.ts#L44)
+
 #### Scenario: Missing Z3 Rejected [CAT-DEPS-Z3]
 IF `z3` is required for the selected analysis mode and is not available at the default path or the `--z3` path, THEN THE spec-check tool SHALL exit with code `2` and a diagnostic message naming the missing dependency.
 
 **Postcondition:** No solver-backed analysis proceeds without a working `z3` binary.
+
+##### Evidence
+- Implementation: [pipeline-helpers.ts:58 checkDependencies()](/src/cli/pipeline-helpers.ts#L58), [process.ts:44 isCommandAvailable()](/src/adapters/process.ts#L44)
+- Test: [z3.test.ts:114 returns error when process throws](/test/contract/z3.test.ts#L114)
 
 #### Requirement model
 
@@ -402,15 +485,35 @@ WHEN a requirement or scenario header violates the canonical identifier format o
 
 **Postcondition:** Reviewers can identify the failing structural rule without re-parsing the document manually.
 
+##### Evidence
+- Implementation: [spec.ts:94 parseSpec()](/src/domain/parser/spec.ts#L94), [pipeline-helpers.ts:146 collectParserFindings()](/src/cli/pipeline-helpers.ts#L146)
+- Test: [parser.test.ts:13 validates heading extraction](/test/contract/parser.test.ts#L13)
+- Test (integration): [pipeline.integration.test.ts:48 structural violations produce expected findings](/test/integration/pipeline.integration.test.ts#L48)
+
 #### Scenario: Reject Content With No Headings [CAT-STRUCT-FAIL]
 IF an input file contains no recognizable headings, THEN THE spec-check tool SHALL emit a parse-error finding for that file and SHALL exclude that file from downstream phases unless no parseable inputs remain.
 
 **Postcondition:** Downstream phases receive only inputs with minimally recognizable structure.
 
+##### Evidence
+- Implementation: [spec.ts:94 parseSpec()](/src/domain/parser/spec.ts#L94)
+- Test (integration): [pipeline.integration.test.ts:48 structural violations produce expected findings](/test/integration/pipeline.integration.test.ts#L48)
+
 #### Scenario: Validate Canonical Identifier Format [CAT-STRUCT-IDFORMAT]
 WHEN a requirement or scenario declares a bracketed identifier, THE spec-check tool SHALL validate that the identifier matches the canonical format: uppercase letters, digits, and hyphens enclosed in square brackets (e.g., `[UPPER-KEBAB-123]`).
 
 **Postcondition:** Malformed identifiers are surfaced as structural findings before downstream phases use them for traceability.
+
+##### Evidence
+- Implementation: [shared.ts:53 parseCanonicalIdentifier()](/src/domain/parser/shared.ts#L53), [spec.ts:279 parseTitledIdentifier()](/src/domain/parser/spec.ts#L279)
+- Test: [parser.test.ts:19 validates canonical identifier format](/test/contract/parser.test.ts#L19), [parser.test.ts:74 extracts scenario with identifier and postcondition](/test/contract/parser.test.ts#L74)
+- Example:
+```typescript
+const { parseCanonicalIdentifier } = await import("./src/domain/parser/shared.ts");
+parseCanonicalIdentifier("[CAT-CLI-HELP]"); //=> CAT-CLI-HELP
+parseCanonicalIdentifier("[UPPER-KEBAB-123]"); //=> UPPER-KEBAB-123
+parseCanonicalIdentifier("[bad]"); //=> undefined
+```
 
 #### Requirement model
 
@@ -473,10 +576,18 @@ WHEN a requirement body follows a recognized EARS pattern, THE spec-check tool S
 
 **Postcondition:** The parsed requirement carries its EARS classification for downstream analysis.
 
+##### Evidence
+- Implementation: [spec.ts:330 classifyEarsType()](/src/domain/parser/spec.ts#L330)
+- Test: [parser.test.ts:25 recognizes EARS and preserves unparsed lines deterministically](/test/contract/parser.test.ts#L25), [parser.test.ts:140 classifies complex (WHILE+WHEN) pattern](/test/contract/parser.test.ts#L140), [parser.test.ts:158 classifies optional (WHERE) pattern](/test/contract/parser.test.ts#L158), [parser.test.ts:176 still classifies WHILE-only as state-driven](/test/contract/parser.test.ts#L176), [parser.test.ts:194 still classifies WHEN-only as event-driven](/test/contract/parser.test.ts#L194)
+
 #### Scenario: Non-EARS Requirement Flagged [CAT-EARS-WARN]
 IF a requirement body does not match any recognized EARS pattern and is not marked as an approved escape-hatch, THEN THE spec-check tool SHALL emit a structural finding recommending EARS conformance.
 
 **Postcondition:** Reviewers are alerted to requirements that may lack testable behavioral structure.
+
+##### Evidence
+- Implementation: [spec.ts:181 parseRequirement()](/src/domain/parser/spec.ts#L181)
+- Test: [parser.test.ts:117 flags non-EARS requirement](/test/contract/parser.test.ts#L117)
 
 #### Requirement model
 
@@ -533,10 +644,19 @@ WHEN a document contains extra content outside recognized fields, THE spec-check
 
 **Postcondition:** Analysts can inspect every parser loss boundary as part of the evidence set.
 
+##### Evidence
+- Implementation: [shared.ts:136 collectUnparsedLines()](/src/domain/parser/shared.ts#L136), [pipeline-helpers.ts:146 collectParserFindings()](/src/cli/pipeline-helpers.ts#L146)
+- Test: [parser.test.ts:25 recognizes EARS and preserves unparsed lines deterministically](/test/contract/parser.test.ts#L25)
+- Test (property): [parser.property.test.ts:12 is deterministic and preserves unmatched lines](/test/property/parser.property.test.ts#L12)
+
 #### Scenario: Prevent Silent Parser Loss [CAT-PRESERVE-FAIL]
 IF the parser cannot classify a line of otherwise parseable content, THEN THE spec-check tool SHALL retain the line as evidence and SHALL NOT silently omit it from the analysis record.
 
 **Postcondition:** Parser loss cannot reduce evidence without an explicit surfaced warning.
+
+##### Evidence
+- Implementation: [shared.ts:136 collectUnparsedLines()](/src/domain/parser/shared.ts#L136)
+- Test (property): [parser.property.test.ts:12 is deterministic and preserves unmatched lines](/test/property/parser.property.test.ts#L12)
 
 #### Requirement model
 
@@ -570,6 +690,11 @@ WHEN the same document content is parsed on two separate runs, THE spec-check to
 
 **Postcondition:** Parser output is a deterministic function of input content.
 
+##### Evidence
+- Implementation: [spec.ts:43 parseSpec()](/src/domain/parser/spec.ts#L43)
+- Test: [extended.determinism.test.ts:80 parser output is identical across runs for same input](/test/determinism/extended.determinism.test.ts#L80)
+- Test (property): [parser.property.test.ts:12 is deterministic and preserves unmatched lines](/test/property/parser.property.test.ts#L12)
+
 #### Requirement model
 
 ```alloy
@@ -601,10 +726,27 @@ WHEN a pipeline phase starts, THE spec-check tool SHALL emit a progress event wi
 
 **Postcondition:** Operators can observe pipeline progress in real time.
 
+##### Evidence
+- Implementation: [progress.ts:55 createProgressEvent()](/src/domain/progress.ts#L55), [progress.ts:36 emitProgressEvent()](/src/domain/progress.ts#L36), [phase-runner.ts:41 runPhase()](/src/cli/phase-runner.ts#L41)
+- Test: [progress.test.ts:6 creates event with phase, status, and ISO timestamp](/test/contract/progress.test.ts#L6), [progress.test.ts:15 includes duration_ms for completed events](/test/contract/progress.test.ts#L15), [progress.test.ts:21 emits JSON line to stdout](/test/contract/progress.test.ts#L21)
+- Example:
+```typescript
+const { createProgressEvent } = await import("./src/domain/progress.ts");
+const started = createProgressEvent("parse", "started"); //=> type Object
+started.phase; //=> parse
+started.status; //=> started
+const completed = createProgressEvent("parse", "completed", 150); //=> type Object
+completed.duration_ms; //=> 150
+```
+
 #### Scenario: Phase Failure Event [CAT-PROGRESS-FAIL]
 IF a pipeline phase fails fatally, THEN THE spec-check tool SHALL emit a progress event with `status: "failed"` before exiting.
 
 **Postcondition:** The failing phase is identified in the progress stream.
+
+##### Evidence
+- Implementation: [phase-runner.ts:51 runPhase()](/src/cli/phase-runner.ts#L51)
+- Test: [progress.test.ts:34 creates failed event for phase failures](/test/contract/progress.test.ts#L34)
 
 #### Requirement model
 

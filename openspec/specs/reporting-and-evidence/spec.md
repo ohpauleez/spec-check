@@ -127,15 +127,29 @@ WHEN specs-forward analysis completes for a run, THE spec-check tool SHALL emit 
 
 **Postcondition:** Reviewers can inspect each analytical pass separately instead of relying only on a synthesized summary.
 
+##### Evidence
+- Implementation: [render.ts:87 writePhaseReports()](/src/domain/reporting/render.ts#L87), [run-cli.ts:290 runReportingPhase()](/src/cli/run-cli.ts#L290)
+- Test: [reporting.test.ts:21 writes phase reports at correct naming convention](/test/contract/reporting.test.ts#L21)
+- Test (integration): [specs-forward.integration.test.ts:18 produces phase reports and summary](/test/integration/specs-forward.integration.test.ts#L18), [pipeline.integration.test.ts:321 full pipeline produces summary with all finding categories](/test/integration/pipeline.integration.test.ts#L321)
+
 #### Scenario: Emit Code-Derived Evidence Directories [RAE-REPORT-GENSPECS]
 WHEN code-backwards analysis completes for a run, THE spec-check tool SHALL persist the `gen_specs/` directory containing code-derived Markdown specifications and the `gen_specs_smt/` directory containing code-derived SMT-LIB artifacts under the configured output directory.
 
 **Postcondition:** Code-derived intermediate artifacts are available for reviewer inspection alongside reports.
 
+##### Evidence
+- Implementation: [pipeline-helpers.ts:360 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L360)
+- Test (integration): [pipeline.integration.test.ts:160 code-derived spec generation produces gen_specs files](/test/integration/pipeline.integration.test.ts#L160)
+
 #### Scenario: Explain Skipped Report Scope [RAE-REPORT-SKIP]
 IF an optional phase is not enabled for a run, THEN THE spec-check tool SHALL explain that skipped scope in the synthesized reporting rather than omit it silently.
 
 **Postcondition:** Reviewers can distinguish intentionally skipped analysis from missing output.
+
+##### Evidence
+- Implementation: [render.ts:196 writeSummaryReport()](/src/domain/reporting/render.ts#L196), [pipeline-helpers.ts:78 computeSkippedPhases()](/src/cli/pipeline-helpers.ts#L78)
+- Test: [reporting.test.ts:48 includes skipped-phase explanations](/test/contract/reporting.test.ts#L48)
+- Test (integration): [specs-forward.integration.test.ts:18 produces phase reports and summary](/test/integration/specs-forward.integration.test.ts#L18)
 
 #### Requirement model
 
@@ -193,15 +207,29 @@ WHEN the qualitative analysis phase completes its first pass, THE spec-check too
 
 **Postcondition:** Report consumers can locate phase output using the documented naming convention.
 
+##### Evidence
+- Implementation: [render.ts:99 writePhaseReports()](/src/domain/reporting/render.ts#L99)
+- Test: [reporting.test.ts:21 writes phase reports at correct naming convention](/test/contract/reporting.test.ts#L21)
+- Test (integration): [pipeline.integration.test.ts:321 full pipeline produces summary](/test/integration/pipeline.integration.test.ts#L321)
+
 #### Scenario: Code-Derived Logic Report Named Correctly [RAE-NAMES-GENLOGIC]
 WHEN code-derived solver analysis completes, THE spec-check tool SHALL write the report to `report_2.logic.md` under the output directory.
 
 **Postcondition:** Code-derived formal analysis is at a predictable path distinct from specs-forward logic analysis.
 
+##### Evidence
+- Implementation: [render.ts:124 writePhaseReports()](/src/domain/reporting/render.ts#L124)
+- Test: [reporting.test.ts:142 writes code-derived logic report at report_2.logic.md](/test/contract/reporting.test.ts#L142)
+
 #### Scenario: Summary Report Named Correctly [RAE-NAMES-SUMMARY]
 WHEN the synthesized summary is generated, THE spec-check tool SHALL write it to `report_summary.md` under the output directory.
 
 **Postcondition:** The summary is always at a predictable path.
+
+##### Evidence
+- Implementation: [render.ts:196 writeSummaryReport()](/src/domain/reporting/render.ts#L196)
+- Test: [reporting.test.ts:36 writes summary report at report_summary.md](/test/contract/reporting.test.ts#L36)
+- Test (integration): [pipeline.integration.test.ts:321 full pipeline produces summary](/test/integration/pipeline.integration.test.ts#L321)
 
 #### Requirement model
 
@@ -239,20 +267,40 @@ WHEN a finding depends on solver analysis or sampled formalization output, THE s
 
 **Postcondition:** Formal conclusions remain auditable after the run completes.
 
+##### Evidence
+- Implementation: [pipeline-helpers.ts:360 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L360)
+- Test: [coverage-gaps.test.ts:44 solver and model artifacts are preserved](/test/contract/coverage-gaps.test.ts#L44)
+- Test (invariant): [global.invariant.test.ts:209 INV-4 + INV-13: solver artifacts are persisted](/test/invariant/global.invariant.test.ts#L209)
+
 #### Scenario: Preserve Cross-Side Implication Evidence [RAE-EVID-CROSSIMPLY]
 WHEN a code-backwards classification depends on cross-side implication analysis, THE spec-check tool SHALL preserve the implication queries, solver results, and classification rationale as evidence attached to the finding.
 
 **Postcondition:** Cross-side comparison verdicts are traceable to their formal basis.
+
+##### Evidence
+- Implementation: [pipeline-helpers.ts:446 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L446)
+- Test (invariant): [global.invariant.test.ts:209 INV-4 + INV-13: solver artifacts are persisted](/test/invariant/global.invariant.test.ts#L209)
+- Test (integration): [pipeline.integration.test.ts:271 cross-side comparison pipeline](/test/integration/pipeline.integration.test.ts#L271)
 
 #### Scenario: Prevent Unsupported Verdict [RAE-EVID-FAIL]
 IF a final report conclusion would be emitted without preserved provenance or supporting evidence, THEN THE spec-check tool SHALL suppress that unsupported verdict and SHALL surface the missing-evidence condition as a defect.
 
 **Postcondition:** Reported conclusions never outrun the preserved evidence set.
 
+##### Evidence
+- Implementation: [render.ts:251 enforceFindingSupport()](/src/domain/reporting/render.ts#L251)
+- Test: [reporting.test.ts:53 suppresses finding without required evidence](/test/contract/reporting.test.ts#L53), [reporting.test.ts:99 suppresses finding with empty provenance file](/test/contract/reporting.test.ts#L99)
+
 #### Scenario: Preserve LLM Response As Evidence [RAE-EVID-LLM]
 WHEN a finding depends on an LLM-backed analysis response, THE spec-check tool SHALL preserve the full response content as evidence attached to the finding.
 
 **Postcondition:** No final verdict rests on an unpreserved LLM response.
+
+##### Evidence
+- Implementation: [qualitative.ts:24 rawResponses](/src/domain/spec-forward/qualitative.ts#L24)
+- Test: [qualitative.test.ts:21 runQualitativePasses returns merged findings](/test/contract/qualitative.test.ts#L21)
+- Test (property): [code-derived.property.test.ts:40 qualitative review prompts fence all documents](/test/property/code-derived.property.test.ts#L40)
+- Test (invariant): [global.invariant.test.ts:125 INV-11: prompts fence document content](/test/invariant/global.invariant.test.ts#L125), [safety-liveness.invariant.test.ts:156 LIVE-10: qualitative analysis completes](/test/invariant/safety-liveness.invariant.test.ts#L156)
 
 #### Requirement model
 
@@ -303,10 +351,19 @@ WHEN a finding is created, THE spec-check tool SHALL populate severity, category
 
 **Postcondition:** Every finding is self-describing and reviewable without external context.
 
+##### Evidence
+- Implementation: [findings.ts:49 Finding](/src/domain/findings.ts#L49), [render.ts:251 enforceFindingSupport()](/src/domain/reporting/render.ts#L251)
+- Test: [reporting.test.ts:124 passes finding with all required fields including rationale](/test/contract/reporting.test.ts#L124)
+- Test (invariant): [global.invariant.test.ts:50 INV-2: every finding has provenance](/test/invariant/global.invariant.test.ts#L50)
+
 #### Scenario: Missing Required Field Rejected [RAE-SHAPE-FAIL]
 IF a finding would be emitted without a required field, THEN THE spec-check tool SHALL treat this as an analysis defect and surface it rather than emitting an incomplete finding.
 
 **Postcondition:** The finding pipeline never produces malformed findings.
+
+##### Evidence
+- Implementation: [render.ts:251 enforceFindingSupport()](/src/domain/reporting/render.ts#L251)
+- Test: [reporting.test.ts:53 suppresses finding without required evidence as defect](/test/contract/reporting.test.ts#L53), [reporting.test.ts:74 suppresses finding with empty rationale as defect](/test/contract/reporting.test.ts#L74), [reporting.test.ts:99 suppresses finding with empty provenance file as defect](/test/contract/reporting.test.ts#L99)
 
 #### Requirement model
 
@@ -343,10 +400,32 @@ WHEN a later analysis phase runs after earlier findings exist, THE spec-check to
 
 **Postcondition:** Finding count never decreases between phases.
 
+##### Evidence
+- Implementation: [run-state.ts:63 addFindings()](/src/domain/run-state.ts#L63)
+- Test: [run-state.test.ts:23 appends findings preserving prior entries](/test/contract/run-state.test.ts#L23)
+- Test (property): [run-state.property.test.ts:20 findings are never removed by later phases](/test/property/run-state.property.test.ts#L20)
+- Test (invariant): [global.invariant.test.ts:79 INV-6: findings are never silently removed](/test/invariant/global.invariant.test.ts#L79)
+- Example:
+```typescript
+const { createInitialRunState, addFindings } = await import("./src/domain/run-state.ts");
+const f1 = { severity: "warning", category: "a", provenance: { file: "a.md" }, description: "a", rationale: "r", evidence: [{ kind: "k", value: "v" }] };
+const f2 = { severity: "error", category: "b", provenance: { file: "b.md" }, description: "b", rationale: "r", evidence: [{ kind: "k", value: "v" }] };
+let state = createInitialRunState(); //*
+state = addFindings(state, [f1]); //*
+state.findings.length; //=> 1
+state = addFindings(state, [f2]); //*
+state.findings.length; //=> 2
+state.findings[0] === f1; //=> true
+```
+
 #### Scenario: Finding Removal Surfaced [RAE-IMMUT-CHANGE]
 IF a later phase determines that a prior finding should be superseded, THEN THE spec-check tool SHALL preserve the original finding and add a new finding that explains the supersession.
 
 **Postcondition:** Reviewers can trace the evolution of conclusions across phases.
+
+##### Evidence
+- Implementation: [run-state.ts:63 addFindings()](/src/domain/run-state.ts#L63)
+- Test (invariant): [global.invariant.test.ts:79 INV-6: findings are never silently removed](/test/invariant/global.invariant.test.ts#L79)
 
 #### Requirement model
 
@@ -385,15 +464,28 @@ WHEN all selected outputs are written successfully, THE spec-check tool SHALL wr
 
 **Postcondition:** Consumers can treat manifest presence as the marker of a completed run.
 
+##### Evidence
+- Implementation: [manifest.ts:106 writeManifest()](/src/domain/reporting/manifest.ts#L106), [run-cli.ts:316 runReportingPhase()](/src/cli/run-cli.ts#L316)
+- Test: [manifest.test.ts:13 writes checksums and manifest last](/test/contract/manifest.test.ts#L13)
+- Test (integration): [pipeline.integration.test.ts:209 manifest checksums match actual file content](/test/integration/pipeline.integration.test.ts#L209)
+
 #### Scenario: Prevent Partial Completion Signal [RAE-MANIFEST-FAIL]
 IF the run fails before all selected outputs are finalized, THEN THE spec-check tool SHALL NOT leave a final manifest that implies completed output.
 
 **Postcondition:** Partial runs cannot be mistaken for completed analyses.
 
+##### Evidence
+- Implementation: [run-cli.ts:290 runReportingPhase()](/src/cli/run-cli.ts#L290)
+- Test: [coverage-gaps.test.ts:59 manifest absence signals incomplete run](/test/contract/coverage-gaps.test.ts#L59)
+
 #### Scenario: Invalidate Stale Manifest From Prior Run [RAE-MANIFEST-STALE]
 IF the output directory already contains a manifest from a previous run WHEN a new run begins, THEN THE spec-check tool SHALL remove the existing manifest before analysis begins so that a failed rerun cannot be mistaken for a prior successful run.
 
 **Postcondition:** Only a successfully completed run can leave a manifest in the output directory.
+
+##### Evidence
+- Implementation: [manifest.ts:133 invalidateStaleManifest()](/src/domain/reporting/manifest.ts#L133), [run-cli.ts:127 runIngestionPhases()](/src/cli/run-cli.ts#L127)
+- Test: [manifest.test.ts:46 removes stale manifest from prior run](/test/contract/manifest.test.ts#L46), [manifest.test.ts:59 returns false when no stale manifest exists](/test/contract/manifest.test.ts#L59)
 
 #### Requirement model
 
@@ -474,10 +566,37 @@ WHEN the manifest is written, every entry SHALL reference a file that exists und
 
 **Postcondition:** Manifest integrity can be verified mechanically.
 
+##### Evidence
+- Implementation: [manifest.ts:65 buildManifestEntries()](/src/domain/reporting/manifest.ts#L65)
+- Test: [manifest.test.ts:34 manifest entries match actual file checksums](/test/contract/manifest.test.ts#L34)
+- Test (property): [manifest.property.test.ts:9 every manifest entry has correct checksum](/test/property/manifest.property.test.ts#L9)
+- Test (invariant): [global.invariant.test.ts:112 INV-8: manifest entries have correct checksums](/test/invariant/global.invariant.test.ts#L112)
+- Example:
+```typescript
+const { buildManifestEntries } = await import("./src/domain/reporting/manifest.ts");
+const { sha256Hex } = await import("./src/adapters/fs.ts");
+const content = "# Report\n";
+const entries = buildManifestEntries([{ path: "report.md", phase: "test", content }]); //=> type Array
+entries[0].checksum === sha256Hex(content); //=> true
+entries[0].path; //=> report.md
+```
+
 #### Scenario: Manifest Checksums Are SHA-256 [RAE-SCHEMA-HASH]
 WHEN the manifest computes checksums, THE spec-check tool SHALL use SHA-256 and encode the result as lowercase hexadecimal.
 
 **Postcondition:** Checksum format is predictable and interoperable.
+
+##### Evidence
+- Implementation: [fs.ts:96 sha256Hex()](/src/adapters/fs.ts#L96)
+- Test: [fs.test.ts:27 computes sha256 lowercase hex of correct length](/test/contract/fs.test.ts#L27)
+- Test (property): [manifest.property.test.ts:9 every manifest entry has correct checksum](/test/property/manifest.property.test.ts#L9)
+- Example:
+```typescript
+const { sha256Hex } = await import("./src/adapters/fs.ts");
+const hash = sha256Hex("hello\n"); //=> type String
+hash.length; //=> 64
+/^[a-f0-9]{64}$/.test(hash); //=> true
+```
 
 #### Requirement model
 
@@ -521,10 +640,32 @@ WHEN an output path resolves to a location within the configured output director
 
 **Postcondition:** The artifact is created at the intended location.
 
+##### Evidence
+- Implementation: [fs.ts:32 resolveConfinedOutputPath()](/src/adapters/fs.ts#L32)
+- Test: [fs.test.ts:11 allows path within output directory](/test/contract/fs.test.ts#L11)
+- Test (invariant): [global.invariant.test.ts:102 INV-7: all writes are confined](/test/invariant/global.invariant.test.ts#L102)
+- Example:
+```typescript
+const { resolveConfinedOutputPath } = await import("./src/adapters/fs.ts");
+const { toOutputDirPath, toRelativePath } = await import("./src/domain/branded.ts");
+const result = resolveConfinedOutputPath(toOutputDirPath("/tmp/out"), toRelativePath("report.md")); //=> /tmp/out/report.md
+```
+
 #### Scenario: Write Outside Output Directory Rejected [RAE-CONFINE-FAIL]
 IF an output path resolves to a location outside the configured output directory (including via symlinks or `..` traversal), THEN THE spec-check tool SHALL reject the write with a fatal error.
 
 **Postcondition:** No file is written outside the declared output boundary.
+
+##### Evidence
+- Implementation: [fs.ts:32 resolveConfinedOutputPath()](/src/adapters/fs.ts#L32)
+- Test: [fs.test.ts:17 rejects path traversal outside boundary](/test/contract/fs.test.ts#L17), [fs.test.ts:22 rejects absolute path outside boundary](/test/contract/fs.test.ts#L22)
+- Test (invariant): [global.invariant.test.ts:102 INV-7: all writes are confined](/test/invariant/global.invariant.test.ts#L102)
+- Example:
+```typescript
+const { resolveConfinedOutputPath } = await import("./src/adapters/fs.ts");
+const { toOutputDirPath, toRelativePath } = await import("./src/domain/branded.ts");
+resolveConfinedOutputPath(toOutputDirPath("/tmp/out"), toRelativePath("../../etc/passwd")); //=> throws Error
+```
 
 #### Requirement model
 
@@ -577,10 +718,30 @@ WHEN an output file write completes successfully, THE spec-check tool SHALL rena
 
 **Postcondition:** The final path contains complete content.
 
+##### Evidence
+- Implementation: [fs.ts:66 writeOutputAtomic()](/src/adapters/fs.ts#L66)
+- Test: [fs.test.ts:33 writes atomic output file with correct content](/test/contract/fs.test.ts#L33)
+- Test (invariant): [global.invariant.test.ts:199 INV-3: writeOutputAtomic produces correct content via atomic rename](/test/invariant/global.invariant.test.ts#L199)
+- Example:
+```typescript
+const { writeOutputAtomic } = await import("./src/adapters/fs.ts");
+const { toOutputDirPath, toRelativePath } = await import("./src/domain/branded.ts");
+const { mkdtemp, readFile } = await import("node:fs/promises");
+const { tmpdir } = await import("node:os");
+const { join } = await import("node:path");
+const dir = await mkdtemp(join(tmpdir(), "rae-atomic-")); //*
+await writeOutputAtomic(toOutputDirPath(dir), toRelativePath("out.md"), "complete\n"); //*
+const content = await readFile(join(dir, "out.md"), "utf8"); //=> complete
+```
+
 #### Scenario: Interrupted Write Leaves No Partial File [RAE-ATOMIC-INTERRUPT]
 IF the process is interrupted during an output file write, THEN the final path SHALL NOT contain partial content. The temporary file may be orphaned.
 
 **Postcondition:** Consumers of the output directory never encounter partially written files at final paths.
+
+##### Evidence
+- Implementation: [fs.ts:66 writeOutputAtomic()](/src/adapters/fs.ts#L66)
+- Test: [coverage-gaps.test.ts:72 writeOutputAtomic uses temp+rename to prevent partial writes](/test/contract/coverage-gaps.test.ts#L72)
 
 #### Requirement model
 

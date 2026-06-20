@@ -34,6 +34,42 @@ import {
 
 export { PipelineAbortError } from "./pipeline-types.js";
 
+// Exported for testing — formats user-facing catalog-empty diagnostics.
+export { formatCatalogEmptyMessage };
+
+/**
+ * Format a user-facing diagnostic message for an empty catalog result.
+ *
+ * @param reason - structured empty-catalog classification with variant-specific context
+ * @returns human-readable message suitable for stderr output, including actionable
+ *   remediation guidance where applicable
+ *
+ * @remarks
+ * Precondition: `reason.kind` is one of the three `CatalogEmptyReason` variants.
+ * Postcondition: returned string is non-empty and includes the variant-specific count
+ *   or policy reason for diagnostics.
+ * Invariant: exhaustive switch ensures all variants are handled; adding a new variant
+ *   produces a compile-time error.
+ *
+ * Failure modes: none — pure computation, cannot throw.
+ */
+function formatCatalogEmptyMessage(reason: {
+  readonly kind: "no_recognized_docs" | "all_archived" | "all_filtered";
+  readonly inputCount?: number;
+  readonly archivedCount?: number;
+  readonly filterReason?: string;
+  readonly filteredCount?: number;
+}): string {
+  switch (reason.kind) {
+    case "no_recognized_docs":
+      return `No OpenSpec documents found in ${String(reason.inputCount ?? 0)} provided input(s). Ensure input paths contain proposal.md, design.md, or spec.md documents.`;
+    case "all_archived":
+      return `All ${String(reason.archivedCount ?? 0)} discovered documents are in archived change directories. Use --allow-archive to treat explicitly provided archived inputs as active.`;
+    case "all_filtered":
+      return `All ${String(reason.filteredCount ?? 0)} discovered documents were excluded by policy: ${reason.filterReason ?? "unknown policy reason"}.`;
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point — orchestrates phase groups
 // ---------------------------------------------------------------------------
@@ -78,6 +114,7 @@ export async function runCli(config: RunConfig): Promise<RunState> {
 
     const srcResult = await runSourcePhases(
       config,
+      config.src,
       state,
       analysis.claimGraphResult,
       analysis.clusterResult.representatives,
@@ -136,9 +173,12 @@ async function runIngestionPhases(config: RunConfig): Promise<IngestionResult> {
 
   // Phase 2: Build document catalog from input paths.
   const catalogResult = await runPhaseWithResult("catalog", state, async () => {
-    const result = await buildCatalog(config.inputs);
+    const result = await buildCatalog(config.inputs, { allowArchive: config.allowArchive });
     if (!result.ok) {
       throw new PipelineAbortError("CatalogError", `unreadable input path: ${result.error.path}`);
+    }
+    if (result.value.catalog.documents.length === 0 && result.value.emptyReason !== undefined) {
+      throw new PipelineAbortError("CatalogError", formatCatalogEmptyMessage(result.value.emptyReason));
     }
     return result.value;
   });
@@ -207,6 +247,7 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
     const result = await runQualitativePasses({
       specs: ctx.specs,
       model: config.model,
+      timeoutMs: config.timeoutMs,
       ...(ctx.proposal === undefined ? {} : { proposal: ctx.proposal }),
       ...(ctx.design === undefined ? {} : { design: ctx.design }),
     });
@@ -223,6 +264,7 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
       claims: claimGraphResult.value.graph.claims,
       model: config.model,
       samplesPerClaim: 1,
+      timeoutMs: config.timeoutMs,
     });
     if (!result.ok) {
       throw new PipelineAbortError("FormalizationError", result.error.map((e) => e.message).join("; "));
@@ -324,7 +366,8 @@ async function runReportingPhase(
 /**
  * Run source traceability and code-backwards phases.
  *
- * @param config - run configuration (must have `config.src` defined)
+ * @param config - run configuration for the pipeline
+ * @param srcDir - resolved source directory path (caller guarantees non-undefined)
  * @param initialState - current run state from prior phases
  * @param claimGraphResult - claim graph from the specs-forward pipeline
  * @param representativeClaims - representative formalized claims from clustering
@@ -332,7 +375,7 @@ async function runReportingPhase(
  * @returns updated state and categorized findings for reports
  *
  * @remarks
- * Precondition: `config.src` is defined (caller guards this).
+ * Precondition: `srcDir` is a readable directory path (caller narrows from `config.src`).
  * Precondition: `claimGraphResult.graph.claims` contains valid provenance paths.
  * Postcondition: all source-related phases have emitted progress events.
  * Postcondition: returned findings are partitioned into trace, logic, and compare categories.
@@ -341,11 +384,12 @@ async function runReportingPhase(
  * - Throws `PipelineAbortError` if source trace or code-backwards work fails
  *   (e.g., source directory unreadable, LLM or Z3 failures).
  *
- * Safety: reads from `config.src` directory and invokes external processes (LLM, Z3).
+ * Safety: reads from `srcDir` directory and invokes external processes (LLM, Z3).
  * Must not be called concurrently with another source phase targeting the same directories.
  */
 async function runSourcePhases(
   config: RunConfig,
+  srcDir: string,
   initialState: RunState,
   claimGraphResult: { readonly graph: ClaimGraphOutput["graph"] },
   representativeClaims: readonly LogicIrClaim[],
@@ -361,7 +405,7 @@ async function runSourcePhases(
   // Phase 9: Source traceability — scan source for claim identifiers.
   const traceResult = await runPhaseWithResult("source-trace", state, async () => {
     const traceOutput = await traceClaimsToSource({
-      srcDir: config.src!,
+      srcDir,
       claimGraph: claimGraphResult.graph,
     });
     const taskFindings = analyzeTaskSourceConsistency({
@@ -388,6 +432,7 @@ async function runSourcePhases(
   const codeResult = await runPhaseWithResult("code-backwards", state, async () => {
     return await runCodeBackwardsWork(
       config,
+      srcDir,
       traceResult.value.traceOutput,
       representativeClaims,
       knownCapabilities,

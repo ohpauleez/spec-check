@@ -165,6 +165,7 @@ describe("liveness properties", () => {
     const result = await runQualitativePasses({
       specs: [],
       model: "test-model",
+      timeoutMs: 300000,
     });
 
     expect(result.ok).toBe(true);
@@ -202,6 +203,7 @@ describe("liveness properties", () => {
       }],
       model: "test-model",
       samplesPerClaim: 1,
+      timeoutMs: 300000,
     });
 
     expect(result.ok).toBe(true);

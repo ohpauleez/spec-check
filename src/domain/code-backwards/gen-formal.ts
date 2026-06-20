@@ -65,6 +65,7 @@ export async function formalizeGeneratedSpecs(input: {
   readonly outputDir: OutputDirPath;
   readonly generatedSpecs: readonly { readonly capability: string; readonly requirements: readonly { readonly id: string; readonly text: string }[]; readonly sourceIdentifiers: readonly string[] }[];
   readonly model: ModelName;
+  readonly timeoutMs: number;
   readonly z3Path?: string;
 }): Promise<GeneratedFormalizationOutput> {
   const findings: Finding[] = [];
@@ -86,6 +87,7 @@ export async function formalizeGeneratedSpecs(input: {
       claims: syntheticClaims,
       model: input.model,
       samplesPerClaim: 1,
+      timeoutMs: input.timeoutMs,
     });
 
     // formalizeClaims always returns ok; check for errors in the output.

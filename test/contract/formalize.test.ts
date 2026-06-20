@@ -45,12 +45,14 @@ describe("formalize contract", () => {
   it("formalizeClaims produces valid candidates from mock responses", async () => {
     traceSpec("FLA-FORMALIZE-CLAIMS", "FLA-FORMAL-ARTS", "FLA-SAMPLE-ACCEPT");
     const { callOpencode } = await import("../../src/adapters/opencode.js");
-    vi.mocked(callOpencode).mockResolvedValue({ ok: true, value: makeValidSample("R1") });
+    const mocked = vi.mocked(callOpencode);
+    mocked.mockResolvedValue({ ok: true, value: makeValidSample("R1") });
 
     const result = await formalizeClaims({
       claims: [makeClaim()],
       model: "test-model",
       samplesPerClaim: 2,
+      timeoutMs: 400000,
     });
 
     expect(result.ok).toBe(true);
@@ -58,6 +60,7 @@ describe("formalize contract", () => {
     expect(result.value.candidates.length).toBe(1);
     expect(result.value.candidates[0]!.samples.length).toBe(2);
     expect(result.value.errors.length).toBe(0);
+    expect(mocked.mock.calls[0]?.[0].timeoutMs).toBe(400000);
   });
 
   it("retries sampling when validation rejects and records invalid samples", async () => {
@@ -75,6 +78,7 @@ describe("formalize contract", () => {
       claims: [makeClaim()],
       model: "test-model",
       samplesPerClaim: 1,
+      timeoutMs: 300000,
     });
 
     expect(result.ok).toBe(true);
@@ -96,6 +100,7 @@ describe("formalize contract", () => {
       claims: [makeClaim()],
       model: "test-model",
       samplesPerClaim: 1,
+      timeoutMs: 300000,
     });
 
     expect(result.ok).toBe(true);
@@ -117,6 +122,7 @@ describe("formalize contract", () => {
       claims: [makeClaim()],
       model: "test-model",
       samplesPerClaim: 1,
+      timeoutMs: 300000,
     });
 
     expect(result.ok).toBe(true);
@@ -141,6 +147,7 @@ describe("formalize contract", () => {
       ],
       model: "test-model",
       samplesPerClaim: 1,
+      timeoutMs: 300000,
     });
 
     expect(result.ok).toBe(true);
@@ -187,6 +194,7 @@ describe("formalize contract", () => {
       ],
       model: "test-model",
       samplesPerClaim: 2,
+      timeoutMs: 300000,
       concurrency: 1,
     });
 

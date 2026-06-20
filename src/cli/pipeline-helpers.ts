@@ -317,7 +317,8 @@ export function groupRepresentativesBySpec(
 /**
  * Execute code-backwards pipeline work: derive specs, formalize, cross-implication, blind comparison.
  *
- * @param config - run configuration with output dir, src dir, model, z3 path, and pair budget
+ * @param config - run configuration with output dir, model, z3 path, and pair budget
+ * @param srcDir - resolved source directory path (caller guarantees non-undefined)
  * @param traceOutput - source trace output from phase 9 containing findings and trace data
  * @param representativeClaims - original representative claims for cross-implication (from phase 7)
  * @param knownCapabilities - capability names from the catalog for informalization suggestions
@@ -326,7 +327,7 @@ export function groupRepresentativesBySpec(
  *   and `compareFindings` (aggregate + pairwise + blind comparison)
  *
  * @remarks
- * Precondition: `config.src` is defined (caller guards this).
+ * Precondition: `srcDir` is a readable directory path (caller narrows from `config.src`).
  * Precondition: `traceOutput.traces` contains valid source traces from the trace phase.
  * Postcondition: gen_specs/, gen_specs_smt/, and smt/original/ directories are populated
  *   under `config.output`.
@@ -359,6 +360,7 @@ export function groupRepresentativesBySpec(
  */
 export async function runCodeBackwardsWork(
   config: RunConfig,
+  srcDir: string,
   traceOutput: { readonly findings: readonly Finding[]; readonly traces: readonly SourceTrace[] },
   representativeClaims: readonly LogicIrClaim[],
   knownCapabilities: readonly string[],
@@ -386,8 +388,9 @@ export async function runCodeBackwardsWork(
 
   const derivedSpecs = await deriveSpecsFromSource({
     outputDir: config.output,
-    srcDir: config.src!,
+    srcDir,
     model: config.model,
+    timeoutMs: config.timeoutMs,
     traces: traceOutput.traces,
     suggestedCapabilities: knownCapabilities,
   });
@@ -397,6 +400,7 @@ export async function runCodeBackwardsWork(
     outputDir: config.output,
     generatedSpecs: derivedSpecs.specs,
     model: config.model,
+    timeoutMs: config.timeoutMs,
     ...(config.z3 === undefined ? {} : { z3Path: config.z3 }),
   });
   allFindings.push(...generatedFormal.findings);
@@ -469,6 +473,7 @@ export async function runCodeBackwardsWork(
   // (e.g., intent mismatches, missing context, over-specification).
   const blindComparison = await runBlindComparison({
     model: config.model,
+    timeoutMs: config.timeoutMs,
     results: pairwise.results,
     generatedOnlyContext: derivedSpecs.specs.flatMap((spec) =>
       spec.sourceIdentifiers.map((id) => ({

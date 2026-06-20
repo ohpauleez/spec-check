@@ -35,6 +35,7 @@ describe("qualitative review contract", () => {
     const result = await runQualitativePasses({
       specs: [],
       model: "test-model",
+      timeoutMs: 300_000,
     });
 
     expect(result.ok).toBe(true);
@@ -43,6 +44,8 @@ describe("qualitative review contract", () => {
     expect(result.value.pass2Findings.length).toBe(1);
     expect(result.value.rawResponses.length).toBe(2);
     expect(mocked).toHaveBeenCalledTimes(2);
+    expect(mocked.mock.calls[0]?.[0].timeoutMs).toBe(300_000);
+    expect(Array.isArray(mocked.mock.calls[0]?.[0].files)).toBe(true);
   });
 
   it("returns error when first pass callOpencode fails", async () => {
@@ -56,6 +59,7 @@ describe("qualitative review contract", () => {
     const result = await runQualitativePasses({
       specs: [],
       model: "test-model",
+      timeoutMs: 300_000,
     });
 
     expect(result.ok).toBe(false);
@@ -77,6 +81,7 @@ describe("qualitative review contract", () => {
     const result = await runQualitativePasses({
       specs: [],
       model: "test-model",
+      timeoutMs: 300_000,
     });
 
     expect(result.ok).toBe(false);
@@ -86,7 +91,7 @@ describe("qualitative review contract", () => {
 
   it("buildReviewPrompt fences all document content as untrusted", () => {
     traceSpec("RAE-EVID-LLM");
-    const prompt = buildReviewPrompt("qualitative_review", {
+    const bundle = buildReviewPrompt("qualitative_review", {
       proposal: {
         file: "proposal.md",
         sections: new Map([["Scope", { heading: "Scope", lines: ["system shall respond"], startLine: 1, endLine: 2 }]]),
@@ -95,9 +100,8 @@ describe("qualitative review contract", () => {
       specs: [],
     });
 
-    expect(prompt).toContain("untrusted");
-    expect(prompt).toContain("<document");
-    expect(prompt).toContain("```markdown");
+    expect(bundle.prompt).toContain("untrusted");
+    expect(bundle.files).toEqual(["proposal.md"]);
   });
 
   it("fenceDocument wraps content in document tags with markdown fence", () => {

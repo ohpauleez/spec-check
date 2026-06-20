@@ -10,6 +10,7 @@ import { resolve, relative } from "node:path";
 
 import { toModelName, toOutputDirPath, type ModelName, type OutputDirPath } from "../domain/branded.js";
 import { err, ok, type Result } from "../domain/result.js";
+import { DEFAULT_TIMEOUT_MS, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS } from "../domain/timeout.js";
 import type { CliArgs } from "./parse-argv.js";
 
 /**
@@ -29,6 +30,8 @@ export interface RunConfig {
   readonly z3: string | undefined;
   readonly model: ModelName;
   readonly pairBudget: number;
+  readonly timeoutMs: number;
+  readonly allowArchive: boolean;
 }
 
 interface ConfigFileShape {
@@ -39,13 +42,27 @@ interface ConfigFileShape {
   readonly z3?: string;
   readonly model?: string;
   readonly pairBudget?: number;
+  readonly timeoutMs?: number;
+  readonly allowArchive?: boolean;
 }
+
+interface TimeoutValidationOk {
+  readonly ok: true;
+  readonly value: number;
+}
+
+interface TimeoutValidationErr {
+  readonly ok: false;
+  readonly message: string;
+}
+
+type TimeoutValidationResult = TimeoutValidationOk | TimeoutValidationErr;
 
 /**
  * Discriminated union of configuration resolution errors.
  *
  * @remarks
- * Invariant: the `kind` discriminant is exhaustive — consumers must handle all five variants.
+ * Invariant: the `kind` discriminant is exhaustive — consumers must handle all six variants.
  * Invariant: file-related variants carry the offending `path` for diagnostic output.
  *
  * Variants:
@@ -53,6 +70,8 @@ interface ConfigFileShape {
  * - `config_parse_error` — the config file at `path` is not valid JSON.
  * - `config_validation_error` — the config file at `path` parsed as JSON but failed shape validation;
  *   `message` describes the structural expectation that was violated.
+ * - `timeout_validation_error` — the resolved timeout value (from CLI `--timeout-ms` or config file
+ *   `timeoutMs`) failed range or type validation; `message` includes the source and constraint.
  * - `missing_inputs` — neither CLI positional arguments nor the config file supplied any input paths.
  * - `output_inside_src` — the resolved output directory is equal to or nested inside the source
  *   directory, violating the [CAT-CLI-OUTSRC] confinement rule.
@@ -64,6 +83,9 @@ interface ConfigFileShape {
  *   switch (result.error.kind) {
  *     case "config_read_error":
  *       console.error(`Cannot read config: ${result.error.path}`);
+ *       break;
+ *     case "timeout_validation_error":
+ *       console.error(`Invalid timeout: ${result.error.message}`);
  *       break;
  *     case "missing_inputs":
  *       console.error("No input paths provided");
@@ -77,6 +99,7 @@ export type ConfigError =
   | { readonly kind: "config_read_error"; readonly path: string }
   | { readonly kind: "config_parse_error"; readonly path: string }
   | { readonly kind: "config_validation_error"; readonly path: string; readonly message: string }
+  | { readonly kind: "timeout_validation_error"; readonly message: string }
   | { readonly kind: "missing_inputs" }
   | { readonly kind: "output_inside_src" };
 
@@ -176,6 +199,11 @@ export async function resolveRunConfig(args: CliArgs): Promise<Result<RunConfig,
     }
   }
 
+  const timeoutMsResult = parseTimeoutMs(args.timeoutMs, fromFile.value.timeoutMs);
+  if (!timeoutMsResult.ok) {
+    return err({ kind: "timeout_validation_error", message: timeoutMsResult.message });
+  }
+
   return ok({
     inputs: mergedInputs,
     output: toOutputDirPath(rawOutput),
@@ -184,6 +212,11 @@ export async function resolveRunConfig(args: CliArgs): Promise<Result<RunConfig,
     z3: args.z3 ?? fromFile.value.z3,
     model: toModelName(args.model ?? fromFile.value.model ?? DEFAULT_MODEL),
     pairBudget: parsePairBudget(args.pairBudget, fromFile.value.pairBudget),
+    timeoutMs: timeoutMsResult.value,
+    // allowArchive is additive: either CLI --allow-archive presence OR config file
+    // allowArchive: true activates admission. This differs from other flags where CLI
+    // overrides config — for a boolean opt-in, both sources contribute.
+    allowArchive: args.allowArchive || fromFile.value.allowArchive === true,
   });
 }
 
@@ -226,7 +259,7 @@ async function loadConfigFile(path: string): Promise<Result<ConfigFileShape, Con
     return err({
       kind: "config_validation_error",
       path,
-      message: "expected object with optional string fields and optional string[] inputs",
+      message: "expected object with optional string fields, optional string[] inputs, optional numeric timeoutMs, and optional boolean allowArchive",
     });
   }
 
@@ -269,6 +302,8 @@ function isConfigFileShape(value: unknown): value is ConfigFileShape {
     readonly z3?: unknown;
     readonly model?: unknown;
     readonly pairBudget?: unknown;
+    readonly timeoutMs?: unknown;
+    readonly allowArchive?: unknown;
   };
 
   if (candidate.inputs !== undefined) {
@@ -287,7 +322,67 @@ function isConfigFileShape(value: unknown): value is ConfigFileShape {
     && (candidate.z3 === undefined || typeof candidate.z3 === "string")
     && (candidate.model === undefined || typeof candidate.model === "string")
     && (candidate.pairBudget === undefined || typeof candidate.pairBudget === "number")
+    && (candidate.timeoutMs === undefined || typeof candidate.timeoutMs === "number")
+    && (candidate.allowArchive === undefined || typeof candidate.allowArchive === "boolean")
   );
+}
+
+/**
+ * Parse and validate the timeout value from CLI string or config file number.
+ *
+ * @param cliValue - string from CLI `--timeout-ms` flag, or `undefined` if not provided
+ * @param configValue - numeric value from config file's `timeoutMs` field, or `undefined` if absent
+ * @returns validated timeout in milliseconds on success; diagnostic message on failure
+ *
+ * @remarks
+ * Precondition: `cliValue`, when defined, is a raw user-supplied string (may be non-numeric).
+ * Postcondition (Ok): returned value is a safe integer within [TIMEOUT_MIN_MS, TIMEOUT_MAX_MS].
+ * Priority: CLI value wins over config file value; both win over DEFAULT_TIMEOUT_MS.
+ *
+ * Failure modes (represented in the discriminated result, never thrown):
+ * - Non-numeric CLI string → `{ ok: false, message: "--timeout-ms must be a base-10 integer" }`
+ * - Out-of-range value → `{ ok: false, message: "<source> must be in range [...]" }`
+ */
+function parseTimeoutMs(cliValue: string | undefined, configValue: number | undefined): TimeoutValidationResult {
+  if (cliValue !== undefined) {
+    if (!/^\d+$/u.test(cliValue)) {
+      return { ok: false, message: "--timeout-ms must be a base-10 integer" };
+    }
+    const parsed = Number(cliValue);
+    return validateTimeoutMs(parsed, "--timeout-ms");
+  }
+
+  if (configValue !== undefined) {
+    return validateTimeoutMs(configValue, "config timeoutMs");
+  }
+
+  return { ok: true, value: DEFAULT_TIMEOUT_MS };
+}
+
+/**
+ * Validate that a numeric timeout value is a safe integer within the allowed range.
+ *
+ * @param value - numeric timeout in milliseconds to validate
+ * @param source - human-readable label identifying where the value originated (for diagnostics)
+ * @returns validated timeout on success; diagnostic message on failure
+ *
+ * @remarks
+ * Precondition: `value` is a finite number (may be non-integer or out of range).
+ * Postcondition (Ok): returned value satisfies `Number.isSafeInteger(value)` and
+ *   `TIMEOUT_MIN_MS <= value <= TIMEOUT_MAX_MS`.
+ *
+ * Failure modes (represented in the discriminated result, never thrown):
+ * - Non-safe-integer → `"<source> must be a safe integer"`
+ * - Out of range → `"<source> must be in range [30000, 900000]"`
+ */
+function validateTimeoutMs(value: number, source: string): TimeoutValidationResult {
+  if (!Number.isSafeInteger(value)) {
+    return { ok: false, message: `${source} must be a safe integer` };
+  }
+  if (value < TIMEOUT_MIN_MS || value > TIMEOUT_MAX_MS) {
+    return { ok: false, message: `${source} must be in range [${String(TIMEOUT_MIN_MS)}, ${String(TIMEOUT_MAX_MS)}]` };
+  }
+  return { ok: true, value };
 }
 
 /**

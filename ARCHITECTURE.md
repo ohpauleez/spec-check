@@ -113,6 +113,8 @@ This module owns the raw CLI contract:
 - `--model`
 - `--config`
 - `--pair-budget`
+- `--timeout-ms`
+- `--allow-archive`
 - `--help` / `--version`
 - unknown-flag and missing-value rejection
 
@@ -175,6 +177,7 @@ If you are changing what a “claim” is, what counts as provenance, or how obl
 #### Parsing and Catalog
 
 - `parser/catalog.ts`: input discovery, OpenSpec document classification, archived-change exclusion, active-delta selection, and delta conflict findings
+  - archive admission defaults to excluded; `--allow-archive` only admits explicitly provided archived inputs
 - `parser/shared.ts`: heading parsing, canonical ID extraction, provenance helpers, and unparsed-line collection
 - `parser/proposal.ts`: line-oriented proposal section extraction
 - `parser/design.ts`: line-oriented design section extraction
@@ -264,8 +267,11 @@ This is the LLM boundary.
 It owns:
 
 - `opencode run --model ... --format json ...` argv construction
+- ordered `--file <path>` attachments before the instruction prompt
 - bounded retries and timeout handling
+- prompt-size bound enforcement using UTF-8 byte counts
 - NDJSON-like event parsing
+- deterministic JSON extraction cascade (direct, fenced, wrapped)
 - `type:"error"` event detection
 - minimal phase-schema validation before returning payloads upstream
 

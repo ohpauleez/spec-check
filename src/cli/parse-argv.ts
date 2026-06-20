@@ -25,6 +25,8 @@ export interface CliArgs {
   readonly model?: string;
   readonly config?: string;
   readonly pairBudget?: string;
+  readonly timeoutMs?: string;
+  readonly allowArchive: boolean;
   readonly help: boolean;
   readonly version: boolean;
 }
@@ -54,9 +56,9 @@ export type ArgError =
   | { readonly kind: "missing_flag_value"; readonly flag: string };
 
 /** Closed domain of recognized CLI flag keys. */
-export type FlagKey = "--output" | "--src" | "--caps" | "--z3" | "--model" | "--config" | "--pair-budget";
+export type FlagKey = "--output" | "--src" | "--caps" | "--z3" | "--model" | "--config" | "--pair-budget" | "--timeout-ms";
 
-const FLAG_KEYS: ReadonlySet<string> = new Set<FlagKey>(["--output", "--src", "--caps", "--z3", "--model", "--config", "--pair-budget"]);
+const FLAG_KEYS: ReadonlySet<string> = new Set<FlagKey>(["--output", "--src", "--caps", "--z3", "--model", "--config", "--pair-budget", "--timeout-ms"]);
 
 /**
  * Narrow a validated flag string to the {@link FlagKey} union type.
@@ -138,6 +140,8 @@ export function parseArgv(argv: readonly string[]): Result<CliArgs, ArgError> {
   let model: string | undefined;
   let config: string | undefined;
   let pairBudget: string | undefined;
+  let timeoutMs: string | undefined;
+  let allowArchive = false;
   let help = false;
   let version = false;
 
@@ -155,6 +159,11 @@ export function parseArgv(argv: readonly string[]): Result<CliArgs, ArgError> {
 
     if (token === "--version" || token === "-v") {
       version = true;
+      continue;
+    }
+
+    if (token === "--allow-archive") {
+      allowArchive = true;
       continue;
     }
 
@@ -188,6 +197,9 @@ export function parseArgv(argv: readonly string[]): Result<CliArgs, ArgError> {
           break;
         case "--pair-budget":
           pairBudget = value;
+          break;
+        case "--timeout-ms":
+          timeoutMs = value;
           break;
         default:
           assertNever(narrowedFlag);
@@ -228,6 +240,9 @@ export function parseArgv(argv: readonly string[]): Result<CliArgs, ArgError> {
       case "--pair-budget":
         pairBudget = value;
         break;
+      case "--timeout-ms":
+        timeoutMs = value;
+        break;
       default:
         assertNever(narrowedToken);
     }
@@ -235,6 +250,7 @@ export function parseArgv(argv: readonly string[]): Result<CliArgs, ArgError> {
 
   return ok({
     inputs,
+    allowArchive,
     help,
     version,
     ...(output === undefined ? {} : { output }),
@@ -244,5 +260,6 @@ export function parseArgv(argv: readonly string[]): Result<CliArgs, ArgError> {
     ...(model === undefined ? {} : { model }),
     ...(config === undefined ? {} : { config }),
     ...(pairBudget === undefined ? {} : { pairBudget }),
+    ...(timeoutMs === undefined ? {} : { timeoutMs }),
   });
 }

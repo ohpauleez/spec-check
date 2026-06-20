@@ -52,16 +52,24 @@ spec-check [OPTIONS] [INPUT FILES...]
 
 ### Example
 
+Using `spec-check` to analyze an entire project can take ~10 minutes.
+
 ```sh
 node dist/spec-check.js \
-  openspec/changes/archive/2026-06-18-spec-check-core/proposal.md \
-  openspec/changes/archive/2026-06-18-spec-check-core/design.md \
-  openspec/changes/archive/2026-06-18-spec-check-core/specs/catalog-and-parse/spec.md \
-  openspec/changes/archive/2026-06-18-spec-check-core/specs/claim-graph-and-coverage/spec.md \
-  openspec/changes/archive/2026-06-18-spec-check-core/specs/formalization-and-logic-analysis/spec.md \
-  openspec/changes/archive/2026-06-18-spec-check-core/specs/reporting-and-evidence/spec.md \
-  openspec/changes/archive/2026-06-18-spec-check-core/specs/source-traceability-and-code-backwards/spec.md \
+  openspec/specs/catalog-and-parse \
+  openspec/specs/claim-graph-and-coverage/spec.md \
+  openspec/specs/formalization-and-logic-analysis/spec.md \
+  openspec/specs/reporting-and-evidence/spec.md \
+  openspec/specs/source-traceability-and-code-backwards/spec.md \
+  docs/design.md \
   --src src
+```
+
+Use your coding agent in Plan mode to explain the results with a prompt like:
+
+```
+Surface any findings from running `spec-check`. The artifact directory is @spec-check-output/ .
+Produce a dedicated section in the findings for results from logical analysis passes.
 ```
 
 ### Options

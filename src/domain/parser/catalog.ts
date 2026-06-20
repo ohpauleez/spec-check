@@ -14,6 +14,7 @@ import { toCapabilityName, type CapabilityName } from "../branded.js";
 import type { Finding } from "../findings.js";
 import type { Catalog, CatalogDocument, DocumentType } from "../model.js";
 import { err, ok, type Result } from "../result.js";
+import { postcondition } from "../assert.js";
 
 /**
  * Error produced when a catalog input path cannot be read from the filesystem.
@@ -37,7 +38,13 @@ export interface CatalogBuildError {
 export interface CatalogBuildOutput {
   readonly catalog: Catalog;
   readonly findings: readonly Finding[];
+  readonly emptyReason?: CatalogEmptyReason;
 }
+
+export type CatalogEmptyReason =
+  | { readonly kind: "no_recognized_docs"; readonly inputCount: number }
+  | { readonly kind: "all_archived"; readonly archivedCount: number }
+  | { readonly kind: "all_filtered"; readonly filterReason: string; readonly filteredCount: number };
 
 /**
  * Resolve input paths into a deterministic active OpenSpec catalog, discovering documents
@@ -93,23 +100,59 @@ export interface CatalogBuildOutput {
  * }
  * ```
  */
-export async function buildCatalog(inputs: readonly string[]): Promise<Result<CatalogBuildOutput, CatalogBuildError>> {
-  const discoveredFiles: string[] = [];
+export async function buildCatalog(
+  inputs: readonly string[],
+  options?: { readonly allowArchive?: boolean },
+): Promise<Result<CatalogBuildOutput, CatalogBuildError>> {
+  const allowArchive = options?.allowArchive === true;
+  const discoveredFiles: { path: string; sourceInput: string }[] = [];
   for (const input of inputs) {
     const resolved = resolve(input);
     const files = await collectFiles(resolved);
     if (!files.ok) {
       return files;
     }
-    discoveredFiles.push(...files.value);
+    discoveredFiles.push(...files.value.map((path) => ({ path, sourceInput: resolved })));
   }
 
-  const classified = discoveredFiles
-    .map(classifyDocument)
-    .filter((entry): entry is CatalogDocument => entry !== undefined)
-    .filter((entry) => !entry.path.includes("/openspec/changes/archive/"));
+  const recognizedEntries = discoveredFiles
+    .map((entry) => {
+      const classified = classifyDocument(entry.path);
+      if (classified === undefined) {
+        return undefined;
+      }
+
+      return {
+        document: classified,
+        isArchived: isArchivedPath(classified.path),
+        fromExplicitArchivedInput: isArchivedPath(entry.sourceInput),
+      };
+    })
+    .filter((entry): entry is { document: CatalogDocument; isArchived: boolean; fromExplicitArchivedInput: boolean } => entry !== undefined);
+
+  const admittedEntries = recognizedEntries.filter((entry) => {
+    if (!entry.isArchived) {
+      return true;
+    }
+    return allowArchive && entry.fromExplicitArchivedInput;
+  });
+
+  const classified = admittedEntries.map((entry) => entry.document);
 
   const { activeDocuments, findings } = resolveActiveCapabilities(classified);
+
+  const excludedArchivedCount = recognizedEntries.filter((entry) => entry.isArchived && !(allowArchive && entry.fromExplicitArchivedInput)).length;
+  const emptyReason = classifyEmptyCatalogReason({
+    inputCount: inputs.length,
+    recognizedCount: recognizedEntries.length,
+    excludedArchivedCount,
+    activeCount: activeDocuments.length,
+  });
+
+  postcondition(
+    (activeDocuments.length > 0) === (emptyReason === undefined),
+    `classifyEmptyCatalogReason coherence: activeCount=${activeDocuments.length} but emptyReason=${emptyReason?.kind ?? "undefined"}`,
+  );
 
   return ok({
     catalog: {
@@ -126,7 +169,75 @@ export async function buildCatalog(inputs: readonly string[]): Promise<Result<Ca
         }),
     },
     findings,
+    ...(emptyReason === undefined ? {} : { emptyReason }),
   });
+}
+
+/**
+ * Determine whether a filesystem path resides within an archived OpenSpec change directory.
+ *
+ * @param path - resolved filesystem path to check
+ * @returns `true` when `path` contains the canonical archive path segment
+ *
+ * @remarks
+ * Precondition: `path` uses forward-slash separators (resolved by `resolve()` on POSIX,
+ * or pre-normalized on Windows).
+ * Postcondition: returns `true` if and only if the literal substring
+ * `/openspec/changes/archive/` appears in `path`.
+ * Invariant: pure computation — no I/O, no mutation, cannot throw.
+ *
+ * Failure modes: none.
+ */
+function isArchivedPath(path: string): boolean {
+  return path.includes("/openspec/changes/archive/");
+}
+
+/**
+ * Classify the reason an empty catalog was produced from recognized inputs.
+ *
+ * @param input - counts from the catalog construction process:
+ *   - `inputCount`: number of CLI-provided input paths
+ *   - `recognizedCount`: number of paths that matched a known OpenSpec document type
+ *   - `excludedArchivedCount`: number of recognized docs excluded by archive policy
+ *   - `activeCount`: number of docs surviving capability resolution into the active catalog
+ * @returns a structured `CatalogEmptyReason` when `activeCount === 0`, or `undefined`
+ *   when the catalog is non-empty (no classification needed)
+ *
+ * @remarks
+ * Precondition: all counts are non-negative integers.
+ * Postcondition: returns `undefined` if and only if `activeCount > 0`.
+ * Postcondition: exactly one of the three reason variants is returned when empty:
+ *   - `no_recognized_docs` — no recognized files at all
+ *   - `all_archived` — every recognized file was excluded by archive policy
+ *   - `all_filtered` — recognized non-archived files existed but capability resolution
+ *     excluded all of them
+ * Invariant: deterministic — same inputs always produce the same classification.
+ *
+ * Failure modes: none — pure computation, cannot throw.
+ */
+function classifyEmptyCatalogReason(input: {
+  readonly inputCount: number;
+  readonly recognizedCount: number;
+  readonly excludedArchivedCount: number;
+  readonly activeCount: number;
+}): CatalogEmptyReason | undefined {
+  if (input.activeCount > 0) {
+    return undefined;
+  }
+
+  if (input.recognizedCount === 0) {
+    return { kind: "no_recognized_docs", inputCount: input.inputCount };
+  }
+
+  if (input.excludedArchivedCount > 0 && input.excludedArchivedCount === input.recognizedCount) {
+    return { kind: "all_archived", archivedCount: input.excludedArchivedCount };
+  }
+
+  return {
+    kind: "all_filtered",
+    filterReason: "capability resolution excluded all non-archived recognized documents",
+    filteredCount: input.recognizedCount - input.activeCount - input.excludedArchivedCount,
+  };
 }
 
 /**

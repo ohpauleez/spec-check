@@ -24,12 +24,32 @@ describe("catalog contracts", () => {
     expect(inferCapabilityName("/no-specs-segment/spec.md")).toBeUndefined();
   });
 
-  it("excludes archived change specs", () => {
-    traceSpec("CAT-DISCOVER-ARCHIVE");
-    const archived = classifyDocument("/openspec/changes/archive/old/specs/foo/spec.md");
-    // classifyDocument itself doesn't filter archives, but buildCatalog does via path check
-    expect(archived?.type).toBe("spec");
-    // The archive filtering happens in buildCatalog's filter: .filter(entry => !entry.path.includes("/openspec/changes/archive/"))
+  it("excludes archived change specs by default", async () => {
+    traceSpec("CAT-DISCOVER-ARCHIVE", "CAT-EMPTY-ARCHIVE");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-catalog-archive-"));
+    const archivedDir = join(root, "openspec", "changes", "archive", "old", "specs", "foo");
+    await mkdir(archivedDir, { recursive: true });
+    await writeFile(join(archivedDir, "spec.md"), "## ADDED Requirements\n", "utf8");
+
+    const result = await buildCatalog([archivedDir]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.catalog.documents.length).toBe(0);
+    expect(result.value.emptyReason?.kind).toBe("all_archived");
+  });
+
+  it("admits explicitly provided archived inputs with allowArchive", async () => {
+    traceSpec("CAT-DISCOVER-ALLOW-ARCH");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-catalog-allow-archive-"));
+    const archivedDir = join(root, "openspec", "changes", "archive", "old", "specs", "foo");
+    await mkdir(archivedDir, { recursive: true });
+    await writeFile(join(archivedDir, "spec.md"), "## ADDED Requirements\n", "utf8");
+
+    const result = await buildCatalog([archivedDir], { allowArchive: true });
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.catalog.documents.some((d) => d.type === "spec")).toBe(true);
+    expect(result.value.emptyReason).toBeUndefined();
   });
 
   it("resolves active capabilities preferring finals over deltas", () => {
@@ -74,6 +94,64 @@ describe("catalog contracts", () => {
     expect(result.ok).toBe(true);
     if (result.ok) {
       expect(result.value.catalog.documents.length).toBeGreaterThanOrEqual(3);
+      expect(result.value.emptyReason).toBeUndefined();
+    }
+  });
+
+  it("returns no_recognized_docs for directories without OpenSpec docs", async () => {
+    traceSpec("CAT-EMPTY-NODOCS", "CAT-CATALOG-EMPTY");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-catalog-empty-"));
+    await writeFile(join(root, "notes.txt"), "hello", "utf8");
+
+    const result = await buildCatalog([root]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.catalog.documents.length).toBe(0);
+    expect(result.value.emptyReason?.kind).toBe("no_recognized_docs");
+  });
+
+  it("returns all_filtered when all recognized docs are excluded by capability resolution", async () => {
+    traceSpec("CAT-EMPTY-FILTERED", "CAT-CATALOG-EMPTY");
+    // Create a spec.md file outside a "specs/" segment so inferCapabilityName returns undefined.
+    // Specs without a capability are skipped during active capability resolution, triggering
+    // the all_filtered classification when no other document types are present.
+    const root = await mkdtemp(join(tmpdir(), "spec-check-catalog-filtered-"));
+    const noCapDir = join(root, "loose-docs");
+    await mkdir(noCapDir, { recursive: true });
+    await writeFile(join(noCapDir, "spec.md"), "## ADDED Requirements\n", "utf8");
+
+    const result = await buildCatalog([noCapDir]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.catalog.documents.length).toBe(0);
+    expect(result.value.emptyReason?.kind).toBe("all_filtered");
+    if (result.value.emptyReason?.kind === "all_filtered") {
+      expect(result.value.emptyReason.filteredCount).toBeGreaterThan(0);
+      expect(result.value.emptyReason.filterReason).toContain("capability resolution");
+    }
+  });
+
+  it("reports correct filteredCount when inputs contain both archived and unresolvable docs", async () => {
+    traceSpec("CAT-EMPTY-FILTERED", "CAT-EMPTY-ARCHIVE");
+    // Mix: one archived spec (excluded by archive policy) + one loose spec (filtered by capability resolution).
+    const root = await mkdtemp(join(tmpdir(), "spec-check-catalog-mixed-"));
+    // Archived spec in the conventional archive path.
+    const archivedDir = join(root, "openspec", "changes", "archive", "old", "specs", "foo");
+    await mkdir(archivedDir, { recursive: true });
+    await writeFile(join(archivedDir, "spec.md"), "## ADDED Requirements\n", "utf8");
+    // Loose spec outside a "specs/" segment — filtered by capability resolution.
+    const looseDir = join(root, "loose-docs");
+    await mkdir(looseDir, { recursive: true });
+    await writeFile(join(looseDir, "spec.md"), "## ADDED Requirements\n", "utf8");
+
+    const result = await buildCatalog([archivedDir, looseDir]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.catalog.documents.length).toBe(0);
+    expect(result.value.emptyReason?.kind).toBe("all_filtered");
+    if (result.value.emptyReason?.kind === "all_filtered") {
+      // filteredCount should only count the non-archived doc (1), not both (2).
+      expect(result.value.emptyReason.filteredCount).toBe(1);
     }
   });
 });

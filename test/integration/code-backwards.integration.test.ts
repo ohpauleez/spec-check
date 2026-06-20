@@ -99,6 +99,7 @@ describe("code-backwards pipeline", () => {
       outputDir: toOutputDirPath(output),
       srcDir: root,
       model: toModelName("gpt-5.3-codex"),
+      timeoutMs: 300000,
       traces: trace.traces,
     });
 
@@ -108,6 +109,7 @@ describe("code-backwards pipeline", () => {
       outputDir: toOutputDirPath(output),
       generatedSpecs: derived.specs,
       model: toModelName("gpt-5.3-codex"),
+      timeoutMs: 300000,
     });
 
     expect(generatedFormal.claims.length).toBeGreaterThan(0);

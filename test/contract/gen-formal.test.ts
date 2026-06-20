@@ -38,7 +38,7 @@ describe("gen-formal contract", () => {
   });
 
   it("applies formalizeClaims with schema validation (same pipeline as specs-forward)", async () => {
-    traceSpec("STC-GEN-FORMAL", "STC-FORMAL-STABLE");
+    traceSpec("STC-GEN-FORMAL", "STC-FORMAL-STABLE", "STC-FORMAL-TIMEOUT");
     const { callOpencode } = await import("../../src/adapters/opencode.js");
     const { runZ3Query } = await import("../../src/adapters/z3.js");
     vi.mocked(callOpencode).mockResolvedValue(makeValidSample("SRC-R1"));
@@ -53,11 +53,13 @@ describe("gen-formal contract", () => {
       outputDir: toOutputDirPath("/tmp/test-output"),
       generatedSpecs: [{ capability: "cat-pipeline", requirements: [{ id: "SRC-R1", text: "WHEN pipeline runs, THE system SHALL produce output." }], sourceIdentifiers: ["SRC-R1"] }],
       model: toModelName("test-model"),
+      timeoutMs: 123456,
     });
 
     expect(output.claims.length).toBe(1);
     expect(output.claims[0]!.capability).toBe("cat-pipeline");
     expect(output.claims[0]!.representative).toBeDefined();
+    expect(vi.mocked(callOpencode).mock.calls[0]?.[0].timeoutMs).toBe(123456);
   });
 
   it("applies clustering with stability threshold 0.6", async () => {
@@ -77,6 +79,7 @@ describe("gen-formal contract", () => {
       outputDir: toOutputDirPath("/tmp/test-output"),
       generatedSpecs: [{ capability: "cat-pipeline", requirements: [{ id: "SRC-R1", text: "WHEN pipeline runs, THE system SHALL produce output." }], sourceIdentifiers: ["SRC-R1"] }],
       model: toModelName("test-model"),
+      timeoutMs: 300000,
     });
 
     // Should succeed with no ambiguity findings
@@ -100,6 +103,7 @@ describe("gen-formal contract", () => {
       outputDir: toOutputDirPath("/tmp/test-output"),
       generatedSpecs: [{ capability: "cat-pipeline", requirements: [{ id: "SRC-R1", text: "WHEN pipeline runs, THE system SHALL produce output." }], sourceIdentifiers: ["SRC-R1"] }],
       model: toModelName("test-model"),
+      timeoutMs: 300000,
     });
 
     const writeMock = vi.mocked(writeOutputAtomic);
@@ -125,6 +129,7 @@ describe("gen-formal contract", () => {
       outputDir: toOutputDirPath("/tmp/test-output"),
       generatedSpecs: [{ capability: "cat-pipeline", requirements: [{ id: "SRC-R1", text: "WHEN pipeline runs, THE system SHALL produce output." }], sourceIdentifiers: ["SRC-R1"] }],
       model: toModelName("test-model"),
+      timeoutMs: 300000,
     });
 
     expect(output.findings.some((f) => f.category === "formalization.ambiguity")).toBe(false);
@@ -143,6 +148,7 @@ describe("gen-formal contract", () => {
       outputDir: toOutputDirPath("/tmp/test-output"),
       generatedSpecs: [{ capability: "cat-pipeline", requirements: [{ id: "SRC-R1", text: "WHEN pipeline runs, THE system SHALL produce output." }], sourceIdentifiers: ["SRC-R1"] }],
       model: toModelName("test-model"),
+      timeoutMs: 300000,
     });
 
     // Graceful degradation: error finding recorded instead of throwing.

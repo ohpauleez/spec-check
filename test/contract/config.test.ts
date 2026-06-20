@@ -19,6 +19,8 @@ describe("config loading and precedence", () => {
           inputs: ["from-config"],
           output: "config-output",
           src: "config-src",
+          timeoutMs: 60000,
+          allowArchive: true,
         },
         null,
         2,
@@ -30,6 +32,8 @@ describe("config loading and precedence", () => {
       inputs: ["from-cli"],
       output: "cli-output",
       src: "cli-src",
+      timeoutMs: "45000",
+      allowArchive: false,
       help: false,
       version: false,
       config: configPath,
@@ -43,6 +47,8 @@ describe("config loading and precedence", () => {
     expect(resolved.value.inputs).toEqual(["from-cli"]);
     expect(resolved.value.output).toBe("cli-output");
     expect(resolved.value.src).toBe("cli-src");
+    expect(resolved.value.timeoutMs).toBe(45000);
+    expect(resolved.value.allowArchive).toBe(true);
   });
 
   it("rejects invalid config JSON", async () => {
@@ -55,6 +61,7 @@ describe("config loading and precedence", () => {
       inputs: ["in"],
       help: false,
       version: false,
+      allowArchive: false,
       config: configPath,
     });
 
@@ -64,5 +71,54 @@ describe("config loading and precedence", () => {
     }
 
     expect(resolved.error.kind).toBe("config_parse_error");
+  });
+
+  it("rejects timeout below minimum", async () => {
+    traceSpec("CAT-CLI-TIMEOUT");
+    const resolved = await resolveRunConfig({
+      inputs: ["in"],
+      timeoutMs: "1000",
+      help: false,
+      version: false,
+      allowArchive: false,
+    });
+
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(resolved.error.kind).toBe("timeout_validation_error");
+  });
+
+  it("rejects non-integer timeout", async () => {
+    traceSpec("CAT-CLI-TIMEOUT");
+    const resolved = await resolveRunConfig({
+      inputs: ["in"],
+      timeoutMs: "1.5",
+      help: false,
+      version: false,
+      allowArchive: false,
+    });
+
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(resolved.error.kind).toBe("timeout_validation_error");
+  });
+
+  it("accepts config file timeoutMs without CLI override", async () => {
+    traceSpec("CAT-CLI-TIMEOUT-CONFIG");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-config-timeout-"));
+    const configPath = join(root, "config.json");
+    await writeFile(configPath, JSON.stringify({ timeoutMs: 60000 }), "utf8");
+
+    const resolved = await resolveRunConfig({
+      inputs: ["in"],
+      help: false,
+      version: false,
+      allowArchive: false,
+      config: configPath,
+    });
+
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.timeoutMs).toBe(60000);
   });
 });

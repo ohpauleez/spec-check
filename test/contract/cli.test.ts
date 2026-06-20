@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { traceSpec } from "../support/spec-trace.js";
 import { parseArgv } from "../../src/cli/parse-argv.js";
 import { resolveRunConfig } from "../../src/cli/config.js";
+import { formatCatalogEmptyMessage } from "../../src/cli/run-cli.js";
 
 describe("CLI argument parsing", () => {
   it("parses valid flags and positional paths", () => {
@@ -21,6 +22,9 @@ describe("CLI argument parsing", () => {
       "/usr/bin/z3",
       "--config",
       "config.json",
+      "--timeout-ms",
+      "120000",
+      "--allow-archive",
     ]);
 
     expect(parsed.ok).toBe(true);
@@ -35,6 +39,8 @@ describe("CLI argument parsing", () => {
     expect(parsed.value.caps).toBe("caps.md");
     expect(parsed.value.z3).toBe("/usr/bin/z3");
     expect(parsed.value.config).toBe("config.json");
+    expect(parsed.value.timeoutMs).toBe("120000");
+    expect(parsed.value.allowArchive).toBe(true);
   });
 
   it("rejects unrecognized flags", () => {
@@ -82,11 +88,20 @@ describe("CLI argument parsing", () => {
 
   it("supports equals syntax for flag values", () => {
     traceSpec("CAT-CLI-ARGS", "CAT-CLI-EQSYNTAX");
-    const parsed = parseArgv(["--output=my-dir", "--z3=/usr/bin/z3-4.12"]);
+    const parsed = parseArgv(["--output=my-dir", "--z3=/usr/bin/z3-4.12", "--timeout-ms=45000"]);
     expect(parsed.ok).toBe(true);
     if (!parsed.ok) return;
     expect(parsed.value.output).toBe("my-dir");
     expect(parsed.value.z3).toBe("/usr/bin/z3-4.12");
+    expect(parsed.value.timeoutMs).toBe("45000");
+  });
+
+  it("parses allow-archive as boolean flag", () => {
+    traceSpec("CAT-CLI-ALLOW-ARCH");
+    const parsed = parseArgv(["/tmp/input", "--allow-archive"]);
+    expect(parsed.ok).toBe(true);
+    if (!parsed.ok) return;
+    expect(parsed.value.allowArchive).toBe(true);
   });
 
   it("rejects output directory inside source directory", async () => {
@@ -97,6 +112,7 @@ describe("CLI argument parsing", () => {
       src: "/tmp/project/src",
       help: false,
       version: false,
+      allowArchive: false,
     });
 
     expect(resolved.ok).toBe(false);
@@ -112,6 +128,7 @@ describe("CLI argument parsing", () => {
       src: "/tmp/shared-dir",
       help: false,
       version: false,
+      allowArchive: false,
     });
 
     expect(resolved.ok).toBe(false);
@@ -127,8 +144,48 @@ describe("CLI argument parsing", () => {
       src: "/tmp/project/src",
       help: false,
       version: false,
+      allowArchive: false,
     });
 
     expect(resolved.ok).toBe(true);
+  });
+});
+
+describe("formatCatalogEmptyMessage", () => {
+  it("formats no_recognized_docs with input count", () => {
+    traceSpec("CAT-CATALOG-EMPTY", "RAE-CATALOG-ERROR", "RAE-CATALOG-NODOCS");
+    const msg = formatCatalogEmptyMessage({ kind: "no_recognized_docs", inputCount: 3 });
+    expect(msg).toContain("No OpenSpec documents found");
+    expect(msg).toContain("3");
+  });
+
+  it("formats all_archived with archived count and --allow-archive guidance", () => {
+    traceSpec("CAT-CATALOG-EMPTY", "RAE-CATALOG-ERROR", "RAE-CATALOG-ARCHIVE");
+    const msg = formatCatalogEmptyMessage({ kind: "all_archived", archivedCount: 5 });
+    expect(msg).toContain("5");
+    expect(msg).toContain("--allow-archive");
+  });
+
+  it("formats all_filtered with count and filter reason", () => {
+    traceSpec("CAT-CATALOG-EMPTY", "RAE-CATALOG-ERROR", "RAE-CATALOG-FILTERED");
+    const msg = formatCatalogEmptyMessage({
+      kind: "all_filtered",
+      filteredCount: 2,
+      filterReason: "capability resolution excluded all specs",
+    });
+    expect(msg).toContain("2");
+    expect(msg).toContain("capability resolution excluded all specs");
+  });
+
+  it("handles missing optional fields with safe defaults", () => {
+    traceSpec("CAT-CATALOG-EMPTY", "RAE-SHAPE-CATALOG", "CAT-DISCOVER-EMPTY");
+    const noRecognized = formatCatalogEmptyMessage({ kind: "no_recognized_docs" });
+    expect(noRecognized).toContain("0");
+
+    const allArchived = formatCatalogEmptyMessage({ kind: "all_archived" });
+    expect(allArchived).toContain("0");
+
+    const allFiltered = formatCatalogEmptyMessage({ kind: "all_filtered" });
+    expect(allFiltered).toContain("unknown policy reason");
   });
 });

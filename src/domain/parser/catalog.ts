@@ -235,8 +235,8 @@ function classifyEmptyCatalogReason(input: {
 
   return {
     kind: "all_filtered",
-    filterReason: "active capability resolution excluded all recognized documents",
-    filteredCount: input.recognizedCount - input.activeCount,
+    filterReason: "capability resolution excluded all non-archived recognized documents",
+    filteredCount: input.recognizedCount - input.activeCount - input.excludedArchivedCount,
   };
 }
 

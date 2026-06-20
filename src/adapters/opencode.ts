@@ -291,10 +291,7 @@ function parseOpencodePayload(stdout: string): unknown {
     throwOnErrorEvent(singleEvents);
     const eventPayload = extractPayloadFromEvents(singleEvents);
     if (eventPayload !== undefined) {
-      if (typeof eventPayload === "string") {
-        return extractJsonPayload(eventPayload);
-      }
-      return eventPayload;
+      return extractJsonPayload(eventPayload);
     }
     return extractJsonPayload(trimmed);
   }
@@ -317,10 +314,7 @@ function parseOpencodePayload(stdout: string): unknown {
   if (payload === undefined) {
     throw new Error("missing payload text event");
   }
-  if (typeof payload === "string") {
-    return extractJsonPayload(payload);
-  }
-  return payload;
+  return extractJsonPayload(payload);
 }
 
 /**
@@ -385,7 +379,7 @@ function throwOnErrorEvent(events: readonly unknown[]): void {
  * - No text events → returns `undefined` (not a failure).
  * - Concatenated text is invalid JSON → throws SyntaxError from `JSON.parse`.
  */
-function extractPayloadFromEvents(events: readonly unknown[]): unknown {
+function extractPayloadFromEvents(events: readonly unknown[]): string | undefined {
   const textParts = events
     .map(extractTextPart)
     .filter((value): value is string => value !== undefined);

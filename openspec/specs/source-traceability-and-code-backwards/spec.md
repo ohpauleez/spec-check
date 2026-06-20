@@ -210,7 +210,7 @@ WHEN a canonical requirement or scenario identifier appears in a source code com
 **Postcondition:** Implementation-to-requirement traceability is established through canonical identifiers; the evidence hierarchy determines how strongly this link supports the claim.
 
 ##### Evidence
-- Implementation: [trace.ts:172 traceClaimsToSource](/src/domain/code-backwards/trace.ts#L172) (claim-to-file matching loop)
+- Implementation: [trace.ts:173 traceClaimsToSource](/src/domain/code-backwards/trace.ts#L173) (claim-to-file matching loop)
 - Test: [traceability.test.ts:12 links canonical identifiers and reports unknown identifier](/test/contract/traceability.test.ts#L12)
 
 #### Scenario: Unknown Identifier In Source [STC-ID-UNKNOWN]
@@ -368,10 +368,18 @@ WHEN source-backed generation selects source files within the configured content
 
 **Postcondition:** Large source context remains available to generation without relying on oversized inline arguments.
 
+##### Evidence
+- Implementation: [derive.ts:96 deriveSpecsFromSource](/src/domain/code-backwards/derive.ts#L96), [derive.ts:129 callOpencode files attachment](/src/domain/code-backwards/derive.ts#L129)
+- Test: [derive.test.ts:57 produces EARS-preferring markdown from LLM informalization response](/test/contract/derive.test.ts#L57)
+
 #### Scenario: Keep Blind Boundary In File Transport [STC-SOURCE-FILE-BLIND]
 WHEN the spec-check tool attaches source files for code-derived generation, THE spec-check tool SHALL NOT attach original proposal, design, or requirement documents to that invocation.
 
 **Postcondition:** File-based transport preserves the same blind boundary as inline transport.
+
+##### Evidence
+- Implementation: [derive.ts:319 buildInformalizationPrompt](/src/domain/code-backwards/derive.ts#L319)
+- Test: [derive.test.ts:109 generated output contains source-derived text only (no original requirements)](/test/contract/derive.test.ts#L109)
 
 ### Requirement: Generate Code-Derived Specifications From Source [STC-GEN-SPECS]
 WHEN source-backed analysis is enabled, THE spec-check tool SHALL generate EARS-preferring behavioral specification files per declared capability using only source-scoped evidence, blind to original requirement text, SHALL persist the generated specifications as Markdown files in a `gen_specs/` directory under the configured output directory, and SHALL use the run-configured universal timeout for every external LLM generation invocation.
@@ -390,7 +398,7 @@ WHEN the source tree contains sufficient evidence relevant to a declared capabil
 
 ##### Evidence
 - Implementation: [derive.ts:96 deriveSpecsFromSource](/src/domain/code-backwards/derive.ts#L96)
-- Test: [derive.test.ts:57 produces EARS-preferring markdown from LLM informalization response](/test/contract/derive.test.ts#L57), [derive.test.ts:126 persists gen_specs/{capability}.md via writeOutputAtomic](/test/contract/derive.test.ts#L126), [derive.test.ts:151 returns multiple capabilities from LLM response](/test/contract/derive.test.ts#L151)
+- Test: [derive.test.ts:57 produces EARS-preferring markdown from LLM informalization response](/test/contract/derive.test.ts#L57), [derive.test.ts:134 persists gen_specs/{capability}.md via writeOutputAtomic](/test/contract/derive.test.ts#L134), [derive.test.ts:160 returns multiple capabilities from LLM response](/test/contract/derive.test.ts#L160)
 
 #### Scenario: Capability Name Suggestions From Catalog [STC-GEN-SUGGEST]
 WHEN generating code-derived specifications, THE spec-check tool SHALL provide the LLM with the list of known capability names derived from active catalog paths as soft suggestions for capability naming. THE spec-check tool SHALL NOT include requirement text, identifier lists, or spec content in the suggestions.
@@ -398,8 +406,8 @@ WHEN generating code-derived specifications, THE spec-check tool SHALL provide t
 **Postcondition:** The LLM receives structural metadata (capability names only) that improves naming alignment without violating the blind boundary.
 
 ##### Evidence
-- Implementation: [derive.ts:288 buildInformalizationPrompt](/src/domain/code-backwards/derive.ts#L288)
-- Test: [derive.test.ts:234 includes suggested capability names in LLM prompt when provided](/test/contract/derive.test.ts#L234)
+- Implementation: [derive.ts:319 buildInformalizationPrompt](/src/domain/code-backwards/derive.ts#L319)
+- Test: [derive.test.ts:246 includes suggested capability names in LLM prompt when provided](/test/contract/derive.test.ts#L246)
 
 #### Scenario: EARS Preference With Structured Fallback [STC-GEN-EARS]
 WHEN code semantics support EARS decomposition, THE spec-check tool SHALL generate requirements using EARS patterns. IF code semantics resist EARS decomposition for a code-derived requirement, THEN THE spec-check tool SHALL use structured behavioral prose and SHALL note the deviation.
@@ -407,7 +415,7 @@ WHEN code semantics support EARS decomposition, THE spec-check tool SHALL genera
 **Postcondition:** Generated specs prefer EARS format but do not force unnatural EARS encoding at the expense of accuracy.
 
 ##### Evidence
-- Implementation: [derive.ts:96 deriveSpecsFromSource](/src/domain/code-backwards/derive.ts#L96), [derive.ts:502 formatCapabilityMarkdown](/src/domain/code-backwards/derive.ts#L502)
+- Implementation: [derive.ts:96 deriveSpecsFromSource](/src/domain/code-backwards/derive.ts#L96), [derive.ts:540 formatCapabilityMarkdown](/src/domain/code-backwards/derive.ts#L540)
 - Test: [derive.test.ts:57 produces EARS-preferring markdown from LLM informalization response](/test/contract/derive.test.ts#L57)
 
 #### Scenario: Insufficient Source Evidence [STC-GEN-INSUFFICIENT]
@@ -417,7 +425,7 @@ IF a declared capability lacks sufficient source-scoped evidence for meaningful 
 
 ##### Evidence
 - Implementation: [derive.ts:96 deriveSpecsFromSource](/src/domain/code-backwards/derive.ts#L96)
-- Test: [derive.test.ts:82 returns no specs and warning finding when LLM call fails](/test/contract/derive.test.ts#L82)
+- Test: [derive.test.ts:88 returns no specs and warning finding when LLM call fails](/test/contract/derive.test.ts#L88)
 
 #### Scenario: Blind Generation Boundary [STC-GEN-BLIND]
 WHEN generating code-derived specifications, THE spec-check tool SHALL NOT provide original requirement text, proposal text, or design text to the generation process.
@@ -425,10 +433,10 @@ WHEN generating code-derived specifications, THE spec-check tool SHALL NOT provi
 **Postcondition:** Code-derived specs reflect what the code actually guarantees rather than restating original intent.
 
 ##### Evidence
-- Implementation: [derive.ts:288 buildInformalizationPrompt](/src/domain/code-backwards/derive.ts#L288)
-- Test: [derive.test.ts:102 generated output contains source-derived text only (no original requirements)](/test/contract/derive.test.ts#L102)
+- Implementation: [derive.ts:319 buildInformalizationPrompt](/src/domain/code-backwards/derive.ts#L319)
+- Test: [derive.test.ts:109 generated output contains source-derived text only (no original requirements)](/test/contract/derive.test.ts#L109)
 - Test (property): [code-derived.property.test.ts:12 formalization prompts never include original proposal/design text verbatim](/test/property/code-derived.property.test.ts#L12)
-- Test (integration): [global.invariant.test.ts:163 INV-14: code-derived spec generation never receives original requirement text](/test/invariant/global.invariant.test.ts#L163)
+- Test (integration): [global.invariant.test.ts:160 INV-14: code-derived spec generation never receives original requirement text](/test/invariant/global.invariant.test.ts#L160)
 
 #### Scenario: Restrict Unsupported Evidence [STC-GEN-SCOPE]
 IF a candidate code-derived guarantee depends on evidence outside the provided source scope, THEN THE spec-check tool SHALL exclude that unsupported evidence and SHALL surface the resulting limitation.
@@ -437,12 +445,16 @@ IF a candidate code-derived guarantee depends on evidence outside the provided s
 
 ##### Evidence
 - Implementation: [derive.ts:96 deriveSpecsFromSource](/src/domain/code-backwards/derive.ts#L96)
-- Test: [derive.test.ts:186 returns empty specs when source directory has no scannable files](/test/contract/derive.test.ts#L186)
+- Test: [derive.test.ts:196 returns empty specs when source directory has no scannable files](/test/contract/derive.test.ts#L196)
 
 #### Scenario: Universal LLM Timeout For Code-Derived Generation [STC-GEN-TIMEOUT]
 WHEN the spec-check tool invokes an external LLM to generate code-derived specifications, THE spec-check tool SHALL use the run-configured universal timeout budget.
 
 **Postcondition:** Generation timeout behavior matches every other LLM-backed phase in the run.
+
+##### Evidence
+- Implementation: [derive.ts:131 deriveSpecsFromSource](/src/domain/code-backwards/derive.ts#L131) (passes timeoutMs to callOpencode)
+- Test: [derive.test.ts:57 produces EARS-preferring markdown from LLM informalization response](/test/contract/derive.test.ts#L57)
 
 #### Requirement model
 
@@ -508,7 +520,7 @@ WHEN formalization sampling for a code-derived claim produces an equivalence clu
 
 ##### Evidence
 - Implementation: [gen-formal.ts:64 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L64)
-- Test: [gen-formal.test.ts:40 applies formalizeClaims with schema validation (same pipeline as specs-forward)](/test/contract/gen-formal.test.ts#L40), [gen-formal.test.ts:63 applies clustering with stability threshold 0.6](/test/contract/gen-formal.test.ts#L63)
+- Test: [gen-formal.test.ts:40 applies formalizeClaims with schema validation (same pipeline as specs-forward)](/test/contract/gen-formal.test.ts#L40), [gen-formal.test.ts:65 applies clustering with stability threshold 0.6](/test/contract/gen-formal.test.ts#L65)
 
 #### Scenario: Ambiguous Code-Derived Formalization [STC-FORMAL-AMBIG]
 IF no equivalence cluster meets the stability threshold for a code-derived claim, THEN THE spec-check tool SHALL emit an ambiguity finding and SHALL preserve the distinct interpretations as evidence.
@@ -517,7 +529,7 @@ IF no equivalence cluster meets the stability threshold for a code-derived claim
 
 ##### Evidence
 - Implementation: [gen-formal.ts:64 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L64)
-- Test: [gen-formal.test.ts:111 with single sample clustering never produces ambiguity finding](/test/contract/gen-formal.test.ts#L111)
+- Test: [gen-formal.test.ts:115 with single sample clustering never produces ambiguity finding](/test/contract/gen-formal.test.ts#L115)
 
 #### Scenario: Code-Derived Formalization Failure [STC-FORMAL-FAIL]
 IF all formalization samples for a code-derived claim are invalid after bounded retries, THEN THE spec-check tool SHALL record the failure as an error-severity finding for that capability and SHALL continue with remaining capabilities. THE tool SHALL NOT abort the entire pipeline for a per-capability formalization failure.
@@ -526,12 +538,16 @@ IF all formalization samples for a code-derived claim are invalid after bounded 
 
 ##### Evidence
 - Implementation: [gen-formal.ts:64 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L64)
-- Test: [gen-formal.test.ts:133 records error finding on formalization failure (all samples invalid)](/test/contract/gen-formal.test.ts#L133)
+- Test: [gen-formal.test.ts:138 records error finding on formalization failure (all samples invalid)](/test/contract/gen-formal.test.ts#L138)
 
 #### Scenario: Universal LLM Timeout For Code-Derived Formalization [STC-FORMAL-TIMEOUT]
 WHEN the spec-check tool invokes an external LLM to formalize generated claims, THE spec-check tool SHALL use the run-configured universal timeout budget.
 
 **Postcondition:** Indirect code-derived formalization follows the same timeout policy as direct specs-forward formalization.
+
+##### Evidence
+- Implementation: [gen-formal.ts:64 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L64) (passes timeoutMs to formalizeClaims)
+- Test: [gen-formal.test.ts:40 applies formalizeClaims with schema validation (same pipeline as specs-forward)](/test/contract/gen-formal.test.ts#L40)
 
 #### Requirement model
 
@@ -673,7 +689,7 @@ WHEN the solver confirms that original claim A implies code-derived claim B and 
 - Implementation: [cross-implication-smt.ts:203 classifyRelationship](/src/domain/code-backwards/cross-implication-smt.ts#L203)
 - Test: [cross-implication.test.ts:39 mutual unsat classifies as same](/test/contract/cross-implication.test.ts#L39)
 - Test (property): [cross-implication.property.test.ts:8 classification is deterministic and symmetric by inverse strength labels](/test/property/cross-implication.property.test.ts#L8)
-- Test (integration): [safety-liveness.invariant.test.ts:244 LIVE-13: if z3 responds within timeout, cross-side implication completes](/test/invariant/safety-liveness.invariant.test.ts#L244)
+- Test (integration): [safety-liveness.invariant.test.ts:246 LIVE-13: if z3 responds within timeout, cross-side implication completes](/test/invariant/safety-liveness.invariant.test.ts#L246)
 - Example:
 ```typescript
 const { classifyRelationship } = await import("./src/domain/code-backwards/cross-implication-smt.ts");
@@ -959,8 +975,8 @@ WHEN both solver implication results and blind LLM comparison results are availa
 **Postcondition:** Reviewers receive both a formal verdict and a human-readable explanation.
 
 ##### Evidence
-- Implementation: [blind-compare.ts:54 runBlindComparison](/src/domain/code-backwards/blind-compare.ts#L54), [blind-compare.ts:154 extractRationale](/src/domain/code-backwards/blind-compare.ts#L154)
-- Test: [blind-compare.test.ts:32 attaches rationale finding with classification and LLM-extracted rationale](/test/contract/blind-compare.test.ts#L32), [blind-compare.test.ts:126 extractRationale returns rationale field, falls back to explanation, defaults](/test/contract/blind-compare.test.ts#L126)
+- Implementation: [blind-compare.ts:54 runBlindComparison](/src/domain/code-backwards/blind-compare.ts#L54), [blind-compare.ts:156 extractRationale](/src/domain/code-backwards/blind-compare.ts#L156)
+- Test: [blind-compare.test.ts:32 attaches rationale finding with classification and LLM-extracted rationale](/test/contract/blind-compare.test.ts#L32), [blind-compare.test.ts:130 extractRationale returns rationale field, falls back to explanation, defaults](/test/contract/blind-compare.test.ts#L130)
 - Test (property): [blind-compare.property.test.ts:45 extractRationale never throws on arbitrary input](/test/property/blind-compare.property.test.ts#L45)
 - Example:
 ```typescript
@@ -977,12 +993,16 @@ IF cross-side implication results are unavailable or the solver-layer classifica
 
 ##### Evidence
 - Implementation: [blind-compare.ts:54 runBlindComparison](/src/domain/code-backwards/blind-compare.ts#L54)
-- Test: [blind-compare.test.ts:53 uses warning severity for uncertain classifications, info for definitive](/test/contract/blind-compare.test.ts#L53)
+- Test: [blind-compare.test.ts:55 uses warning severity for uncertain classifications, info for definitive](/test/contract/blind-compare.test.ts#L55)
 
 #### Scenario: Universal LLM Timeout For Blind Comparison [STC-COMPARE-TIMEOUT]
 WHEN the spec-check tool invokes blind comparison, THE spec-check tool SHALL use the run-configured universal timeout budget.
 
 **Postcondition:** Blind comparison timeout behavior matches all other LLM-backed phases.
+
+##### Evidence
+- Implementation: [blind-compare.ts:54 runBlindComparison](/src/domain/code-backwards/blind-compare.ts#L54) (passes timeoutMs to callOpencode)
+- Test: [blind-compare.test.ts:32 attaches rationale finding with classification and LLM-extracted rationale](/test/contract/blind-compare.test.ts#L32)
 
 #### Scenario: Prevent Requirement-Text Leakage [STC-COMPARE-BLIND]
 IF the blind comparison boundary would expose original requirement text to the code-derived comparison side, THEN THE spec-check tool SHALL prevent that comparison path and SHALL surface the boundary violation as an analysis defect.
@@ -990,10 +1010,10 @@ IF the blind comparison boundary would expose original requirement text to the c
 **Postcondition:** Blind comparison remains structurally separated from original requirement text.
 
 ##### Evidence
-- Implementation: [blind-compare.ts:131 buildBlindPrompt](/src/domain/code-backwards/blind-compare.ts#L131)
-- Test: [blind-compare.test.ts:84 emits blind_boundary_violation error when generated context is missing](/test/contract/blind-compare.test.ts#L84), [blind-compare.test.ts:97 buildBlindPrompt contains only generated-side context](/test/contract/blind-compare.test.ts#L97)
+- Implementation: [blind-compare.ts:133 buildBlindPrompt](/src/domain/code-backwards/blind-compare.ts#L133)
+- Test: [blind-compare.test.ts:87 emits blind_boundary_violation error when generated context is missing](/test/contract/blind-compare.test.ts#L87), [blind-compare.test.ts:101 buildBlindPrompt contains only generated-side context](/test/contract/blind-compare.test.ts#L101)
 - Test (property): [blind-compare.property.test.ts:12 buildBlindPrompt never exposes original requirement text](/test/property/blind-compare.property.test.ts#L12)
-- Test (integration): [global.invariant.test.ts:182 INV-15: blind comparison prompts never expose original requirement text](/test/invariant/global.invariant.test.ts#L182), [safety-liveness.invariant.test.ts:99 SAFE-5: no blind comparison exposes original requirement text](/test/invariant/safety-liveness.invariant.test.ts#L99)
+- Test (integration): [global.invariant.test.ts:179 INV-15: blind comparison prompts never expose original requirement text](/test/invariant/global.invariant.test.ts#L179), [safety-liveness.invariant.test.ts:99 SAFE-5: no blind comparison exposes original requirement text](/test/invariant/safety-liveness.invariant.test.ts#L99)
 
 #### Scenario: Sanitize Untrusted Content In Code Fences [STC-COMPARE-FENCE]
 WHEN the spec-check tool embeds untrusted document content inside markdown code fences for comparison prompts, THE spec-check tool SHALL sanitize runs of three or more backticks in the content to prevent premature fence closure.
@@ -1002,7 +1022,7 @@ WHEN the spec-check tool embeds untrusted document content inside markdown code 
 
 ##### Evidence
 - Implementation: [fence.ts:12 sanitizeForCodeFence](/src/domain/fence.ts#L12)
-- Test: [blind-compare.test.ts:111 buildBlindPrompt escapes backtick runs in generatedSummary](/test/contract/blind-compare.test.ts#L111)
+- Test: [blind-compare.test.ts:115 buildBlindPrompt escapes backtick runs in generatedSummary](/test/contract/blind-compare.test.ts#L115)
 - Example:
 ```typescript
 const { sanitizeForCodeFence } = await import("./src/domain/fence.ts");

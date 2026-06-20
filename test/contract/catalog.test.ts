@@ -130,4 +130,28 @@ describe("catalog contracts", () => {
       expect(result.value.emptyReason.filterReason).toContain("capability resolution");
     }
   });
+
+  it("reports correct filteredCount when inputs contain both archived and unresolvable docs", async () => {
+    traceSpec("CAT-EMPTY-FILTERED", "CAT-EMPTY-ARCHIVE");
+    // Mix: one archived spec (excluded by archive policy) + one loose spec (filtered by capability resolution).
+    const root = await mkdtemp(join(tmpdir(), "spec-check-catalog-mixed-"));
+    // Archived spec in the conventional archive path.
+    const archivedDir = join(root, "openspec", "changes", "archive", "old", "specs", "foo");
+    await mkdir(archivedDir, { recursive: true });
+    await writeFile(join(archivedDir, "spec.md"), "## ADDED Requirements\n", "utf8");
+    // Loose spec outside a "specs/" segment — filtered by capability resolution.
+    const looseDir = join(root, "loose-docs");
+    await mkdir(looseDir, { recursive: true });
+    await writeFile(join(looseDir, "spec.md"), "## ADDED Requirements\n", "utf8");
+
+    const result = await buildCatalog([archivedDir, looseDir]);
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.catalog.documents.length).toBe(0);
+    expect(result.value.emptyReason?.kind).toBe("all_filtered");
+    if (result.value.emptyReason?.kind === "all_filtered") {
+      // filteredCount should only count the non-archived doc (1), not both (2).
+      expect(result.value.emptyReason.filteredCount).toBe(1);
+    }
+  });
 });

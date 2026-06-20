@@ -128,15 +128,51 @@ WHEN catalog construction reports `no_recognized_docs`, THE spec-check tool SHAL
 
 **Postcondition:** Users can distinguish missing relevant inputs from archive-policy exclusions.
 
+##### Evidence
+- Implementation: [run-cli.ts:64 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L64), [catalog.ts:229 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L229)
+- Test: [cli.test.ts:155 formats no_recognized_docs with input count](/test/contract/cli.test.ts#L155), [catalog.test.ts:101 returns no_recognized_docs for directories without OpenSpec docs](/test/contract/catalog.test.ts#L101)
+- Test (integration): [catalog-abort.integration.test.ts:52 aborts pipeline on no_recognized_docs](/test/integration/catalog-abort.integration.test.ts#L52)
+- Example:
+```typescript
+const { formatCatalogEmptyMessage } = await import("./src/cli/run-cli.ts");
+const msg = formatCatalogEmptyMessage({ kind: "no_recognized_docs", inputCount: 3 }); //=> type String
+msg.includes("No OpenSpec documents found"); //=> true
+msg.includes("3"); //=> true
+```
+
 #### Scenario: Report Archived-Only Inputs [RAE-CATALOG-ARCHIVE]
 WHEN catalog construction reports `all_archived`, THE spec-check tool SHALL emit a message explaining that all recognized documents are archived and SHALL recommend `--allow-archive`.
 
 **Postcondition:** Users receive the specific remediation that can admit their chosen archived inputs.
 
+##### Evidence
+- Implementation: [run-cli.ts:66 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L66), [catalog.ts:232 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L232)
+- Test: [cli.test.ts:162 formats all_archived with archived count and --allow-archive guidance](/test/contract/cli.test.ts#L162), [catalog.test.ts:27 excludes archived change specs by default](/test/contract/catalog.test.ts#L27)
+- Test (integration): [catalog-abort.integration.test.ts:81 aborts pipeline on all_archived](/test/integration/catalog-abort.integration.test.ts#L81)
+- Example:
+```typescript
+const { formatCatalogEmptyMessage } = await import("./src/cli/run-cli.ts");
+const msg = formatCatalogEmptyMessage({ kind: "all_archived", archivedCount: 5 }); //=> type String
+msg.includes("--allow-archive"); //=> true
+msg.includes("5"); //=> true
+```
+
 #### Scenario: Report Policy-Filtered Inputs [RAE-CATALOG-FILTERED]
 WHEN catalog construction reports `all_filtered`, THE spec-check tool SHALL emit a message that names the policy reason for exclusion.
 
 **Postcondition:** Policy-based exclusions remain explainable instead of collapsing into a generic empty result.
+
+##### Evidence
+- Implementation: [run-cli.ts:68 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L68), [catalog.ts:236 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L236)
+- Test: [cli.test.ts:169 formats all_filtered with count and filter reason](/test/contract/cli.test.ts#L169), [catalog.test.ts:113 returns all_filtered when all recognized docs are excluded](/test/contract/catalog.test.ts#L113)
+- Test (integration): [catalog-abort.integration.test.ts:110 aborts pipeline on all_filtered](/test/integration/catalog-abort.integration.test.ts#L110)
+- Example:
+```typescript
+const { formatCatalogEmptyMessage } = await import("./src/cli/run-cli.ts");
+const msg = formatCatalogEmptyMessage({ kind: "all_filtered", filteredCount: 2, filterReason: "capability resolution" }); //=> type String
+msg.includes("capability resolution"); //=> true
+msg.includes("2"); //=> true
+```
 
 ### Requirement: Emit Bounded Analysis Reports [RAE-EMIT-REPORTS]
 WHEN one or more analysis phases complete, THE spec-check tool SHALL write the phase reports and synthesized summary reports defined for the selected analysis mode under the configured output directory. IF the run stops at catalog construction because no active documents survive, THEN THE spec-check tool SHALL report the catalog error instead of emitting vacuous downstream analysis reports.
@@ -152,9 +188,9 @@ WHEN specs-forward analysis completes for a run, THE spec-check tool SHALL emit 
 **Postcondition:** Reviewers can inspect each analytical pass separately instead of relying only on a synthesized summary.
 
 ##### Evidence
-- Implementation: [render.ts:87 writePhaseReports()](/src/domain/reporting/render.ts#L87), [run-cli.ts:290 runReportingPhase()](/src/cli/run-cli.ts#L290)
+- Implementation: [render.ts:87 writePhaseReports()](/src/domain/reporting/render.ts#L87), [run-cli.ts:332 runReportingPhase()](/src/cli/run-cli.ts#L332)
 - Test: [reporting.test.ts:21 writes phase reports at correct naming convention](/test/contract/reporting.test.ts#L21)
-- Test (integration): [specs-forward.integration.test.ts:18 produces phase reports and summary](/test/integration/specs-forward.integration.test.ts#L18), [pipeline.integration.test.ts:321 full pipeline produces summary with all finding categories](/test/integration/pipeline.integration.test.ts#L321)
+- Test (integration): [specs-forward.integration.test.ts:18 produces phase reports and summary](/test/integration/specs-forward.integration.test.ts#L18), [pipeline.integration.test.ts:323 full pipeline produces summary with all finding categories](/test/integration/pipeline.integration.test.ts#L323)
 
 #### Scenario: Emit Code-Derived Evidence Directories [RAE-REPORT-GENSPECS]
 WHEN code-backwards analysis completes for a run, THE spec-check tool SHALL persist the `gen_specs/` directory containing code-derived Markdown specifications and the `gen_specs_smt/` directory containing code-derived SMT-LIB artifacts under the configured output directory.
@@ -162,7 +198,7 @@ WHEN code-backwards analysis completes for a run, THE spec-check tool SHALL pers
 **Postcondition:** Code-derived intermediate artifacts are available for reviewer inspection alongside reports.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:360 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L360)
+- Implementation: [pipeline-helpers.ts:361 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L361)
 - Test (integration): [pipeline.integration.test.ts:160 code-derived spec generation produces gen_specs files](/test/integration/pipeline.integration.test.ts#L160)
 
 #### Scenario: Explain Skipped Report Scope [RAE-REPORT-SKIP]
@@ -179,6 +215,10 @@ IF an optional phase is not enabled for a run, THEN THE spec-check tool SHALL ex
 IF the catalog phase ends in `CatalogError`, THEN THE spec-check tool SHALL NOT emit downstream qualitative, formal, or comparison reports for that run.
 
 **Postcondition:** Report output accurately reflects that analysis never proceeded past catalog construction.
+
+##### Evidence
+- Implementation: [run-cli.ts:180 runIngestionPhases()](/src/cli/run-cli.ts#L180)
+- Test (integration): [catalog-abort.integration.test.ts:52 aborts pipeline on no_recognized_docs](/test/integration/catalog-abort.integration.test.ts#L52), [catalog-abort.integration.test.ts:81 aborts pipeline on all_archived](/test/integration/catalog-abort.integration.test.ts#L81), [catalog-abort.integration.test.ts:110 aborts pipeline on all_filtered](/test/integration/catalog-abort.integration.test.ts#L110)
 
 #### Requirement model
 
@@ -239,7 +279,7 @@ WHEN the qualitative analysis phase completes its first pass, THE spec-check too
 ##### Evidence
 - Implementation: [render.ts:99 writePhaseReports()](/src/domain/reporting/render.ts#L99)
 - Test: [reporting.test.ts:21 writes phase reports at correct naming convention](/test/contract/reporting.test.ts#L21)
-- Test (integration): [pipeline.integration.test.ts:321 full pipeline produces summary](/test/integration/pipeline.integration.test.ts#L321)
+- Test (integration): [pipeline.integration.test.ts:323 full pipeline produces summary](/test/integration/pipeline.integration.test.ts#L323)
 
 #### Scenario: Code-Derived Logic Report Named Correctly [RAE-NAMES-GENLOGIC]
 WHEN code-derived solver analysis completes, THE spec-check tool SHALL write the report to `report_2.logic.md` under the output directory.
@@ -258,7 +298,7 @@ WHEN the synthesized summary is generated, THE spec-check tool SHALL write it to
 ##### Evidence
 - Implementation: [render.ts:196 writeSummaryReport()](/src/domain/reporting/render.ts#L196)
 - Test: [reporting.test.ts:36 writes summary report at report_summary.md](/test/contract/reporting.test.ts#L36)
-- Test (integration): [pipeline.integration.test.ts:321 full pipeline produces summary](/test/integration/pipeline.integration.test.ts#L321)
+- Test (integration): [pipeline.integration.test.ts:323 full pipeline produces summary](/test/integration/pipeline.integration.test.ts#L323)
 
 #### Requirement model
 
@@ -297,9 +337,9 @@ WHEN a finding depends on solver analysis or sampled formalization output, THE s
 **Postcondition:** Formal conclusions remain auditable after the run completes.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:360 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L360)
+- Implementation: [pipeline-helpers.ts:361 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L361)
 - Test: [coverage-gaps.test.ts:44 solver and model artifacts are preserved](/test/contract/coverage-gaps.test.ts#L44)
-- Test (invariant): [global.invariant.test.ts:209 INV-4 + INV-13: solver artifacts are persisted](/test/invariant/global.invariant.test.ts#L209)
+- Test (invariant): [global.invariant.test.ts:206 INV-4 + INV-13: solver artifacts are persisted](/test/invariant/global.invariant.test.ts#L206)
 
 #### Scenario: Preserve Cross-Side Implication Evidence [RAE-EVID-CROSSIMPLY]
 WHEN a code-backwards classification depends on cross-side implication analysis, THE spec-check tool SHALL preserve the implication queries, solver results, and classification rationale as evidence attached to the finding.
@@ -307,9 +347,9 @@ WHEN a code-backwards classification depends on cross-side implication analysis,
 **Postcondition:** Cross-side comparison verdicts are traceable to their formal basis.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:446 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L446)
-- Test (invariant): [global.invariant.test.ts:209 INV-4 + INV-13: solver artifacts are persisted](/test/invariant/global.invariant.test.ts#L209)
-- Test (integration): [pipeline.integration.test.ts:271 cross-side comparison pipeline](/test/integration/pipeline.integration.test.ts#L271)
+- Implementation: [pipeline-helpers.ts:447 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L447)
+- Test (invariant): [global.invariant.test.ts:206 INV-4 + INV-13: solver artifacts are persisted](/test/invariant/global.invariant.test.ts#L206)
+- Test (integration): [pipeline.integration.test.ts:272 cross-side comparison pipeline](/test/integration/pipeline.integration.test.ts#L272)
 
 #### Scenario: Prevent Unsupported Verdict [RAE-EVID-FAIL]
 IF a final report conclusion would be emitted without preserved provenance or supporting evidence, THEN THE spec-check tool SHALL suppress that unsupported verdict and SHALL surface the missing-evidence condition as a defect.
@@ -326,7 +366,7 @@ WHEN a finding depends on an LLM-backed analysis response, THE spec-check tool S
 **Postcondition:** No final verdict rests on an unpreserved LLM response.
 
 ##### Evidence
-- Implementation: [qualitative.ts:24 rawResponses](/src/domain/spec-forward/qualitative.ts#L24)
+- Implementation: [qualitative.ts:30 rawResponses](/src/domain/spec-forward/qualitative.ts#L30)
 - Test: [qualitative.test.ts:21 runQualitativePasses returns merged findings](/test/contract/qualitative.test.ts#L21)
 - Test (property): [code-derived.property.test.ts:40 qualitative review prompts fence all documents](/test/property/code-derived.property.test.ts#L40)
 - Test (invariant): [global.invariant.test.ts:125 INV-11: prompts fence document content](/test/invariant/global.invariant.test.ts#L125), [safety-liveness.invariant.test.ts:156 LIVE-10: qualitative analysis completes](/test/invariant/safety-liveness.invariant.test.ts#L156)
@@ -399,6 +439,20 @@ IF a finding would be emitted without a required field, THEN THE spec-check tool
 WHEN the tool surfaces a catalog-empty diagnostic, THE spec-check tool SHALL include the empty-catalog cause and actionable remediation text in the surfaced message.
 
 **Postcondition:** Catalog errors meet the same reviewability standard as normal findings.
+
+##### Evidence
+- Implementation: [run-cli.ts:56 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L56)
+- Test: [cli.test.ts:180 handles missing optional fields with safe defaults](/test/contract/cli.test.ts#L180)
+- Example:
+```typescript
+const { formatCatalogEmptyMessage } = await import("./src/cli/run-cli.ts");
+const msg1 = formatCatalogEmptyMessage({ kind: "no_recognized_docs" }); //=> type String
+msg1.length > 0; //=> true
+const msg2 = formatCatalogEmptyMessage({ kind: "all_archived" }); //=> type String
+msg2.includes("--allow-archive"); //=> true
+const msg3 = formatCatalogEmptyMessage({ kind: "all_filtered" }); //=> type String
+msg3.includes("unknown policy reason"); //=> true
+```
 
 #### Requirement model
 
@@ -500,7 +554,7 @@ WHEN all selected outputs are written successfully, THE spec-check tool SHALL wr
 **Postcondition:** Consumers can treat manifest presence as the marker of a completed run.
 
 ##### Evidence
-- Implementation: [manifest.ts:106 writeManifest()](/src/domain/reporting/manifest.ts#L106), [run-cli.ts:316 runReportingPhase()](/src/cli/run-cli.ts#L316)
+- Implementation: [manifest.ts:106 writeManifest()](/src/domain/reporting/manifest.ts#L106), [run-cli.ts:358 runReportingPhase()](/src/cli/run-cli.ts#L358)
 - Test: [manifest.test.ts:13 writes checksums and manifest last](/test/contract/manifest.test.ts#L13)
 - Test (integration): [pipeline.integration.test.ts:209 manifest checksums match actual file content](/test/integration/pipeline.integration.test.ts#L209)
 
@@ -510,7 +564,7 @@ IF the run fails before all selected outputs are finalized, THEN THE spec-check 
 **Postcondition:** Partial runs cannot be mistaken for completed analyses.
 
 ##### Evidence
-- Implementation: [run-cli.ts:290 runReportingPhase()](/src/cli/run-cli.ts#L290)
+- Implementation: [run-cli.ts:332 runReportingPhase()](/src/cli/run-cli.ts#L332)
 - Test: [coverage-gaps.test.ts:59 manifest absence signals incomplete run](/test/contract/coverage-gaps.test.ts#L59)
 
 #### Scenario: Invalidate Stale Manifest From Prior Run [RAE-MANIFEST-STALE]
@@ -519,7 +573,7 @@ IF the output directory already contains a manifest from a previous run WHEN a n
 **Postcondition:** Only a successfully completed run can leave a manifest in the output directory.
 
 ##### Evidence
-- Implementation: [manifest.ts:133 invalidateStaleManifest()](/src/domain/reporting/manifest.ts#L133), [run-cli.ts:127 runIngestionPhases()](/src/cli/run-cli.ts#L127)
+- Implementation: [manifest.ts:133 invalidateStaleManifest()](/src/domain/reporting/manifest.ts#L133), [run-cli.ts:164 runIngestionPhases()](/src/cli/run-cli.ts#L164)
 - Test: [manifest.test.ts:46 removes stale manifest from prior run](/test/contract/manifest.test.ts#L46), [manifest.test.ts:59 returns false when no stale manifest exists](/test/contract/manifest.test.ts#L59)
 
 #### Requirement model
@@ -756,7 +810,7 @@ WHEN an output file write completes successfully, THE spec-check tool SHALL rena
 ##### Evidence
 - Implementation: [fs.ts:66 writeOutputAtomic()](/src/adapters/fs.ts#L66)
 - Test: [fs.test.ts:33 writes atomic output file with correct content](/test/contract/fs.test.ts#L33)
-- Test (invariant): [global.invariant.test.ts:199 INV-3: writeOutputAtomic produces correct content via atomic rename](/test/invariant/global.invariant.test.ts#L199)
+- Test (invariant): [global.invariant.test.ts:196 INV-3: writeOutputAtomic produces correct content via atomic rename](/test/invariant/global.invariant.test.ts#L196)
 - Example:
 ```typescript
 const { writeOutputAtomic } = await import("./src/adapters/fs.ts");

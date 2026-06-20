@@ -158,15 +158,45 @@ WHEN an external LLM response wraps a valid JSON payload in markdown code fences
 
 **Postcondition:** Common markdown formatting does not cause an otherwise valid payload to be rejected.
 
+##### Evidence
+- Implementation: [opencode.ts:409 extractJsonPayload()](/src/adapters/opencode.ts#L409), [opencode.ts:437 stripMarkdownFences()](/src/adapters/opencode.ts#L437)
+- Test: [opencode.test.ts:147 accepts markdown-fenced JSON payloads](/test/contract/opencode.test.ts#L147)
+- Example:
+```typescript
+const { extractJsonPayload } = await import("./src/adapters/opencode.ts");
+const result = extractJsonPayload('```json\n{"findings":[]}\n```'); //=> type Object
+result.findings.length; //=> 0
+```
+
 #### Scenario: Accept Prefixed Or Suffixed JSON [FLA-JSON-WRAP]
 WHEN an external LLM response contains explanatory text before or after a valid JSON object or array, THE spec-check tool SHALL extract the first balanced JSON value and SHALL parse it.
 
 **Postcondition:** Recoverable wrapper text does not prevent downstream schema validation.
 
+##### Evidence
+- Implementation: [opencode.ts:409 extractJsonPayload()](/src/adapters/opencode.ts#L409), [opencode.ts:470 extractFirstJsonValue()](/src/adapters/opencode.ts#L470)
+- Test: [opencode.test.ts:168 accepts wrapped prefixed/suffixed JSON payloads](/test/contract/opencode.test.ts#L168)
+- Test (property): [opencode.test.ts:189 accepts prefix+json wrappers when prefix excludes braces/brackets](/test/contract/opencode.test.ts#L189)
+- Example:
+```typescript
+const { extractJsonPayload } = await import("./src/adapters/opencode.ts");
+const result = extractJsonPayload('analysis follows\n{"findings":[]}\nthanks'); //=> type Object
+result.findings.length; //=> 0
+```
+
 #### Scenario: Reject Irrecoverable JSON [FLA-JSON-FAIL]
 IF an external LLM response does not contain a recoverable valid JSON payload, THEN THE spec-check tool SHALL reject the response with a diagnostic parse error.
 
 **Postcondition:** Malformed payloads are surfaced explicitly rather than accepted silently.
+
+##### Evidence
+- Implementation: [opencode.ts:409 extractJsonPayload()](/src/adapters/opencode.ts#L409)
+- Test: [opencode.test.ts:459 throws on truncated JSON (unbalanced braces)](/test/contract/opencode.test.ts#L459), [opencode.test.ts:465 throws on input with only prose text](/test/contract/opencode.test.ts#L465)
+- Example:
+```typescript
+const { extractJsonPayload } = await import("./src/adapters/opencode.ts");
+extractJsonPayload("I cannot provide a JSON response"); //=> throws Error
+```
 
 ### Requirement: Formalize Requirement And Scenario Claims Into Logic Artifacts [FLA-FORMALIZE-CLAIMS]
 WHEN requirement and scenario claims are available for formal analysis, THE spec-check tool SHALL translate each claim into a typed logic representation and generated SMT-LIB artifacts that preserve the claim identifier, source provenance, obligation level, and supporting declarations needed for solver analysis, and SHALL use the run-configured universal timeout for every external LLM formalization invocation.
@@ -183,9 +213,9 @@ WHEN a claim is selected for formalization, THE spec-check tool SHALL emit inspe
 **Postcondition:** Formal analysis inputs are available as reviewable evidence linked to their source claims.
 
 ##### Evidence
-- Implementation: [formalize.ts:154 formalizeClaims()](/src/domain/formal/formalize.ts#L154), [formalize.ts:467 buildFormalizationPrompt()](/src/domain/formal/formalize.ts#L467)
-- Test: [formalize.test.ts:45 formalizeClaims produces valid candidates](/test/contract/formalize.test.ts#L45), [formalize.test.ts:152 buildFormalizationPrompt fences claim text as untrusted](/test/contract/formalize.test.ts#L152)
-- Test (invariant): [safety-liveness.invariant.test.ts:176 LIVE-11: formalization completes with valid output](/test/invariant/safety-liveness.invariant.test.ts#L176)
+- Implementation: [formalize.ts:154 formalizeClaims()](/src/domain/formal/formalize.ts#L154), [formalize.ts:476 buildFormalizationPrompt()](/src/domain/formal/formalize.ts#L476)
+- Test: [formalize.test.ts:45 formalizeClaims produces valid candidates](/test/contract/formalize.test.ts#L45), [formalize.test.ts:159 buildFormalizationPrompt fences claim text as untrusted](/test/contract/formalize.test.ts#L159)
+- Test (invariant): [safety-liveness.invariant.test.ts:177 LIVE-11: formalization completes with valid output](/test/invariant/safety-liveness.invariant.test.ts#L177)
 
 #### Scenario: Abort On Complete Formalization Failure [FLA-FORMAL-FAIL]
 IF no formalization candidates are produced for the entire phase after bounded retries, THEN THE spec-check tool SHALL abort the run with exit code `2` rather than continue with zero formal evidence.
@@ -193,8 +223,8 @@ IF no formalization candidates are produced for the entire phase after bounded r
 **Postcondition:** No solver conclusion is produced when the formalization phase yields zero candidates.
 
 ##### Evidence
-- Implementation: [formalize.ts:395 sampleFormalizationsForClaim()](/src/domain/formal/formalize.ts#L395)
-- Test: [formalize.test.ts:86 returns error when all samples invalid after max attempts](/test/contract/formalize.test.ts#L86), [formalize.test.ts:108 returns error when callOpencode fails fatally](/test/contract/formalize.test.ts#L108)
+- Implementation: [formalize.ts:402 sampleFormalizationsForClaim()](/src/domain/formal/formalize.ts#L402)
+- Test: [formalize.test.ts:90 returns error when all samples invalid after max attempts](/test/contract/formalize.test.ts#L90), [formalize.test.ts:113 returns error when callOpencode fails fatally](/test/contract/formalize.test.ts#L113)
 
 #### Scenario: Continue With Partial Formalization Results [FLA-FORMAL-PARTIAL]
 IF some claims fail formalization but at least one claim succeeds, THEN THE spec-check tool SHALL continue with the successful candidates, SHALL collect per-claim failures as errors in the formalization output, and SHALL let callers decide severity based on the ratio of successes to failures.
@@ -203,12 +233,16 @@ IF some claims fail formalization but at least one claim succeeds, THEN THE spec
 
 ##### Evidence
 - Implementation: [formalize.ts:154 formalizeClaims()](/src/domain/formal/formalize.ts#L154)
-- Test: [formalize.test.ts:162 returns successful candidates alongside errors on partial failure](/test/contract/formalize.test.ts#L162)
+- Test: [formalize.test.ts:169 returns successful candidates alongside errors on partial failure](/test/contract/formalize.test.ts#L169)
 
 #### Scenario: Universal LLM Timeout For Formalization [FLA-FORMAL-TIMEOUT]
 WHEN the spec-check tool invokes an external LLM to formalize a claim or claim batch, THE spec-check tool SHALL use the run-configured universal timeout budget for that invocation.
 
 **Postcondition:** Formalization timeout behavior is consistent with every other LLM-backed phase in the same run.
+
+##### Evidence
+- Implementation: [formalize.ts:154 formalizeClaims()](/src/domain/formal/formalize.ts#L154), [opencode.ts:86 callOpencode()](/src/adapters/opencode.ts#L86), [timeout.ts:16 DEFAULT_TIMEOUT_MS](/src/domain/timeout.ts#L16)
+- Test: [formalize.test.ts:45 formalizeClaims produces valid candidates](/test/contract/formalize.test.ts#L45), [opencode.test.ts:403 retries on timeout up to retry limit then returns timeout error](/test/contract/opencode.test.ts#L403)
 
 #### Requirement model
 
@@ -317,8 +351,8 @@ IF all formalization samples for a claim are invalid after bounded retries, THEN
 **Postcondition:** Per-claim formalization failures are collected as errors; remaining valid claims proceed to clustering.
 
 ##### Evidence
-- Implementation: [formalize.ts:395 sampleFormalizationsForClaim()](/src/domain/formal/formalize.ts#L395)
-- Test: [formalize.test.ts:86 returns error when all samples invalid after max attempts](/test/contract/formalize.test.ts#L86)
+- Implementation: [formalize.ts:402 sampleFormalizationsForClaim()](/src/domain/formal/formalize.ts#L402)
+- Test: [formalize.test.ts:90 returns error when all samples invalid after max attempts](/test/contract/formalize.test.ts#L90)
 
 #### Requirement model
 

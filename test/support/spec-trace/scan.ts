@@ -1,6 +1,6 @@
-export const TRACE_SPEC_IDENTIFIER_PATTERN = /^[A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+$/;
+export const TRACE_SPEC_IDENTIFIER_PATTERN = /^[A-Z][A-Z0-9]+(?:-[A-Z0-9]{2,})+$/;
 
-const BRACKETED_IDENTIFIER_PATTERN = /\[([A-Z][A-Z0-9]*(?:-[A-Z0-9]+)+)\]/g;
+const BRACKETED_IDENTIFIER_PATTERN = /\[([A-Z][A-Z0-9]+(?:-[A-Z0-9]{2,})+)\]/g;
 const HEADING_PATTERN = /^#{1,6}\s+((?:Requirement|Scenario):\s+.+)$/;
 
 /**

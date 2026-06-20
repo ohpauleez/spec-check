@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { traceSpec } from "../support/spec-trace.js";
 import {
   exitCodeFromCategory,
   exitCodeForError,
@@ -26,6 +27,7 @@ describe("error utilities", () => {
   });
 
   it("maps CatalogError to exit code 5", () => {
+    traceSpec("RAE-CATALOG-ERROR");
     expect(exitCodeFromCategory("CatalogError")).toBe(5);
   });
 

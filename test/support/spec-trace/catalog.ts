@@ -212,10 +212,30 @@ function mergeScannedEntries(
       continue;
     }
 
+    if (isChangeSpecPath(existing.file) && !isChangeSpecPath(entry.file)) {
+      continue;
+    }
+
+    if (!isChangeSpecPath(existing.file) && isChangeSpecPath(entry.file)) {
+      entriesByIdentifier.set(entry.identifier, entry);
+      continue;
+    }
+
     throw new Error(
       `Duplicate canonical identifier ${entry.identifier}: ${formatCatalogEntry(existing)} and ${formatCatalogEntry(entry)}`,
     );
   }
+}
+
+/**
+ * Check whether a canonical spec path comes from an active OpenSpec change.
+ *
+ * @param filePath - absolute or repository-relative spec path
+ * @returns true when the path is under `openspec/changes/`
+ */
+function isChangeSpecPath(filePath: string): boolean {
+  const normalized = filePath.replace(/\\/gu, "/");
+  return normalized.includes("/openspec/changes/");
 }
 
 /**

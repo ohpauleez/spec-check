@@ -139,6 +139,8 @@ function parseConfigError(error: ConfigError): SpecCheckError {
         "ConfigError",
         `config file failed validation: ${error.path}${error.message.length > 0 ? ` (${error.message})` : ""}`,
       );
+    case "timeout_validation_error":
+      return makeTypedError("ConfigError", error.message);
     default:
       return assertNever(error);
   }
@@ -160,7 +162,7 @@ function printHelp(): void {
       `spec-check v${SPEC_CHECK_VERSION}`,
       "",
       "Usage:",
-      "  spec-check <input...> [--output <dir>] [--src <dir>] [--model <name>] [--caps <path>] [--z3 <path>] [--config <path>]",
+      "  spec-check <input...> [--output <dir>] [--src <dir>] [--model <name>] [--caps <path>] [--z3 <path>] [--config <path>] [--timeout-ms <ms>] [--allow-archive]",
       "  spec-check --help",
       "  spec-check --version",
       "",
@@ -171,6 +173,8 @@ function printHelp(): void {
       "  --caps <path>    Optional capability selection file",
       "  --z3 <path>      Path to z3 binary",
       "  --config <path>  Path to JSON config file",
+      "  --timeout-ms <n> Universal timeout for external LLM calls (30000-900000)",
+      "  --allow-archive  Admit explicitly provided archived inputs",
       "  --help, -h       Print help and exit",
       "  --version, -v    Print version and exit",
       "",

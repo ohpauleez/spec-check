@@ -55,7 +55,7 @@ describe("derive contract", () => {
   });
 
   it("produces EARS-preferring markdown from LLM informalization response", async () => {
-    traceSpec("STC-GEN-SPECS", "STC-GEN-CAPABILITY", "STC-GEN-EARS");
+    traceSpec("STC-GEN-SPECS", "STC-GEN-CAPABILITY", "STC-GEN-EARS", "STC-GEN-TIMEOUT", "STC-SOURCE-FILE-BUDGET");
     const { callOpencode } = await import("../../src/adapters/opencode.js");
     vi.mocked(callOpencode).mockResolvedValue(makeInformalizationResponse([
       {
@@ -70,6 +70,7 @@ describe("derive contract", () => {
       outputDir: toOutputDirPath("/tmp/test-output"),
       srcDir,
       model: "test-model",
+      timeoutMs: 123456,
       traces: [makeTrace("CAT-PIPELINE-REQ", "primary")],
     });
 
@@ -77,10 +78,15 @@ describe("derive contract", () => {
     expect(output.specs[0]!.markdown).toContain("WHEN");
     expect(output.specs[0]!.markdown).toContain("SHALL");
     expect(output.specs[0]!.markdown).toContain("## ADDED Requirements");
+    const call = vi.mocked(callOpencode).mock.calls[0]?.[0];
+    expect(call?.timeoutMs).toBe(123456);
+    expect(Array.isArray(call?.files)).toBe(true);
+    expect((call?.files ?? []).length).toBeGreaterThan(0);
+    expect(call?.prompt).toContain("Use attached source files");
   });
 
   it("returns no specs and warning finding when LLM call fails", async () => {
-    traceSpec("STC-GEN-INSUFFICIENT");
+    traceSpec("STC-GEN-INSUFFICIENT", "STC-GEN-TIMEOUT");
     const { callOpencode } = await import("../../src/adapters/opencode.js");
     vi.mocked(callOpencode).mockResolvedValue({
       ok: false,
@@ -91,6 +97,7 @@ describe("derive contract", () => {
       outputDir: toOutputDirPath("/tmp/test-output"),
       srcDir,
       model: "test-model",
+      timeoutMs: 300000,
       traces: [makeTrace("DOC-GUIDE-REF", "supporting")],
     });
 
@@ -100,7 +107,7 @@ describe("derive contract", () => {
   });
 
   it("generated output contains source-derived text only (no original requirements)", async () => {
-    traceSpec("STC-GEN-BLIND");
+    traceSpec("STC-GEN-BLIND", "STC-SOURCE-FILE-BLIND");
     const { callOpencode } = await import("../../src/adapters/opencode.js");
     vi.mocked(callOpencode).mockResolvedValue(makeInformalizationResponse([
       {
@@ -115,6 +122,7 @@ describe("derive contract", () => {
       outputDir: toOutputDirPath("/tmp/test-output"),
       srcDir,
       model: "test-model",
+      timeoutMs: 300000,
       traces: [makeTrace("CAT-PIPELINE-REQ", "primary")],
     });
 
@@ -140,6 +148,7 @@ describe("derive contract", () => {
       outputDir: toOutputDirPath("/tmp/test-output"),
       srcDir,
       model: "test-model",
+      timeoutMs: 300000,
       traces: [makeTrace("CAT-PIPELINE-REQ", "primary")],
     });
 
@@ -171,6 +180,7 @@ describe("derive contract", () => {
       outputDir: toOutputDirPath("/tmp/test-output"),
       srcDir,
       model: "test-model",
+      timeoutMs: 300000,
       traces: [
         makeTrace("CAT-PIPELINE-REQ", "primary"),
         makeTrace("CAT-PIPELINE-OPT", "primary"),
@@ -191,6 +201,7 @@ describe("derive contract", () => {
       outputDir: toOutputDirPath("/tmp/test-output"),
       srcDir: emptyDir,
       model: "test-model",
+      timeoutMs: 300000,
       traces: [],
     });
 
@@ -225,6 +236,7 @@ describe("derive contract", () => {
       outputDir: toOutputDirPath("/tmp/test-output"),
       srcDir,
       model: "test-model",
+      timeoutMs: 300000,
       traces: [makeTrace("CAT-PIPELINE-REQ", "primary")],
     });
 
@@ -247,6 +259,7 @@ describe("derive contract", () => {
       outputDir: toOutputDirPath("/tmp/test-output"),
       srcDir,
       model: "test-model",
+      timeoutMs: 300000,
       traces: [],
       suggestedCapabilities: ["catalog-and-parse", "formalization-and-logic-analysis"],
     });
@@ -275,6 +288,7 @@ describe("derive contract", () => {
       outputDir: toOutputDirPath("/tmp/test-output"),
       srcDir,
       model: "test-model",
+      timeoutMs: 300000,
       traces: [],
       suggestedCapabilities: [],
     });
@@ -300,6 +314,7 @@ describe("derive contract", () => {
       outputDir: toOutputDirPath("/tmp/test-output"),
       srcDir,
       model: "test-model",
+      timeoutMs: 300000,
       traces: [],
     });
 

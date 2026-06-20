@@ -5,8 +5,12 @@
  * Adapter layer — translates domain phase requests into OpenCode CLI calls.
  * Exports: OpencodePhase, OpencodeInvocation, invokeOpencode.
  */
+import { lstat, stat } from "node:fs/promises";
+
 import { runProcess } from "./process.js";
+import { postcondition } from "../domain/assert.js";
 import { err, ok, type Result } from "../domain/result.js";
+import { DEFAULT_TIMEOUT_MS, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS } from "../domain/timeout.js";
 
 /**
  * Closed domain of verification phases supported by the opencode invocation protocol.
@@ -37,6 +41,7 @@ export interface OpencodeCallOptions {
   readonly binaryPath?: string;
   readonly timeoutMs?: number;
   readonly retries?: number;
+  readonly files?: readonly string[];
 }
 
 /**
@@ -48,11 +53,13 @@ export interface OpencodeCallOptions {
  * the verification step that produced it.
  */
 export interface OpencodeError {
-  readonly kind: "spawn_error" | "timeout" | "invalid_json" | "schema_validation_error";
+  readonly kind: "spawn_error" | "timeout" | "invalid_json" | "invalid_timeout" | "schema_validation_error" | "prompt_too_large" | "invalid_files";
   readonly phase: OpencodePhase;
   readonly message: string;
   readonly stderr?: string;
 }
+
+const PROMPT_ARG_MAX_BYTES = 32_768;
 
 /**
  * Call `opencode` with bounded retries and strict JSON validation.
@@ -81,13 +88,46 @@ export async function callOpencode(
 ): Promise<Result<unknown, OpencodeError>> {
   const command = options.binaryPath ?? "opencode";
   const retries = options.retries ?? 3;
-  const timeoutMs = options.timeoutMs ?? 120_000;
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+
+  const promptBytes = Buffer.byteLength(options.prompt, "utf8");
+  if (promptBytes > PROMPT_ARG_MAX_BYTES) {
+    return err({
+      kind: "prompt_too_large",
+      phase: options.phase,
+      message: `instruction prompt exceeds ${String(PROMPT_ARG_MAX_BYTES)} UTF-8 bytes`,
+    });
+  }
+
+  if (!Number.isSafeInteger(timeoutMs) || timeoutMs < TIMEOUT_MIN_MS || timeoutMs > TIMEOUT_MAX_MS) {
+    return err({
+      kind: "invalid_timeout",
+      phase: options.phase,
+      message: `timeout must be a safe integer in range [${String(TIMEOUT_MIN_MS)}, ${String(TIMEOUT_MAX_MS)}]`,
+    });
+  }
+
+  const fileValidation = await validateFilesOption(options.files);
+  if (!fileValidation.ok) {
+    return err({
+      kind: "invalid_files",
+      phase: options.phase,
+      message: fileValidation.error,
+    });
+  }
+
+  // The prompt must be the first positional argument after the "run" subcommand.
+  // opencode interprets trailing positional arguments as file paths, not prompt text.
+  const args: string[] = ["run", options.prompt, "--model", options.model, "--format", "json"];
+  for (const filePath of options.files ?? []) {
+    args.push("--file", filePath);
+  }
 
   let lastError: OpencodeError | undefined;
   for (let attempt = 1; attempt <= retries; attempt += 1) {
     let processResult;
     try {
-      processResult = await runProcess(command, ["run", "--model", options.model, "--format", "json", options.prompt], {
+      processResult = await runProcess(command, args, {
         timeoutMs,
       });
     } catch (error) {
@@ -109,14 +149,34 @@ export async function callOpencode(
       continue;
     }
 
+    // Surface non-zero exit codes and stderr content when stdout is unusable.
+    // This prevents opaque "empty stdout" errors when the subprocess reports
+    // a clear failure via stderr (e.g., argument parsing errors, missing files).
+    if (processResult.exitCode !== null && processResult.exitCode !== 0 && processResult.stdout.trim().length === 0) {
+      const stderrPreview = processResult.stderr.trim().slice(0, 300);
+      lastError = {
+        kind: "spawn_error",
+        phase: options.phase,
+        message: stderrPreview.length > 0
+          ? `opencode exited with code ${String(processResult.exitCode)}: ${stderrPreview}`
+          : `opencode exited with code ${String(processResult.exitCode)} (empty stdout, no stderr)`,
+        stderr: processResult.stderr,
+      };
+      continue;
+    }
+
     let parsed: unknown;
     try {
       parsed = parseOpencodePayload(processResult.stdout);
     } catch (parseError: unknown) {
+      const baseMessage = parseError instanceof Error ? parseError.message : "opencode returned non-JSON output";
+      const stderrHint = processResult.stderr.trim().length > 0
+        ? ` [stderr: ${processResult.stderr.trim().slice(0, 200)}]`
+        : "";
       lastError = {
         kind: "invalid_json",
         phase: options.phase,
-        message: parseError instanceof Error ? parseError.message : "opencode returned non-JSON output",
+        message: `${baseMessage}${stderrHint}`,
         stderr: processResult.stderr,
       };
       continue;
@@ -138,6 +198,61 @@ export async function callOpencode(
       message: "opencode failed without diagnostic",
     },
   );
+}
+
+/**
+ * Validate that all file attachment paths are non-empty strings pointing to readable
+ * regular files (not symlinks, directories, or special files).
+ *
+ * @param files - optional array of file paths to validate for attachment transport
+ * @returns `ok` with the validated file list on success; `err` with a diagnostic string
+ *   describing the first invalid entry on failure
+ *
+ * @remarks
+ * Precondition: each element in `files` (when provided) is expected to be a string.
+ * Postcondition (Ok): every path in the returned array is a readable regular file
+ *   that is not a symlink at the time of validation.
+ * Postcondition (Err): the error string identifies the first path that failed validation
+ *   and the reason (empty string, symlink, not a file, unreadable).
+ *
+ * Security: rejects symlinks to prevent traversal outside the intended source scope
+ * without following the link target. Uses `lstat` before `stat` to detect symlinks.
+ *
+ * Failure modes (all represented in the Result, never thrown):
+ * - Empty or non-string path → `"files must be non-empty path strings"`
+ * - Symlink → `"attached file is a symlink (not allowed): <path>"`
+ * - Not a regular file → `"attached file is not a regular file: <path>"`
+ * - Unreadable (ENOENT, EACCES, etc.) → `"attached file is unreadable: <path>"`
+ *
+ * Safety: performs filesystem I/O (read-only stat calls). Sequential validation
+ * stops on first failure (fail-fast). Does not read file contents.
+ */
+async function validateFilesOption(files: readonly string[] | undefined): Promise<Result<readonly string[], string>> {
+  if (files === undefined) {
+    return ok([]);
+  }
+
+  for (const filePath of files) {
+    if (typeof filePath !== "string" || filePath.trim().length === 0) {
+      return err("files must be non-empty path strings");
+    }
+    try {
+      // Use lstat first to reject symlinks — prevents traversal outside the
+      // intended source scope without following the link target.
+      const linkStats = await lstat(filePath);
+      if (linkStats.isSymbolicLink()) {
+        return err(`attached file is a symlink (not allowed): ${filePath}`);
+      }
+      const fileStats = await stat(filePath);
+      if (!fileStats.isFile()) {
+        return err(`attached file is not a regular file: ${filePath}`);
+      }
+    } catch {
+      return err(`attached file is unreadable: ${filePath}`);
+    }
+  }
+
+  return ok(files);
 }
 
 /**
@@ -176,9 +291,12 @@ function parseOpencodePayload(stdout: string): unknown {
     throwOnErrorEvent(singleEvents);
     const eventPayload = extractPayloadFromEvents(singleEvents);
     if (eventPayload !== undefined) {
+      if (typeof eventPayload === "string") {
+        return extractJsonPayload(eventPayload);
+      }
       return eventPayload;
     }
-    return direct.value;
+    return extractJsonPayload(trimmed);
   }
 
   const events = trimmed
@@ -198,6 +316,9 @@ function parseOpencodePayload(stdout: string): unknown {
   const payload = extractPayloadFromEvents(events);
   if (payload === undefined) {
     throw new Error("missing payload text event");
+  }
+  if (typeof payload === "string") {
+    return extractJsonPayload(payload);
   }
   return payload;
 }
@@ -273,7 +394,144 @@ function extractPayloadFromEvents(events: readonly unknown[]): unknown {
     return undefined;
   }
 
-  return JSON.parse(textParts.join(""));
+  return textParts.join("");
+}
+
+/**
+ * Extract and parse a JSON value from a wrapped model response string.
+ *
+ * @param raw - model response text that may contain direct JSON, fenced JSON, or wrapped JSON
+ * @returns parsed JSON value
+ *
+ * @throws Error when no recoverable JSON value can be extracted
+ *
+ * @remarks
+ * Deterministic extraction cascade:
+ * 1) direct parse
+ * 2) strip outer markdown fences and parse
+ * 3) extract first balanced object/array and parse
+ * 4) throw including the original parse failure and raw preview
+ */
+export function extractJsonPayload(raw: string): unknown {
+  const trimmed = raw.trim();
+  const direct = tryParseJson(trimmed);
+  if (direct.ok) {
+    postcondition(direct.value !== undefined, "direct parse must not produce undefined");
+    return direct.value;
+  }
+
+  const withoutFence = stripMarkdownFences(trimmed);
+  const fencedAttempt = tryParseJson(withoutFence);
+  if (fencedAttempt.ok) {
+    postcondition(fencedAttempt.value !== undefined, "fence parse must not produce undefined");
+    return fencedAttempt.value;
+  }
+
+  const extracted = extractFirstJsonValue(trimmed);
+  if (extracted !== undefined) {
+    const wrappedAttempt = tryParseJson(extracted);
+    if (wrappedAttempt.ok) {
+      postcondition(wrappedAttempt.value !== undefined, "wrapped parse must not produce undefined");
+      return wrappedAttempt.value;
+    }
+  }
+
+  const preview = trimmed.slice(0, 240);
+  throw new Error(`unable to recover JSON payload (${direct.error.message}); preview=${JSON.stringify(preview)}`);
+}
+
+function stripMarkdownFences(text: string): string {
+  const trimmed = text.trim();
+  const match = /^```(?:json)?\s*([\s\S]*?)\s*```$/iu.exec(trimmed);
+  if (match === null) {
+    return text;
+  }
+  return match[1] ?? "";
+}
+
+/**
+ * Extract the first balanced JSON object or array from wrapped text.
+ *
+ * @param text - raw model output text that may contain a JSON value embedded in prose
+ * @returns the substring containing the first balanced JSON object/array, or `undefined`
+ *   if no opening `{` or `[` is found or the structure is unbalanced
+ *
+ * @remarks
+ * Known limitation (by design): only the first `{` or `[` character encountered
+ * during a forward scan is considered as the candidate start position. If the
+ * actual JSON value is preceded by unrelated brace/bracket characters (e.g., in
+ * prose explanations), this function will return an incorrect or unbalanced
+ * substring and the caller's subsequent parse will fail, falling through to the
+ * terminal error path.
+ *
+ * Precondition: `text` is a non-empty string (caller ensures this).
+ * Postcondition: when non-undefined, the returned string starts with `{` or `[`
+ * and ends with the matching `}` or `]` at depth zero.
+ * Invariant: respects JSON string escaping — brace/bracket characters inside
+ * quoted strings do not affect depth tracking.
+ *
+ * Failure modes: returns `undefined` when no opening delimiter exists or when
+ * the structure never reaches balanced depth zero. Never throws.
+ */
+function extractFirstJsonValue(text: string): string | undefined {
+  // Bound justification: this function scans at most `text.length` characters.
+  // The input is always subprocess stdout bounded by the process timeout (timeoutMs)
+  // and the PROMPT_ARG_MAX_BYTES limit on the request side. Typical LLM responses
+  // are <100KB; worst case is bounded by available memory for the child process.
+  let start = -1;
+  for (let index = 0; index < text.length; index += 1) {
+    const ch = text[index];
+    if (ch === "{" || ch === "[") {
+      start = index;
+      break;
+    }
+  }
+
+  if (start < 0) {
+    return undefined;
+  }
+
+  const open = text[start];
+  const close = open === "{" ? "}" : "]";
+  let depth = 0;
+  let inString = false;
+  let escaped = false;
+
+  for (let index = start; index < text.length; index += 1) {
+    const ch = text[index];
+
+    if (inString) {
+      if (escaped) {
+        escaped = false;
+        continue;
+      }
+      if (ch === "\\") {
+        escaped = true;
+        continue;
+      }
+      if (ch === '"') {
+        inString = false;
+      }
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = true;
+      continue;
+    }
+    if (ch === open) {
+      depth += 1;
+      continue;
+    }
+    if (ch === close) {
+      depth -= 1;
+      if (depth === 0) {
+        return text.slice(start, index + 1);
+      }
+    }
+  }
+
+  return undefined;
 }
 
 /**

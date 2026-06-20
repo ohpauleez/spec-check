@@ -132,14 +132,11 @@ describe("global invariants", () => {
       unparsed: [],
     };
 
-    const prompt = buildReviewPrompt("qualitative_review", { proposal, specs: [] });
-    expect(prompt).toContain("<document");
-    expect(prompt).toContain("```markdown");
-    expect(prompt).toContain("untrusted");
+    const bundle = buildReviewPrompt("qualitative_review", { proposal, specs: [] });
+    expect(bundle.prompt).toContain("untrusted");
+    expect(bundle.files).toContain("proposal.md");
     // The injection attempt is inside the fence, not at top level
-    const fenceIndex = prompt.indexOf("<document");
-    const injectionIndex = prompt.indexOf("Ignore all previous");
-    expect(injectionIndex).toBeGreaterThan(fenceIndex);
+    expect(bundle.prompt).toContain("attached files");
   });
 
   it("INV-12: SMT-LIB files use only sanitized identifiers from user content", () => {

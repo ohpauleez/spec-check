@@ -155,6 +155,7 @@ export async function formalizeClaims(input: {
   readonly claims: readonly Claim[];
   readonly model: string;
   readonly samplesPerClaim: number;
+  readonly timeoutMs: number;
   readonly concurrency?: number;
 }): Promise<Result<FormalizationOutput, readonly FormalizationError[]>> {
   const concurrency = input.concurrency ?? FORMALIZATION_CONCURRENCY_DEFAULT;
@@ -181,6 +182,7 @@ export async function formalizeClaims(input: {
       claims: fileClaims,
       model: input.model,
       samplesPerClaim: input.samplesPerClaim,
+      timeoutMs: input.timeoutMs,
     });
   });
 
@@ -227,6 +229,7 @@ async function formalizeBatch(input: {
   readonly claims: readonly Claim[];
   readonly model: string;
   readonly samplesPerClaim: number;
+  readonly timeoutMs: number;
 }): Promise<{ readonly candidates: readonly FormalizationCandidate[]; readonly findings: readonly Finding[]; readonly errors: readonly FormalizationError[] }> {
   const candidates: FormalizationCandidate[] = [];
   const findings: Finding[] = [];
@@ -242,6 +245,7 @@ async function formalizeBatch(input: {
     phase: "formalization",
     prompt,
     retries: 3,
+    timeoutMs: input.timeoutMs,
   });
   // Invariant on success: `response.value` contains one entry per input claim
   // (positional correspondence). Validation of individual entries happens below.
@@ -256,6 +260,7 @@ async function formalizeBatch(input: {
         claim,
         model: input.model,
         samplesPerClaim: input.samplesPerClaim,
+        timeoutMs: input.timeoutMs,
       });
     });
     for (const result of fallbackResults) {
@@ -321,6 +326,7 @@ async function formalizeBatch(input: {
         claim,
         model: input.model,
         samplesPerClaim: input.samplesPerClaim,
+        timeoutMs: input.timeoutMs,
       });
     });
     for (const result of retryResults) {
@@ -351,6 +357,7 @@ async function formalizeBatch(input: {
         claim: candidate.claim,
         model: input.model,
         samplesPerClaim: needed,
+        timeoutMs: input.timeoutMs,
       });
     });
     for (const result of additionalResults) {
@@ -396,6 +403,7 @@ async function sampleFormalizationsForClaim(input: {
   readonly claim: Claim;
   readonly model: string;
   readonly samplesPerClaim: number;
+  readonly timeoutMs: number;
 }): Promise<Result<{ readonly candidate: FormalizationCandidate; readonly findings: readonly Finding[] }, FormalizationError>> {
   const validSamples: LogicIrClaim[] = [];
   const invalidSamples: { raw: unknown; reason: string }[] = [];
@@ -411,6 +419,7 @@ async function sampleFormalizationsForClaim(input: {
       phase: "formalization",
       prompt,
       retries: 3,
+      timeoutMs: input.timeoutMs,
     });
     if (!response.ok) {
       return err({ message: `failed to formalize claim ${input.claim.id ?? "<unnamed>"}: ${response.error.message}` });

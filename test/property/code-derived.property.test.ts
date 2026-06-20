@@ -59,15 +59,10 @@ describe("code-derived generation boundary properties", () => {
           unparsed: [],
         };
 
-        const prompt = buildReviewPrompt("qualitative_review", { proposal, specs: [spec] });
-        expect(prompt).toContain("untrusted");
-        expect(prompt).toContain("<document");
-        // Verify all proposal lines are present fenced
-        for (const line of lines) {
-          if (line.trim().length > 0) {
-            expect(prompt).toContain(line);
-          }
-        }
+        const bundle = buildReviewPrompt("qualitative_review", { proposal, specs: [spec] });
+        expect(bundle.prompt).toContain("untrusted");
+        expect(bundle.files).toContain("proposal.md");
+        expect(bundle.files).toContain("spec.md");
       }),
       { numRuns: 20 },
     );

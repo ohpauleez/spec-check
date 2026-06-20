@@ -22,6 +22,11 @@ sig Artifact {
 // Subset of artifacts from archived change directories
 sig ArchivedArtifact in Artifact {}
 
+// Runtime config relevant to catalog admission policy
+one sig Config {
+  allowArchive : one Bool
+}
+
 // Capability grouping for active catalog resolution
 sig Capability {
   finalized : set Artifact,  // finalized spec artifacts for this capability
@@ -356,8 +361,8 @@ pred discover_success {
   // Guard: ConfigLoad completed
   ConfigLoad in RunState.completedPhases
   Discover not in RunState.completedPhases
-  // Postcondition: active catalog excludes archived artifacts
-  no (RunState.activeCatalog' & ArchivedArtifact)
+  // Postcondition: archived artifacts are excluded unless archive admission is enabled
+  (Config.allowArchive = False) implies no (RunState.activeCatalog' & ArchivedArtifact)
   // Postcondition: active catalog is a subset of full catalog
   RunState.activeCatalog' in RunState.catalog'
   // Postcondition: at most one in-dev delta per capability
@@ -386,9 +391,10 @@ pred discover_reject_unreadable [p : InputPath] {
   RunState.lastOutcome' = InputError
 }
 
-// Safety: archived artifacts never appear in active catalog
+// Safety: archived artifacts never appear in active catalog unless explicitly allowed
 assert archived_never_active {
-  always (no (RunState.activeCatalog & ArchivedArtifact))
+  always ((Config.allowArchive = False) implies
+    no (RunState.activeCatalog & ArchivedArtifact))
 }
 
 // Safety: unreadable input stops the entire run

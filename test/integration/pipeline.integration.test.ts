@@ -199,7 +199,7 @@ describe("end-to-end integration", () => {
       },
     });
 
-    const derived = await deriveSpecsFromSource({ outputDir: toOutputDirPath(output), srcDir, model: "test-model", traces: trace.traces });
+    const derived = await deriveSpecsFromSource({ outputDir: toOutputDirPath(output), srcDir, model: "test-model", timeoutMs: 300000, traces: trace.traces });
 
     expect(derived.specs.length).toBeGreaterThan(0);
     const genSpec = await readFile(join(output, "gen_specs", `${derived.specs[0]!.capability}.md`), "utf8");
@@ -252,6 +252,7 @@ describe("end-to-end integration", () => {
       }],
       model: "test-model",
       samplesPerClaim: 2,
+      timeoutMs: 300000,
     });
 
     expect(result.ok).toBe(true);
@@ -303,6 +304,7 @@ describe("end-to-end integration", () => {
     const { runBlindComparison } = await import("../../src/domain/code-backwards/blind-compare.js");
     const blindOutput = await runBlindComparison({
       model: "test-model",
+      timeoutMs: 300000,
       results: [{
         capability: "cat-pipeline",
         claimId: "R1",

@@ -125,7 +125,7 @@ The goal is not a proof of the whole system. The goal is justified confidence: t
 | Concern | Authoritative Source | Consequence |
 |---|---|---|
 | specification intent | committed OpenSpec artifacts (proposal, design, spec files) | the tool reads but never mutates specification inputs |
-| capability behavior | active `openspec/specs/**/spec.md` plus at most one in-dev delta per capability | archived specs are excluded from active analysis |
+| capability behavior | active `openspec/specs/**/spec.md` plus at most one in-dev delta per capability | archived specs are excluded by default; explicitly provided archived inputs can be admitted with `--allow-archive` |
 | code-derived guarantees | source directory and its tests/contracts | code-derived analysis is bounded to the declared `--src` scope |
 | analysis conclusions | preserved evidence under the output directory | no final verdict rests on an unpreserved opaque LLM response |
 | run completion | manifest file written last in output directory | manifest absence means incomplete run |
@@ -309,7 +309,7 @@ This split matters for assurance. The more the decision logic is isolated from t
 | **Manifest** ([`src/domain/reporting/manifest.ts`](src/domain/reporting/manifest.ts)) | Build entries with SHA-256 checksums; write atomically; invalidate stale manifests at run start | Manifest is the final file written |
 | **Filesystem adapter** ([`src/adapters/fs.ts`](src/adapters/fs.ts)) | Path confinement, atomic writes (temp + rename), SHA-256 checksums | All writes confined to configured output directory; `precondition` throws on traversal |
 | **Process adapter** ([`src/adapters/process.ts`](src/adapters/process.ts)) | Generic `execFile` wrapper with argv arrays, timeout handling, stdin piping | No shell interpolation; `shell: false`; ENOENT on spawn rejects the promise |
-| **`opencode` adapter** ([`src/adapters/opencode.ts`](src/adapters/opencode.ts)) | `opencode` subprocess with NDJSON event stream parsing, bounded retries | Bounded retries (default 3); invalid responses consume a retry; default 120s timeout |
+| **`opencode` adapter** ([`src/adapters/opencode.ts`](src/adapters/opencode.ts)) | `opencode` subprocess with NDJSON event stream parsing, optional `--file` attachments, bounded retries | Bounded retries (default 3); invalid responses consume a retry; universal timeout comes from run config (default 300s) |
 | **`z3` adapter** ([`src/adapters/z3.ts`](src/adapters/z3.ts)) | SMT-LIB piped via stdin, stdout/stderr capture, exit classification | Results classified as sat/unsat/timeout/unknown/error; error lines override any verdict; default 30s timeout |
 | **Concurrency adapter** ([`src/adapters/concurrency.ts`](src/adapters/concurrency.ts)) | Bounded-concurrency parallel map with deterministic output ordering | `precondition(concurrency >= 1)`; first-error semantics; results preserve input order |
 
@@ -715,7 +715,7 @@ stateDiagram-v2
 
 - Safety: no invalid formalization sample enters clustering or solver analysis.
 - Safety: inconclusive solver results are preserved as findings, not treated as success.
-- Liveness: each LLM call is bounded by retry count (default 3) and per-call timeout (default 120s).
+- Liveness: each LLM call is bounded by retry count (default 3) and universal per-call timeout from run config (default 300s).
 - Liveness: each solver query is bounded by per-query timeout (default 30s).
 
 **Spec references:** [`formalization-and-logic-analysis`](openspec/specs/formalization-and-logic-analysis/spec.md), [`claim-graph-and-coverage`](openspec/specs/claim-graph-and-coverage/spec.md).
@@ -1226,7 +1226,7 @@ Relevant code: [`src/domain/result.ts`](src/domain/result.ts), [`src/domain/erro
 
 | Claim | Mechanism | Bound |
 |-------|-----------|-------|
-| **Qualitative analysis completes** | If `opencode` responds with valid output within retry bounds | Bounded retries (default 3) with per-call timeout (default 120s) |
+| **Qualitative analysis completes** | If `opencode` responds with valid output within retry bounds | Bounded retries (default 3) with universal per-call timeout (default 300s) |
 | **Formalization completes** | If `opencode` responds with valid output within retry bounds | Bounded retries per claim; three-phase strategy |
 | **Solver analysis completes** | If `z3` responds within per-query timeout | Per-query timeout (default 30s) |
 | **Cross-side implication completes** | If `z3` responds within per-query timeout | Per-query timeout; pair budget bounds total work (default 200) |
@@ -1246,7 +1246,7 @@ Relevant code: [`src/domain/result.ts`](src/domain/result.ts), [`src/domain/erro
 | **Reliability** | Never silently drop findings or evidence; hard-fail when required external-tool responses are unavailable | Fail-fast at boundaries; monotonic findings accumulation; preserved intermediate artifacts |
 | **Observability** | Every finding includes provenance; every run emits progress; every successful run writes a manifest | Structured JSON progress events; manifest-based completion; preserved solver and model artifacts |
 | **Security** | Argv-only subprocesses; write-confinement to `--output`; prompt fencing | Subprocess adapter design; `resolveConfinedOutputPath()`; `sanitizeForCodeFence()`; `sanitizeIdentifier()` |
-| **Bounded responsiveness** | All external calls bounded by timeout and retry policy | `opencode`: 120s timeout, 3 retries; `z3`: 30s timeout; pairwise: `--pair-budget` cap |
+| **Bounded responsiveness** | All external calls bounded by timeout and retry policy | `opencode`: run-config timeout (`timeoutMs`, default 300s) and 3 retries; `z3`: 30s timeout; pairwise: `--pair-budget` cap |
 | **Determinism** | Identical inputs and cached LLM responses produce byte-identical outputs | Deterministic core; nondeterminism isolated at boundaries; deterministic claim graph, parser, coverage, clustering pair enumeration |
 | **Maintainability** | Changes localized by pipeline phase and architecture layer | Phase-based specs; three-layer architecture; deterministic domain-core design; isolated adapter boundaries |
 | **Testability** | All domain logic testable without external tools | Domain/adapter separation; injectable adapters; pure domain functions |
@@ -1577,6 +1577,8 @@ spec-check [OPTIONS] [INPUT FILES]
 | `--caps` | Capability listing file | inferred from input files |
 | `--z3` | Path to Z3 binary | `z3` on PATH |
 | `--config` | JSON configuration file for model and prompt settings | not set |
+| `--timeout-ms` | Universal timeout for all external LLM calls (`30_000..900_000`) | `300_000` |
+| `--allow-archive` | Admit explicitly provided archived OpenSpec inputs into active catalog | `false` |
 | `--pair-budget` | Maximum N*M pairwise comparisons per capability | `200` |
 | `--model` | LLM model identifier for `opencode` | adapter default |
 | `--help` | Print help and exit | -- |

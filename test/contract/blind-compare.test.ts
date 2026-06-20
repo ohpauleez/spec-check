@@ -30,7 +30,7 @@ describe("blind-compare contract", () => {
   });
 
   it("attaches rationale finding with classification and LLM-extracted rationale", async () => {
-    traceSpec("STC-BLIND-COMPARE", "STC-COMPARE-EXPLAIN");
+    traceSpec("STC-BLIND-COMPARE", "STC-COMPARE-EXPLAIN", "STC-COMPARE-TIMEOUT");
     const { callOpencode } = await import("../../src/adapters/opencode.js");
     vi.mocked(callOpencode).mockResolvedValue({
       ok: true,
@@ -39,6 +39,7 @@ describe("blind-compare contract", () => {
 
     const output = await runBlindComparison({
       model: "test-model",
+      timeoutMs: 654321,
       results: [makeResult()],
       generatedOnlyContext: [{ capability: "cat-pipeline", claimId: "R1", summary: "System supports pipeline." }],
     });
@@ -48,6 +49,7 @@ describe("blind-compare contract", () => {
     expect(finding.category).toBe("code_backwards.blind_explanation");
     expect(finding.evidence.some((e) => e.kind === "rationale" && e.value.includes("boolean constraint"))).toBe(true);
     expect(finding.evidence.some((e) => e.kind === "classification" && e.value === "same")).toBe(true);
+    expect(vi.mocked(callOpencode).mock.calls[0]?.[0].timeoutMs).toBe(654321);
   });
 
   it("uses warning severity for uncertain classifications, info for definitive", async () => {
@@ -60,6 +62,7 @@ describe("blind-compare contract", () => {
 
     const output = await runBlindComparison({
       model: "test-model",
+      timeoutMs: 300000,
       results: [
         makeResult({ classification: "uncertain", claimId: "R1" }),
         makeResult({ classification: "same", claimId: "R2" }),
@@ -85,6 +88,7 @@ describe("blind-compare contract", () => {
     traceSpec("STC-COMPARE-BLIND");
     const output = await runBlindComparison({
       model: "test-model",
+      timeoutMs: 300000,
       results: [makeResult({ claimId: "MISSING" })],
       generatedOnlyContext: [],
     });
@@ -142,6 +146,7 @@ describe("blind-compare contract", () => {
 
     const output = await runBlindComparison({
       model: "test-model",
+      timeoutMs: 300000,
       results: [makeResult()],
       generatedOnlyContext: [{ capability: "cat-pipeline", claimId: "R1", summary: "s" }],
     });

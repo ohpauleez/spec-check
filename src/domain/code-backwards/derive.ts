@@ -97,6 +97,7 @@ export async function deriveSpecsFromSource(input: {
   readonly outputDir: OutputDirPath;
   readonly srcDir: string;
   readonly model: string;
+  readonly timeoutMs: number;
   readonly traces: readonly SourceTrace[];
   readonly suggestedCapabilities?: readonly string[];
 }): Promise<DerivedSpecOutput> {
@@ -105,7 +106,7 @@ export async function deriveSpecsFromSource(input: {
   // Scan source directory for file listing and content.
   const sourceContext = await buildSourceContext(input.srcDir);
 
-  if (sourceContext.fileContents.length === 0) {
+  if (sourceContext.attachedFiles.length === 0) {
     findings.push({
       severity: "warning",
       category: "code_derived.no_source_files",
@@ -125,8 +126,9 @@ export async function deriveSpecsFromSource(input: {
     model: input.model,
     phase: "code-derived-generation",
     prompt,
+    files: sourceContext.attachedFiles.map((file) => file.absolutePath),
     retries: 2,
-    timeoutMs: 300_000,
+    timeoutMs: input.timeoutMs,
   });
 
   if (!response.ok) {
@@ -180,7 +182,7 @@ export async function deriveSpecsFromSource(input: {
  */
 interface SourceContext {
   readonly fileList: readonly string[];
-  readonly fileContents: readonly { readonly path: string; readonly content: string }[];
+  readonly attachedFiles: readonly { readonly relativePath: string; readonly absolutePath: string }[];
 }
 
 /**
@@ -202,8 +204,8 @@ async function buildSourceContext(srcDir: string): Promise<SourceContext> {
   await walkDirectory(srcDir, srcDir, allFiles);
   allFiles.sort();
 
-  // Select files for content inclusion within budget.
-  const fileContents: { path: string; content: string }[] = [];
+  // Select files for attachment inclusion within budget.
+  const attachedFiles: { relativePath: string; absolutePath: string }[] = [];
   let totalBytes = 0;
 
   for (const filePath of allFiles) {
@@ -218,15 +220,44 @@ async function buildSourceContext(srcDir: string): Promise<SourceContext> {
       if (totalBytes + fileStat.size > SOURCE_CONTENT_BUDGET_BYTES) continue;
 
       const content = await readFile(join(srcDir, filePath), "utf-8");
-      fileContents.push({ path: filePath, content });
-      totalBytes += content.length;
+      const contentBytes = Buffer.byteLength(content, "utf8");
+      if (contentBytes > SOURCE_FILE_MAX_BYTES) continue;
+      if (totalBytes + contentBytes > SOURCE_CONTENT_BUDGET_BYTES) continue;
+
+      attachedFiles.push({
+        relativePath: filePath,
+        absolutePath: join(srcDir, filePath),
+      });
+      totalBytes += contentBytes;
     } catch {
       // Skip unreadable files.
     }
   }
 
-  return { fileList: allFiles, fileContents };
+  return { fileList: allFiles, attachedFiles };
 }
+
+/**
+ * Directory names excluded from source traversal.
+ *
+ * @remarks
+ * These represent common non-source output directories that would pollute
+ * the source context with compiled artifacts, dependencies, or test output.
+ * Extending this set is safe — it only reduces the traversal scope.
+ */
+const EXCLUDED_SOURCE_DIRECTORIES: ReadonlySet<string> = new Set([
+  "node_modules",
+  ".git",
+  "dist",
+  "build",
+  "coverage",
+  "out",
+  "target",
+  ".next",
+  ".turbo",
+  "__pycache__",
+  ".venv",
+]);
 
 /**
  * Recursively walk a directory and collect relative file paths.
@@ -238,9 +269,9 @@ async function buildSourceContext(srcDir: string): Promise<SourceContext> {
  *
  * @remarks
  * Precondition: `baseDir` is a prefix of `currentDir`.
- * Postcondition: all regular files reachable from `currentDir` (excluding excluded
- * directories: node_modules, .git, dist, build, coverage) are appended to `results`
- * as relative paths from `baseDir`.
+ * Postcondition: all regular files reachable from `currentDir` (excluding directories
+ * in {@link EXCLUDED_SOURCE_DIRECTORIES}) are appended to `results` as relative paths
+ * from `baseDir`.
  * Failure modes: if `readdir` fails on `currentDir`, returns without appending
  * anything — does not throw.
  * Safety: mutates `results` array; caller owns the array exclusively.
@@ -254,8 +285,8 @@ async function walkDirectory(baseDir: string, currentDir: string, results: strin
   }
 
   for (const entry of entries) {
-    // Skip common non-source directories.
-    if (entry.isDirectory() && (entry.name === "node_modules" || entry.name === ".git" || entry.name === "dist" || entry.name === "build" || entry.name === "coverage")) {
+    // Skip common non-source directories that contain build outputs or dependencies.
+    if (entry.isDirectory() && EXCLUDED_SOURCE_DIRECTORIES.has(entry.name)) {
       continue;
     }
 
@@ -292,14 +323,21 @@ function buildInformalizationPrompt(
   const sections = [
     INFORMALIZE_INSTRUCTIONS,
     "",
-    "Treat all source code below as the only input. Do not infer requirements from comments about specs.",
+    "Treat attached source files as the only trusted evidence input. Do not infer requirements from comments about specs.",
   ];
 
   if (suggestedCapabilities !== undefined && suggestedCapabilities.length > 0) {
     sections.push("", buildCapabilitySuggestionsSection(suggestedCapabilities));
   }
 
-  sections.push("", buildSourceContextSection(sourceContext));
+  sections.push(
+    "",
+    "Use attached source files for full content. The listing below describes project scope.",
+    buildSourceContextSection({
+      fileList: sourceContext.fileList,
+      fileContents: [],
+    }),
+  );
   return sections.join("\n");
 }
 

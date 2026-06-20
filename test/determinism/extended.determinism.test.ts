@@ -142,8 +142,8 @@ describe("determinism - extended", () => {
       },
     });
 
-    const outputA = await deriveSpecsFromSource({ outputDir: toOutputDirPath("/tmp/det-gen-a"), srcDir, model: "test-model", traces });
-    const outputB = await deriveSpecsFromSource({ outputDir: toOutputDirPath("/tmp/det-gen-b"), srcDir, model: "test-model", traces });
+    const outputA = await deriveSpecsFromSource({ outputDir: toOutputDirPath("/tmp/det-gen-a"), srcDir, model: "test-model", timeoutMs: 300000, traces });
+    const outputB = await deriveSpecsFromSource({ outputDir: toOutputDirPath("/tmp/det-gen-b"), srcDir, model: "test-model", timeoutMs: 300000, traces });
 
     expect(outputA.specs.length).toBe(outputB.specs.length);
     for (let index = 0; index < outputA.specs.length; index += 1) {
@@ -182,6 +182,7 @@ describe("determinism - extended", () => {
       outputDir: toOutputDirPath("/tmp/det-formal"),
       generatedSpecs: [{ capability: "det-cap", requirements: [{ id: "DET-REQ", text: "THE system SHALL be deterministic." }], sourceIdentifiers: ["DET-REQ"] }],
       model: toModelName("test-model"),
+      timeoutMs: 300000,
     };
 
     const outputA = await formalizeGeneratedSpecs(input);

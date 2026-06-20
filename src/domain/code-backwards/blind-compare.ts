@@ -53,6 +53,7 @@ export interface BlindComparisonOutput {
  */
 export async function runBlindComparison(input: {
   readonly model: string;
+  readonly timeoutMs: number;
   readonly results: readonly CrossImplicationResult[];
   readonly generatedOnlyContext: readonly { readonly capability: string; readonly claimId: string; readonly summary: string }[];
 }): Promise<BlindComparisonOutput> {
@@ -81,6 +82,7 @@ export async function runBlindComparison(input: {
       phase: "blind-comparison",
       prompt,
       retries: 3,
+      timeoutMs: input.timeoutMs,
     });
 
     // Graceful degradation: record LLM failure as a finding rather than aborting.

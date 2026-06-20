@@ -115,12 +115,36 @@ pred finding_evidence_preserved [f : Finding] {
 
 ## Requirements
 
-### Requirement: Emit Bounded Analysis Reports [RAE-EMIT-REPORTS]
-WHEN one or more analysis phases complete, THE spec-check tool SHALL write the phase reports and synthesized summary reports defined for the selected analysis mode under the configured output directory. The analysis mode is determined by the provided flags: base mode (no `--src`) produces `report_1.*`, `report_1.logic.md`, and `report_summary.md`; source-backed mode (`--src` provided) additionally produces `report_2.trace.md`, `report_2.logic.md`, `report_2.compare.md`, `gen_specs/`, and `gen_specs_smt/`.
+### Requirement: Surface Catalog Errors At The CLI Boundary [RAE-CATALOG-ERROR]
+WHEN the catalog layer reports that no active documents survived, THE spec-check tool SHALL surface a CLI-visible `CatalogError` with exit code `5` and a cause-specific remediation message.
 
 **References:**
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Failure Modes`
+- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Represent empty-catalog outcomes as structured catalog diagnostics`
+
+#### Scenario: Report No Recognized Documents [RAE-CATALOG-NODOCS]
+WHEN catalog construction reports `no_recognized_docs`, THE spec-check tool SHALL emit a message explaining that no OpenSpec proposal, design, or spec documents were found in the provided inputs.
+
+**Postcondition:** Users can distinguish missing relevant inputs from archive-policy exclusions.
+
+#### Scenario: Report Archived-Only Inputs [RAE-CATALOG-ARCHIVE]
+WHEN catalog construction reports `all_archived`, THE spec-check tool SHALL emit a message explaining that all recognized documents are archived and SHALL recommend `--allow-archive`.
+
+**Postcondition:** Users receive the specific remediation that can admit their chosen archived inputs.
+
+#### Scenario: Report Policy-Filtered Inputs [RAE-CATALOG-FILTERED]
+WHEN catalog construction reports `all_filtered`, THE spec-check tool SHALL emit a message that names the policy reason for exclusion.
+
+**Postcondition:** Policy-based exclusions remain explainable instead of collapsing into a generic empty result.
+
+### Requirement: Emit Bounded Analysis Reports [RAE-EMIT-REPORTS]
+WHEN one or more analysis phases complete, THE spec-check tool SHALL write the phase reports and synthesized summary reports defined for the selected analysis mode under the configured output directory. IF the run stops at catalog construction because no active documents survive, THEN THE spec-check tool SHALL report the catalog error instead of emitting vacuous downstream analysis reports.
+
+**References:**
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Quality Attributes`
+- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Represent empty-catalog outcomes as structured catalog diagnostics`
 
 #### Scenario: Emit Phase-Specific Reports [RAE-REPORT-PHASES]
 WHEN specs-forward analysis completes for a run, THE spec-check tool SHALL emit distinct reports for qualitative analysis (first pass), qualitative properties and invariants (second pass), coverage analysis, and logic analysis, plus any optional source or tasks reports enabled for that run.
@@ -150,6 +174,11 @@ IF an optional phase is not enabled for a run, THEN THE spec-check tool SHALL ex
 - Implementation: [render.ts:196 writeSummaryReport()](/src/domain/reporting/render.ts#L196), [pipeline-helpers.ts:78 computeSkippedPhases()](/src/cli/pipeline-helpers.ts#L78)
 - Test: [reporting.test.ts:48 includes skipped-phase explanations](/test/contract/reporting.test.ts#L48)
 - Test (integration): [specs-forward.integration.test.ts:18 produces phase reports and summary](/test/integration/specs-forward.integration.test.ts#L18)
+
+#### Scenario: Suppress Vacuous Reports On Catalog Error [RAE-REPORT-CATALOG]
+IF the catalog phase ends in `CatalogError`, THEN THE spec-check tool SHALL NOT emit downstream qualitative, formal, or comparison reports for that run.
+
+**Postcondition:** Report output accurately reflects that analysis never proceeded past catalog construction.
 
 #### Requirement model
 
@@ -340,11 +369,12 @@ assert no_unsupported_verdicts_in_output {
 ```
 
 ### Requirement: Finding Shape And Severity [RAE-FINDING-SHAPE]
-WHEN the spec-check tool creates a finding, THE spec-check tool SHALL use a stable finding shape with required fields: severity (error, warning, info), category, provenance (source file and heading), description, rationale (explanation of why the finding exists), and evidence references. Optional fields include suggestion and related claim identifiers.
+WHEN the spec-check tool creates a finding, THE spec-check tool SHALL use a stable finding shape with required fields: severity, category, provenance, description, rationale, and evidence references. Optional fields include suggestion and related claim identifiers. When catalog-empty conditions are represented as findings or finding-like diagnostics, the same explanatory completeness SHALL apply.
 
 **References:**
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Domain Model`
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Domain Model`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Represent empty-catalog outcomes as structured catalog diagnostics`
 
 #### Scenario: Finding With All Required Fields [RAE-SHAPE-COMPLETE]
 WHEN a finding is created, THE spec-check tool SHALL populate severity, category, provenance, description, rationale, and at least one evidence reference.
@@ -364,6 +394,11 @@ IF a finding would be emitted without a required field, THEN THE spec-check tool
 ##### Evidence
 - Implementation: [render.ts:251 enforceFindingSupport()](/src/domain/reporting/render.ts#L251)
 - Test: [reporting.test.ts:53 suppresses finding without required evidence as defect](/test/contract/reporting.test.ts#L53), [reporting.test.ts:74 suppresses finding with empty rationale as defect](/test/contract/reporting.test.ts#L74), [reporting.test.ts:99 suppresses finding with empty provenance file as defect](/test/contract/reporting.test.ts#L99)
+
+#### Scenario: Catalog Diagnostic Remains Actionable [RAE-SHAPE-CATALOG]
+WHEN the tool surfaces a catalog-empty diagnostic, THE spec-check tool SHALL include the empty-catalog cause and actionable remediation text in the surfaced message.
+
+**Postcondition:** Catalog errors meet the same reviewability standard as normal findings.
 
 #### Requirement model
 

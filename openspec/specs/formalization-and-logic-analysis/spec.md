@@ -145,13 +145,37 @@ fact clusters_respect_equivalence {
 
 ## Requirements
 
-### Requirement: Formalize Requirement And Scenario Claims Into Logic Artifacts [FLA-FORMALIZE-CLAIMS]
-WHEN requirement and scenario claims are available for formal analysis, THE spec-check tool SHALL translate each claim into a typed logic representation and generated SMT-LIB artifacts that preserve the claim identifier, source provenance, obligation level, and supporting declarations needed for solver analysis.
+### Requirement: Extract Recoverable JSON Payloads [FLA-JSON-RECOVER]
+WHEN an external LLM call returns text that contains a valid JSON payload wrapped in markdown fences or explanatory text, THE spec-check tool SHALL recover the payload deterministically before schema validation.
 
 **References:**
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Domain Model`
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Failure Modes`
+- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Make JSON extraction tolerant but keep schema validation strict`
+
+#### Scenario: Accept Markdown-Fenced JSON [FLA-JSON-FENCE]
+WHEN an external LLM response wraps a valid JSON payload in markdown code fences, THE spec-check tool SHALL strip the outer fence markers and SHALL parse the enclosed JSON payload.
+
+**Postcondition:** Common markdown formatting does not cause an otherwise valid payload to be rejected.
+
+#### Scenario: Accept Prefixed Or Suffixed JSON [FLA-JSON-WRAP]
+WHEN an external LLM response contains explanatory text before or after a valid JSON object or array, THE spec-check tool SHALL extract the first balanced JSON value and SHALL parse it.
+
+**Postcondition:** Recoverable wrapper text does not prevent downstream schema validation.
+
+#### Scenario: Reject Irrecoverable JSON [FLA-JSON-FAIL]
+IF an external LLM response does not contain a recoverable valid JSON payload, THEN THE spec-check tool SHALL reject the response with a diagnostic parse error.
+
+**Postcondition:** Malformed payloads are surfaced explicitly rather than accepted silently.
+
+### Requirement: Formalize Requirement And Scenario Claims Into Logic Artifacts [FLA-FORMALIZE-CLAIMS]
+WHEN requirement and scenario claims are available for formal analysis, THE spec-check tool SHALL translate each claim into a typed logic representation and generated SMT-LIB artifacts that preserve the claim identifier, source provenance, obligation level, and supporting declarations needed for solver analysis, and SHALL use the run-configured universal timeout for every external LLM formalization invocation.
+
+**References:**
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
+- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Make JSON extraction tolerant but keep schema validation strict`
 
 #### Scenario: Generate Inspectable Logic Artifacts [FLA-FORMAL-ARTS]
 WHEN a claim is selected for formalization, THE spec-check tool SHALL emit inspectable logic and SMT artifacts that let a reviewer trace the formal result back to the originating requirement or scenario.
@@ -180,6 +204,11 @@ IF some claims fail formalization but at least one claim succeeds, THEN THE spec
 ##### Evidence
 - Implementation: [formalize.ts:154 formalizeClaims()](/src/domain/formal/formalize.ts#L154)
 - Test: [formalize.test.ts:162 returns successful candidates alongside errors on partial failure](/test/contract/formalize.test.ts#L162)
+
+#### Scenario: Universal LLM Timeout For Formalization [FLA-FORMAL-TIMEOUT]
+WHEN the spec-check tool invokes an external LLM to formalize a claim or claim batch, THE spec-check tool SHALL use the run-configured universal timeout budget for that invocation.
+
+**Postcondition:** Formalization timeout behavior is consistent with every other LLM-backed phase in the same run.
 
 #### Requirement model
 

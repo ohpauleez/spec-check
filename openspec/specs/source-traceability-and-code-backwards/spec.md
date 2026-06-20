@@ -355,13 +355,33 @@ assert source_never_modified {
 }
 ```
 
-### Requirement: Generate Code-Derived Specifications From Source [STC-GEN-SPECS]
-WHEN source-backed analysis is enabled, THE spec-check tool SHALL generate EARS-preferring behavioral specification files per declared capability using only source-scoped evidence, blind to original requirement text, and SHALL persist the generated specifications as Markdown files in a `gen_specs/` directory under the configured output directory.
+### Requirement: Attach Large Source Context As Files [STC-SOURCE-FILE-CTX]
+WHEN source-backed analysis sends large source context to an external LLM, THE spec-check tool SHALL provide the bounded instruction prompt separately from the selected source files and SHALL attach the selected source files as reference inputs rather than embedding their full contents inline.
 
 **References:**
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Motivation`
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Assumptions and Dependencies`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Deliver large analysis context through file attachments`
+
+#### Scenario: Attach In-Budget Source Files [STC-SOURCE-FILE-BUDGET]
+WHEN source-backed generation selects source files within the configured content budget, THE spec-check tool SHALL attach exactly those in-budget files to the LLM invocation.
+
+**Postcondition:** Large source context remains available to generation without relying on oversized inline arguments.
+
+#### Scenario: Keep Blind Boundary In File Transport [STC-SOURCE-FILE-BLIND]
+WHEN the spec-check tool attaches source files for code-derived generation, THE spec-check tool SHALL NOT attach original proposal, design, or requirement documents to that invocation.
+
+**Postcondition:** File-based transport preserves the same blind boundary as inline transport.
+
+### Requirement: Generate Code-Derived Specifications From Source [STC-GEN-SPECS]
+WHEN source-backed analysis is enabled, THE spec-check tool SHALL generate EARS-preferring behavioral specification files per declared capability using only source-scoped evidence, blind to original requirement text, SHALL persist the generated specifications as Markdown files in a `gen_specs/` directory under the configured output directory, and SHALL use the run-configured universal timeout for every external LLM generation invocation.
+
+**References:**
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Motivation`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Assumptions and Dependencies`
+- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
+- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Deliver large analysis context through file attachments`
 
 #### Scenario: Generate Capability-Aligned Derived Specs [STC-GEN-CAPABILITY]
 WHEN the source tree contains sufficient evidence relevant to a declared capability, THE spec-check tool SHALL generate an EARS-preferring behavioral specification for that capability using only the provided source scope, implementation code, verified contracts, and traced tests as evidence.
@@ -419,6 +439,11 @@ IF a candidate code-derived guarantee depends on evidence outside the provided s
 - Implementation: [derive.ts:96 deriveSpecsFromSource](/src/domain/code-backwards/derive.ts#L96)
 - Test: [derive.test.ts:186 returns empty specs when source directory has no scannable files](/test/contract/derive.test.ts#L186)
 
+#### Scenario: Universal LLM Timeout For Code-Derived Generation [STC-GEN-TIMEOUT]
+WHEN the spec-check tool invokes an external LLM to generate code-derived specifications, THE spec-check tool SHALL use the run-configured universal timeout budget.
+
+**Postcondition:** Generation timeout behavior matches every other LLM-backed phase in the run.
+
 #### Requirement model
 
 ```alloy
@@ -468,12 +493,13 @@ assert gen_blind_boundary {
 ```
 
 ### Requirement: Formalize Code-Derived Specifications [STC-GEN-FORMAL]
-WHEN code-derived specifications have been generated, THE spec-check tool SHALL formalize them using the same pipeline as specs-forward analysis: bounded LLM sampling, schema validation against the logic IR, equivalence clustering with solver-backed implication checks, and representative selection based on the configured stability threshold. THE spec-check tool SHALL persist the resulting SMT-LIB artifacts in a `gen_specs_smt/` directory under the output directory.
+WHEN code-derived specifications have been generated, THE spec-check tool SHALL formalize them using the same pipeline as specs-forward analysis: bounded LLM sampling, schema validation against the logic IR, equivalence clustering with solver-backed implication checks, and representative selection based on the configured stability threshold. THE spec-check tool SHALL persist the resulting SMT-LIB artifacts in a `gen_specs_smt/` directory under the output directory and SHALL use the run-configured universal timeout for every external LLM formalization invocation on generated claims.
 
 **References:**
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Quality Attributes`
+- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
 
 #### Scenario: Stable Code-Derived Formalization [STC-FORMAL-STABLE]
 WHEN formalization sampling for a code-derived claim produces an equivalence cluster that meets the configured stability threshold, THE spec-check tool SHALL select the highest-confidence sample as the representative formalization for that code-derived claim.
@@ -501,6 +527,11 @@ IF all formalization samples for a code-derived claim are invalid after bounded 
 ##### Evidence
 - Implementation: [gen-formal.ts:64 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L64)
 - Test: [gen-formal.test.ts:133 records error finding on formalization failure (all samples invalid)](/test/contract/gen-formal.test.ts#L133)
+
+#### Scenario: Universal LLM Timeout For Code-Derived Formalization [STC-FORMAL-TIMEOUT]
+WHEN the spec-check tool invokes an external LLM to formalize generated claims, THE spec-check tool SHALL use the run-configured universal timeout budget.
+
+**Postcondition:** Indirect code-derived formalization follows the same timeout policy as direct specs-forward formalization.
 
 #### Requirement model
 
@@ -625,12 +656,13 @@ assert solver_timeout_nonblocking {
 ```
 
 ### Requirement: Cross-Side Implication Analysis [STC-CROSS-IMPLY]
-WHEN both original formalizations (from specs-forward) and code-derived formalizations (from source analysis) exist, THE spec-check tool SHALL run a two-tiered comparison: first a capability-level aggregate bidirectional implication check per matched capability, then bounded pairwise bidirectional implication checks with greedy bipartite matching within each capability, and SHALL use the implication results as the primary strength classification mechanism.
+WHEN both original formalizations (from specs-forward) and code-derived formalizations (from source analysis) exist, THE spec-check tool SHALL run a two-tiered comparison: first a capability-level aggregate bidirectional implication check per matched capability, then bounded pairwise bidirectional implication checks with greedy bipartite matching within each capability, and SHALL use the implication results as the primary strength classification mechanism. IF any comparison step invokes an external LLM-backed fallback or explanation phase, THE spec-check tool SHALL use the run-configured universal timeout for each such LLM call.
 
 **References:**
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Motivation`
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Motivation`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Quality Attributes`
+- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
 
 #### Scenario: Classify Same Guarantee [STC-IMPLY-SAME]
 WHEN the solver confirms that original claim A implies code-derived claim B and code-derived claim B implies original claim A, THE spec-check tool SHALL classify the relationship as `same`.
@@ -904,12 +936,13 @@ assert divergence_surfaced {
 ```
 
 ### Requirement: Two-Layer Comparison With Blind Boundary [STC-BLIND-COMPARE]
-WHEN comparing code-derived guarantees against original specifications, THE spec-check tool SHALL use solver-backed cross-side implication as the primary classification mechanism and SHALL use blind LLM comparison as the explanatory layer that provides human-readable rationale. THE spec-check tool SHALL NOT expose original requirement text to the code-derived side during any comparison phase.
+WHEN comparing code-derived guarantees against original specifications, THE spec-check tool SHALL use solver-backed cross-side implication as the primary classification mechanism and SHALL use blind LLM comparison as the explanatory layer that provides human-readable rationale. THE spec-check tool SHALL NOT expose original requirement text to the code-derived side during any comparison phase, and SHALL use the run-configured universal timeout for every blind comparison invocation.
 
 **References:**
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Failure Modes`
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Failure Modes`
+- `openspec/changes/prompt-file-input-timeout/proposal.md#Quality Attributes`
+- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
 
 #### Scenario: Solver Implication As Primary Classifier [STC-COMPARE-PRIMARY]
 WHEN cross-side implication results are available and conclusive (same, stronger, weaker, or different) for a claim pair, THE spec-check tool SHALL use the solver-backed classification as the final verdict.
@@ -945,6 +978,11 @@ IF cross-side implication results are unavailable or the solver-layer classifica
 ##### Evidence
 - Implementation: [blind-compare.ts:54 runBlindComparison](/src/domain/code-backwards/blind-compare.ts#L54)
 - Test: [blind-compare.test.ts:53 uses warning severity for uncertain classifications, info for definitive](/test/contract/blind-compare.test.ts#L53)
+
+#### Scenario: Universal LLM Timeout For Blind Comparison [STC-COMPARE-TIMEOUT]
+WHEN the spec-check tool invokes blind comparison, THE spec-check tool SHALL use the run-configured universal timeout budget.
+
+**Postcondition:** Blind comparison timeout behavior matches all other LLM-backed phases.
 
 #### Scenario: Prevent Requirement-Text Leakage [STC-COMPARE-BLIND]
 IF the blind comparison boundary would expose original requirement text to the code-derived comparison side, THEN THE spec-check tool SHALL prevent that comparison path and SHALL surface the boundary violation as an analysis defect.

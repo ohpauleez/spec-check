@@ -52,7 +52,7 @@ spec-check [OPTIONS] [INPUT FILES...]
 
 ### Example
 
-Using `spec-check` to analyze an entire project can take ~10 minutes.
+Using `spec-check` to analyze an entire project can take ~10-15 minutes (most of this time is spent on LLM calls/workflows).
 
 ```sh
 node dist/spec-check.js \
@@ -78,12 +78,15 @@ Produce a dedicated section in the findings for results from logical analysis pa
 |---|---|
 | `--output <dir>` | Output directory for reports and artifacts (default `./build/spec-check`) |
 | `--src <dir>` | Source directory; enables code-backwards analysis |
+| `--model <name>` | LLM model to use (default `github-copilot/gpt-5.4`) |
 | `--caps <file>` | Capability listing file; inferred from inputs by default |
 | `--z3 <path>` | Path to the Z3 binary (default: `z3` on PATH) |
 | `--config <file>` | JSON configuration file for model and prompt settings |
+| `--timeout-ms <n>` | Universal timeout for external LLM calls, 30000-900000 (default 300000) |
 | `--pair-budget <n>` | Maximum pairwise comparisons for cross-side implication (default 200) |
-| `--help` | Show help |
-| `--version` | Show version |
+| `--allow-archive` | Admit explicitly provided archived inputs that would otherwise be filtered |
+| `--help`, `-h` | Show help |
+| `--version`, `-v` | Show version |
 
 ### Exit Codes
 

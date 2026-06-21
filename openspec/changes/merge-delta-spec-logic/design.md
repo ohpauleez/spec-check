@@ -35,9 +35,9 @@ This means the active capability state chosen by catalog resolution is not prese
 ```mermaid
 flowchart LR
   A[Catalog Documents] --> B[parseAllDocuments]
-  B --> C[ParsedSpec[]]
+  B --> C[ParsedSpec List]
   C --> D[mergeSpecsByCapability]
-  D --> E[MergedCapabilitySpec[]]
+  D --> E[MergedCapabilitySpec List]
   C --> F[Parser Findings]
   E --> G[buildClaimGraph]
   E --> H[analyzeCoverage]

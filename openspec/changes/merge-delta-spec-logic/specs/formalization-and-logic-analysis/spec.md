@@ -10,7 +10,7 @@ WHEN the spec-check tool performs specs-forward logic analysis, THE spec-check t
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
 - `openspec/changes/merge-delta-spec-logic/proposal.md#Scope`
-- `openspec/changes/merge-delta-spec-logic/design.md#Interface Contracts`
+- `openspec/changes/merge-delta-spec-logic/design.md#Interaction Protocols`
 
 #### Scenario: Variable And Function Deduplication [FLA-SPEC-DEDUP]
 WHEN multiple claims from the same merged capability analysis unit declare identical variable or function names with identical sorts or signatures, THE spec-check tool SHALL emit only one declaration in the combined output.

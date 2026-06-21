@@ -9,7 +9,7 @@ WHEN parsed proposal, design, merged capability spec, or task content is availab
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Domain Model`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/merge-delta-spec-logic/proposal.md#Domain Model`
-- `openspec/changes/merge-delta-spec-logic/design.md#Interface Contracts`
+- `openspec/changes/merge-delta-spec-logic/design.md#Interaction Protocols`
 
 #### Scenario: Preserve Claim Provenance [CGC-CLAIM-PROVEN]
 WHEN the tool derives a claim from a requirement, scenario, design section, or task summary, THE spec-check tool SHALL attach the source file and nearest heading needed to trace that claim back to its origin.

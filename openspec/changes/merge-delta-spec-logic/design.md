@@ -101,15 +101,93 @@ The design inserts one new pure domain transformation after parsing and before s
 - **Pipeline context expansion**: Analysis helpers need access to merged capability specs in addition to raw parsed specs.
 
 ### Data Design
-- `DeltaOperation` domain: `"base" | "pre-section" | "ADDED" | "MODIFIED" | "REMOVED" | "RENAMED"`.
+
+#### `DeltaOperation` Domain
+
+```ts
+type DeltaOperation = "base" | "pre-section" | "ADDED" | "MODIFIED" | "REMOVED" | "RENAMED";
+```
+
 - `"pre-section"` is assigned to items in a delta spec that appear before the first delta heading. These items are structurally invalid and the merge layer emits `spec_merge.pre_section_content` for each and excludes them.
 - Parsed finalized specs always assign `deltaOperation: "base"`, even if malformed delta headings appear.
 - Parsed delta specs assign delta-operation context from exact section headings only.
-- `parentRequirementIdentifier` records the most recently parsed requirement identifier when a scenario is encountered; it is `undefined` when no parent requirement identifier exists. Scenario-to-requirement grouping is positional: the parser assigns each scenario to the most recently parsed requirement regardless of whether that requirement has an identifier. Scenarios move with their enclosing requirement block as a unit during all merge operations.
-- `ParsedSpec.deltaSections` remains present as a file-level summary even though per-item `deltaOperation` is added, because section-presence reporting is still useful even when a section contains no parseable items.
-- `MergedCapabilitySpec.logicalFile` format: `<merged-spec/{capability}>` where angle brackets are literal characters and `{capability}` is the literal `CapabilityName` value (e.g., `<merged-spec/catalog-and-parse>`). The value contains only ASCII characters: `<`, `>`, `-`, `/`, and lowercase alphanumeric.
-- Requirement and scenario identifiers remain separate namespaces for collision detection.
-- Merge application unit is one requirement block plus all associated scenarios.
+
+#### Scenario-Parent Association
+
+- `parentRequirementIdentifier` records the most recently parsed requirement identifier when a scenario is encountered; it is `undefined` when no parent requirement identifier exists.
+- Scenario-to-requirement grouping is positional: the parser assigns each scenario to the most recently parsed requirement regardless of whether that requirement has an identifier. Scenarios move with their enclosing requirement block as a unit during all merge operations.
+
+#### `ParsedSpec.deltaSections`
+
+`ParsedSpec.deltaSections` remains present as a file-level summary even though per-item `deltaOperation` is added, because section-presence reporting is still useful even when a section contains no parseable items.
+
+#### `MergedCapabilitySpec` Fields
+
+```ts
+interface MergedCapabilitySpec {
+  readonly capability: CapabilityName;
+  readonly sourceFiles: readonly string[];
+  readonly logicalFile: string;
+  readonly requirements: readonly ParsedRequirement[];
+  readonly scenarios: readonly ParsedScenario[];
+  readonly findings: readonly Finding[];
+}
+```
+
+Field specifications:
+
+1. `capability`: branded `CapabilityName` value, inferred from the `specs/<capability-name>/spec.md` path segment by `inferCapabilityName()`. Domain: UTF-8 string, ASCII subset `[a-z0-9-]+`, case-sensitive logical key.
+2. `sourceFiles`: absolute paths to the contributing base and/or delta files, in the order `[base, delta]` when both are present. Encoding: UTF-8 path strings as returned by `node:path.resolve()`.
+3. `logicalFile`: a synthetic group key used for logical-analysis artifact naming and report provenance. Format: `<merged-spec/{capability}>` where `{capability}` is the value of the `capability` field. The angle brackets are literal characters. This value must never be dereferenced as a filesystem path for any read or stat operation.
+4. `requirements`: the merged active requirement set after delta operations have been applied. Each requirement title/body is UTF-8 markdown text preserved from parser output without merge-layer rewriting.
+5. `scenarios`: the merged active scenario set after delta operations have been applied. Each scenario title/body is UTF-8 markdown text preserved from parser output without merge-layer rewriting.
+6. `findings`: merge-layer findings emitted during delta application for this capability.
+
+Invariant: individual requirements and scenarios retain their original `provenance.file` pointing to the actual contributing base or delta file.
+
+#### Encoding And String Handling
+
+All text processing in the merge layer operates on UTF-8 decoded strings as produced by the parser. Specifically:
+
+- Capability names are constrained to the ASCII subset `[a-z0-9-]+` by `inferCapabilityName()`. No Unicode normalization is relevant for capability identity.
+- Canonical requirement and scenario identifiers are constrained to the ASCII subset `[A-Z][A-Z0-9]*(-[A-Z0-9]+)+` by the parser. No Unicode normalization is relevant for identifier matching.
+- Requirement titles and bodies are preserved as UTF-8 markdown text byte-for-byte from parser output. The merge layer performs no normalization, rewriting, or re-encoding of content.
+- Identifier matching uses the bracket-stripped string value produced by the parser with no additional case folding or normalization.
+
+#### Logical File Format
+
+The `logicalFile` field uses the format `<merged-spec/{capability}>` where `{capability}` is the literal `CapabilityName` string value (e.g., `<merged-spec/catalog-and-parse>`).
+
+Specification:
+
+1. The angle brackets `<` and `>` are literal characters in the string value.
+2. The value contains only ASCII characters: `<`, `>`, `-`, `/`, lowercase alphanumeric.
+3. The value must never be used as a filesystem path for read, stat, or write operations on the local filesystem. It is a logical key only.
+4. The value is used for:
+   - SMT artifact subdirectory naming (the `sanitizedSpecId` derived from it for paths under `smt/`)
+   - report markdown headings
+   - finding provenance when the finding relates to the merged capability as a whole rather than a specific source line
+5. Downstream code that derives filesystem paths from this value must sanitize it using the artifact-key sanitization algorithm specified below.
+
+#### Artifact-Key Sanitization Algorithm
+
+When downstream code derives a filesystem path from `logicalFile`, it must apply the following sanitization:
+
+1. Strip the leading `<` and trailing `>` characters.
+2. Replace all `/` characters with `-`.
+3. The result is the sanitized artifact key (e.g., `<merged-spec/catalog-and-parse>` becomes `merged-spec-catalog-and-parse`).
+
+This algorithm is safe against path traversal because capability names are constrained to `[a-z0-9-]+` by `inferCapabilityName()`, which excludes `.`, `/`, `\`, and all other path-sensitive characters. The sanitized result is guaranteed to match `[a-z-]+` after step 2.
+
+The sanitized artifact key must be unique across all merged capabilities in a run. A collision is fatal and aborts the pipeline before any artifact write occurs. Given the current `CapabilityName` domain constraint (unique capability names derived from unique directory paths), a sanitized-key collision is impossible unless the capability naming invariant is violated upstream.
+
+#### Identifier Namespaces
+
+Requirement identifiers and scenario identifiers remain separate namespaces for collision detection. A requirement identifier does not collide with a scenario identifier merely because their text matches.
+
+#### Merge Application Unit
+
+Merge application unit is one requirement block plus all associated scenarios.
 
 ### Parser Contract
 - `parseSpec(file, source)` remains file-local and performs no cross-document merge.
@@ -134,69 +212,157 @@ The design inserts one new pure domain transformation after parsing and before s
   - merge findings are non-fatal unless an unexpected internal merge error or artifact-key collision makes continuation unsafe
   - duplicate base requirement blocks excluded due to `spec_merge.duplicate_base_identifier` do not appear in output and cannot be matched later
 
-### Merge Semantics By Operation
+### Merge Semantics
+
+#### Input Model
+
+For each capability, the merge layer receives:
+- zero or one finalized `ParsedSpec` (source `"final"`)
+- zero or one active delta `ParsedSpec` (source `"delta"`)
+
+Catalog resolution remains responsible for selecting at most one active delta per capability and surfacing conflicts before merge begins.
+
+#### Matching Unit
+
+One merge operation is one parsed requirement block plus all scenarios associated with that requirement.
+
+Consequences:
+- `ADDED`, `MODIFIED`, and `REMOVED` semantics apply only to requirement blocks.
+- A skipped requirement-block operation emits exactly one merge finding.
+- Standalone malformed items outside a requirement block are structural input errors and each emit their own finding.
 
 #### Operation Application Order
 
 Delta operations are applied in a defined logical sequence:
 
 1. **REMOVED** operations are applied first. Each matched base requirement block and its nested scenarios are deleted from the working state.
-2. **MODIFIED** operations are applied second. Each matched base requirement block is replaced with the delta replacement block. Collision checking operates against the working state after all REMOVED operations, excluding the matched block being replaced.
-3. **ADDED** operations are applied last. New requirement blocks are appended. Collision checking operates against the fully projected state (base minus REMOVED targets, with MODIFIED replacements applied).
+2. **MODIFIED** operations are applied second. Each matched base requirement block is replaced with the delta replacement block. Collision checking for MODIFIED operates against the working state after all REMOVED operations have been applied, excluding the matched block being replaced.
+3. **ADDED** operations are applied last. New requirement blocks are appended to the working state. Collision checking for ADDED operates against the fully projected state (base minus all REMOVED targets, with all MODIFIED replacements applied).
 
-Within each operation group, application order is irrelevant because duplicate-delta-identifier checking within the same section ensures each operation targets a distinct base block.
+Within each operation group (e.g., multiple REMOVED blocks), the order of application is irrelevant because:
+- Each operation targets a distinct base block (enforced by duplicate-delta-identifier checking within the same section).
+- No operation within a group can affect another operation within the same group.
 
-The term "surviving merged requirements" in collision checking refers to the projected final state: the base requirement set after all REMOVED deletions and all MODIFIED replacements have been applied.
+The term "surviving merged requirements" used in collision checking refers to the projected final state: the base requirement set after all REMOVED deletions and all MODIFIED replacements have been applied.
+
+#### Matching Rules
+
+- Matching is requirement-block only.
+- Matching uses canonical identifiers.
+- Matching is case-sensitive.
+- Matching uses the bracket-stripped identifier value produced by the parser.
+- The canonical identifier format is `[A-Z][A-Z0-9]*(-[A-Z0-9]+)+`.
+- The merge layer performs no additional normalization of identifiers, titles, or bodies.
+- Titles and bodies are treated as UTF-8 markdown text and preserved byte-for-byte from parser output.
 
 #### Base Initialization
-- Finalized spec present: initialize merged output from finalized requirements and scenarios.
-- Delta-only capability: initialize from empty base.
-- Delta-only `MODIFIED` and `REMOVED` operations emit `spec_merge.modified_target_not_found` and `spec_merge.removed_target_not_found` respectively and are skipped.
-- Delta-only `RENAMED` sections still emit `spec_merge.rename_unsupported` warnings.
+
+- If a finalized spec exists, its requirements and scenarios form the initial base.
+- If no finalized spec exists but a delta exists (delta-only capability), the initial base is empty.
+- In a delta-only capability, `ADDED` operations produce the merged output. `MODIFIED` and `REMOVED` operations each emit an error finding (`spec_merge.modified_target_not_found` / `spec_merge.removed_target_not_found`) and are skipped, because there is no base item to modify or remove.
+- `RENAMED` sections in delta-only capabilities still emit `spec_merge.rename_unsupported` warnings and do not affect merged output.
 
 #### `ADDED`
-- Add a new requirement block and all nested scenarios.
-- Requirement and scenario collisions are checked in separate namespaces.
-- A requirement identifier collision with a surviving merged requirement emits `spec_merge.duplicate_added_identifier` and skips the whole block. The finding message identifies the colliding identifier and states the collision is in the requirement namespace.
-- A nested scenario identifier collision with a surviving merged scenario emits `spec_merge.duplicate_added_identifier` and skips the whole block. The finding message identifies the colliding identifier and states the collision is in the scenario namespace.
-- Unidentified items are added without collision checking.
+
+- Add new requirements and their nested scenarios to the merged output.
+- If the added requirement identifier collides with a surviving merged requirement identifier, emit `spec_merge.duplicate_added_identifier` and skip the entire requirement block. The finding message must identify the colliding identifier value and state that the collision is in the requirement namespace.
+- If any nested scenario identifier collides with a surviving merged scenario identifier, emit `spec_merge.duplicate_added_identifier` and skip the entire requirement block. The finding message must identify the colliding identifier value and state that the collision is in the scenario namespace.
+- Items without identifiers are added without collision checking.
+- Standalone scenarios in an `ADDED` section that are not associated with any requirement block emit `spec_merge.standalone_scenario_unsupported` and are excluded. These are structural input errors that receive defined error handling; standalone scenario-level delta operations are not supported in the first pass.
 
 #### `MODIFIED`
-- Full replacement semantics: replace the matched base requirement and all nested scenarios with the delta block.
-- Match by canonical requirement identifier.
-- Missing identifier emits `spec_merge.modified_missing_identifier`.
-- No matching base target emits `spec_merge.modified_target_not_found`.
-- A replacement that would collide with a surviving identifier outside the matched block emits `spec_merge.duplicate_modified_identifier`, skips the replacement, and preserves the original base block.
+
+- A `MODIFIED` requirement block fully replaces the matched base requirement and all of that base requirement's nested scenarios.
+- Matching requires a canonical identifier on the delta requirement.
+- If the delta requirement has no identifier, emit `spec_merge.modified_missing_identifier` and skip the operation.
+- If no matching base requirement exists, emit `spec_merge.modified_target_not_found` and skip the operation.
+- Before replacement, validate that the replacement requirement identifier does not collide with another surviving merged requirement outside the matched base block, and that replacement scenario identifiers do not collide with surviving merged scenarios outside the matched block.
+- If such a collision would be introduced, emit `spec_merge.duplicate_modified_identifier`, skip the replacement, and preserve the original base block unchanged.
+- Standalone scenarios in a `MODIFIED` section that are not associated with any requirement block emit `spec_merge.standalone_scenario_unsupported` and are excluded.
 
 #### `REMOVED`
-- Remove the matched base requirement and all nested scenarios.
-- Entries may be sparse, but identifier presence is mandatory.
-- Missing identifier emits `spec_merge.removed_missing_identifier`.
-- No matching target emits `spec_merge.removed_target_not_found`.
+
+- A `REMOVED` requirement block deletes the matched base requirement and all of its nested scenarios.
+- Removed entries may be sparse and need not reproduce the full body, but an identifier is required.
+- If the delta requirement has no identifier, emit `spec_merge.removed_missing_identifier` and skip the operation.
+- If no matching base requirement exists, emit `spec_merge.removed_target_not_found` and skip the operation.
+- Standalone scenarios in a `REMOVED` section that are not associated with any requirement block emit `spec_merge.standalone_scenario_unsupported` and are excluded.
 
 #### `RENAMED`
-- Rename application is deferred.
-- Emit exactly one `spec_merge.rename_unsupported` warning per delta spec file that contains one or more rename sections.
-- Rename sections do not mutate merged output.
 
-#### Standalone Scenarios And Pre-Section Content
-- Standalone scenarios in any delta section (not associated with any requirement block by positional parsing) emit `spec_merge.standalone_scenario_unsupported` and are excluded. These are structural input errors that receive defined error handling; standalone scenario-level delta operations are not supported in the first pass.
-- Pre-section requirements or scenarios in a delta spec (those with `deltaOperation: "pre-section"`) emit `spec_merge.pre_section_content` per item and are excluded.
+- Full rename application is deferred in the first implementation.
+- Emit one `spec_merge.rename_unsupported` warning per delta spec file when that file contains one or more `RENAMED` sections.
+- Rename sections do not transform the merged output.
 
 #### Duplicate Handling
-- Finalized base duplicate canonical identifiers emit `spec_merge.duplicate_base_identifier` for each occurrence after the first; later duplicates are excluded from merged output and matching.
-- Duplicate canonical identifiers within the same delta operation section emit `spec_merge.duplicate_delta_identifier`; all conflicting blocks in that duplicate group are excluded.
+
+**Finalized base duplicates:**
+- If duplicate canonical requirement identifiers exist within a single finalized base spec, emit `spec_merge.duplicate_base_identifier` for each duplicate occurrence after the first.
+- The first base occurrence remains authoritative.
+- Later duplicate base blocks are excluded from merged output and cannot be selected as future match targets.
+- Rationale: finalized specs have a natural document order. The first occurrence is authoritative by convention, preserving deterministic behavior while surfacing the malformed duplicate.
+
+**Delta section duplicates:**
+- If duplicate canonical identifiers appear more than once within the same delta operation section for one capability, emit `spec_merge.duplicate_delta_identifier` for each conflicting block in that duplicate group.
+- All conflicting duplicate blocks in that delta duplicate group are excluded from merge application.
+- Rationale: delta blocks within the same section represent competing edits with no natural ordering authority. Excluding all conflicting blocks prevents arbitrary choice and surfaces the conflict for human resolution.
+
+#### Pre-Section Content And Finalized Delta Headings
+
+- If a delta spec contains requirements or scenarios before the first exact `## ADDED/MODIFIED/REMOVED/RENAMED Requirements` heading, those items receive `deltaOperation: "pre-section"`. The merge layer emits `spec_merge.pre_section_content` for each such item and excludes it from merge.
+- If a finalized spec contains delta headings, emit at most one `spec_merge.finalized_spec_delta_heading_ignored` warning per finalized spec file, include the guidance text `finalized specs should not have Delta Spec Headings`, and treat all parsed items in that file as base content.
+
+#### Standalone Scenarios
+
+Standalone scenarios in any delta section (not associated with any requirement block by positional parsing) emit `spec_merge.standalone_scenario_unsupported` and are excluded. These are structural input errors that receive defined error handling; standalone scenario-level delta operations are not supported in the first pass.
 
 #### Empty Capability Handling
-- If a capability has zero surviving merged requirements after exclusions and removals, emit `spec_merge.empty_capability_skipped`.
-- Omit that capability from downstream specs-forward claim extraction, logic analysis, and coverage.
+
+If a capability has zero surviving merged requirements after exclusions and removals, emit `spec_merge.empty_capability_skipped` with severity `warning` and omit that capability from downstream specs-forward claim extraction, logic analysis, and coverage.
+
+### Findings Catalog
+
+The merge layer introduces findings in the `spec_merge.` namespace:
+
+| Category | Severity | Description |
+|---|---|---|
+| `spec_merge.duplicate_added_identifier` | `error` | An `ADDED` item's identifier collides with an existing surviving item in its namespace |
+| `spec_merge.modified_missing_identifier` | `error` | A `MODIFIED` item has no identifier and cannot be matched |
+| `spec_merge.removed_missing_identifier` | `error` | A `REMOVED` item has no identifier and cannot be matched |
+| `spec_merge.modified_target_not_found` | `error` | A `MODIFIED` item's identifier does not match any surviving base item |
+| `spec_merge.removed_target_not_found` | `error` | A `REMOVED` item's identifier does not match any surviving base item |
+| `spec_merge.rename_unsupported` | `warning` | A delta spec contains `RENAMED` sections that are not yet applied |
+| `spec_merge.pre_section_content` | `error` | A delta spec contains items before the first delta section heading |
+| `spec_merge.standalone_scenario_unsupported` | `error` | A delta spec contains a scenario item outside a requirement-block merge unit |
+| `spec_merge.duplicate_base_identifier` | `error` | A finalized base spec contains a duplicate canonical identifier after the first occurrence |
+| `spec_merge.finalized_spec_delta_heading_ignored` | `warning` | A finalized spec contains delta section headings; headings are ignored and items are treated as base content |
+| `spec_merge.duplicate_delta_identifier` | `error` | A delta operation section contains conflicting duplicate canonical identifiers; all conflicting blocks are excluded |
+| `spec_merge.empty_capability_skipped` | `warning` | A capability produced zero merged requirements and is omitted from downstream specs-forward phases |
+| `spec_merge.duplicate_modified_identifier` | `error` | A `MODIFIED` replacement would introduce a requirement or scenario identifier collision outside the replaced base block |
+
+#### Pipeline Error Handling Interaction
+
+Merge findings with severity `error` are non-fatal to the pipeline. They cause the affected delta operation to be skipped, but the merge layer continues processing remaining operations and remaining capabilities. The pipeline continues to formalization and logical analysis with whatever was successfully merged.
+
+Warnings for malformed but tolerated input (`spec_merge.finalized_spec_delta_heading_ignored`, `spec_merge.rename_unsupported`, `spec_merge.empty_capability_skipped`) are also non-fatal.
+
+Unexpected internal merge failures and sanitized artifact-key collisions are fatal and abort the pipeline. There is no fallback to pre-merge per-file analysis because that would silently violate the active-capability analysis model. This is consistent with the existing pipeline pattern where `error` severity findings are accumulated and reported but do not abort the run (pipeline aborts use `PipelineAbortError` exceptions, not finding severity).
+
+#### Finding Message Requirements
+
+- `spec_merge.duplicate_added_identifier` messages must identify the colliding identifier value and state whether the collision is in the requirement namespace or the scenario namespace.
+- `spec_merge.duplicate_modified_identifier` messages must identify the colliding identifier value and state which namespace the collision occurred in.
+- All finding messages must include enough context for a user to locate and fix the problem in their source files.
 
 ### Ordering Contract
 - Base requirements remain in original order, minus removals, with modifications replaced in place.
 - Added requirements append after surviving base requirements in delta-document order.
 - Base scenarios remain in original order, minus removals, with modified nested scenarios replaced in place.
 - Added nested scenarios append in delta-document order.
+- Within a `MODIFIED` replacement, the delta requirement's nested scenarios replace the base requirement's nested scenarios entirely. The replacement scenarios appear in delta-document order at the position formerly occupied by the base requirement's scenarios.
 - Outer merged capability ordering preserves first-seen catalog order and performs no additional lexicographic sorting.
+
+Invariant: given the same base spec and the same delta spec, the merged output is identical across runs.
 
 ### Worked Example
 
@@ -252,11 +418,7 @@ The term "surviving merged requirements" in collision checking refers to the pro
 
 ### Artifact-Key Contract
 - `logicalFile` is a logical identifier only and must not be used directly as a filesystem path.
-- Any derived artifact-path key must sanitize the logical identifier using the following algorithm:
-  1. Strip the leading `<` and trailing `>` characters.
-  2. Replace all `/` characters with `-`.
-  3. The result is the sanitized artifact key (e.g., `<merged-spec/catalog-and-parse>` becomes `merged-spec-catalog-and-parse`).
-- This algorithm is safe against path traversal because capability names are constrained to `[a-z0-9-]+` by `inferCapabilityName()`, which excludes all path-sensitive characters.
+- Any derived artifact-path key must sanitize the logical identifier using the artifact-key sanitization algorithm specified in the Data Design section above.
 - Sanitized artifact keys must be unique across all merged capabilities in a run.
 - A sanitized-key collision is fatal and must abort the pipeline before any artifact write occurs.
 
@@ -287,6 +449,16 @@ The term "surviving merged requirements" in collision checking refers to the pro
 - Skip downstream analysis for capabilities with zero surviving merged requirements after emitting a warning.
 - Abort the pipeline on sanitized artifact-key collisions or unexpected internal merge exceptions rather than silently falling back.
 
+### Graceful Degradation
+
+If the merge layer encounters an unexpected internal error (e.g., an assertion violation, a programming error in the merge logic, or a sanitized artifact-key collision):
+
+1. The error propagates as an uncaught exception to the pipeline orchestrator.
+2. The pipeline orchestrator catches it and emits a `PipelineAbortError` with category `"PipelineError"`.
+3. There is no fallback to pre-merge per-file analysis. A merge failure is a pipeline failure.
+
+Rationale: falling back to per-file analysis silently would produce results that contradict the user's expectation of merged capability analysis. An explicit failure is preferable to silently incorrect results.
+
 ## Operational Concerns
 
 ### Observability
@@ -307,6 +479,8 @@ The term "surviving merged requirements" in collision checking refers to the pro
 ## Security
 
 No new authentication or authorization concerns are introduced. The main safety issue is integrity of persisted solver evidence: merged artifact keys must be deterministic and collision-free after sanitization so one capability cannot overwrite another capability's outputs.
+
+Path traversal is prevented by the `CapabilityName` domain constraint (`[a-z0-9-]+`), which excludes all path-sensitive characters. The sanitization algorithm handles only the structural characters introduced by the `logicalFile` format (`<`, `>`, `/`).
 
 ## Risks / Trade-offs
 
@@ -333,12 +507,39 @@ The verification strategy for this change is intentionally detailed because the 
 - Tests for `parentRequirementIdentifier` behavior for normal and malformed scenario placement.
 - Tests showing finalized specs always emit `deltaOperation: "base"` even if malformed delta headings appear.
 - Tests showing pre-section delta content receives `deltaOperation: "pre-section"` for deterministic exclusion by the merge layer.
+- Requirement under `## ADDED Requirements` gets `deltaOperation: "ADDED"`.
+- Requirement under `## MODIFIED Requirements` gets `deltaOperation: "MODIFIED"`.
+- Requirement under `## REMOVED Requirements` gets `deltaOperation: "REMOVED"`.
+- Requirement under `## RENAMED Requirements` gets `deltaOperation: "RENAMED"`.
+- Scenario inherits the correct enclosing delta operation from its section heading.
+- Scenario records `parentRequirementIdentifier` from the most recently parsed requirement.
+- Scenario with no preceding requirement has `parentRequirementIdentifier: undefined`.
+- Only exact delta heading text changes delta-section context in delta files.
+- Finalized spec with delta headings emits `spec_merge.finalized_spec_delta_heading_ignored` and still assigns `deltaOperation: "base"` to all items.
 
 ### Merge Verification
 - Unit tests for finalized-only, delta-only, `ADDED`, `MODIFIED`, `REMOVED`, and deferred `RENAMED` behavior.
 - Tests for duplicate-base handling, duplicate-delta handling, and duplicate-introduced-by-modification handling.
 - Tests for standalone scenarios, pre-section content, empty-capability skip behavior, and deterministic ordering.
-- Repeated-run determinism checks for merged outputs and findings.
+- Finalized-only capability passes through unchanged; no merge findings emitted.
+- `ADDED` appends a new requirement and its scenarios.
+- `MODIFIED` replaces a base requirement and all its scenarios by identifier.
+- `REMOVED` deletes a base requirement and all its scenarios by identifier.
+- Unmatched `MODIFIED` emits `spec_merge.modified_target_not_found` and continues.
+- Unmatched `REMOVED` emits `spec_merge.removed_target_not_found` and continues.
+- `ADDED` identifier collision emits `spec_merge.duplicate_added_identifier` and skips that requirement block.
+- Missing identifier in `MODIFIED` emits `spec_merge.modified_missing_identifier`.
+- Missing identifier in `REMOVED` emits `spec_merge.removed_missing_identifier`.
+- `RENAMED` sections emit `spec_merge.rename_unsupported`.
+- Pre-section content in a delta spec emits `spec_merge.pre_section_content` per item.
+- Delta-only capability allows `ADDED` output and emits errors for `MODIFIED`/`REMOVED`.
+- Standalone scenario in any delta section emits `spec_merge.standalone_scenario_unsupported` and is excluded.
+- Duplicate canonical identifier in finalized base spec emits `spec_merge.duplicate_base_identifier`; first occurrence survives, later duplicates are excluded from output and matching.
+- `RENAMED` in a delta-only capability still emits `spec_merge.rename_unsupported` and does not affect output.
+- Duplicate canonical identifier within the same delta operation section emits `spec_merge.duplicate_delta_identifier`; all conflicting blocks in that group are excluded.
+- Capability with zero surviving merged requirements emits `spec_merge.empty_capability_skipped` and is omitted from downstream specs-forward phases.
+- `MODIFIED` replacement that would introduce an identifier collision outside the replaced block emits `spec_merge.duplicate_modified_identifier`, skips the replacement, and preserves the original base block.
+- Requirement and scenario identifier collisions are checked in separate namespaces.
 
 ### Determinism Verification
 - Determinism tests must run at least 3 repeated invocations with identical inputs and assert byte-for-byte identical merged outputs and findings arrays.
@@ -359,6 +560,13 @@ The verification strategy for this change is intentionally detailed because the 
 - Tests for exactly-one-finding-per-skipped-operation behavior.
 - Tests for capability isolation so one capability's failures do not affect another capability.
 - Tests showing non-fuzzy exact identifier matching and exact heading recognition.
+- No base requirement block is removed without either a matching `REMOVED` operation or a surfaced duplicate-base exclusion finding.
+- No item in the merged output lacks provenance traceable to a source file.
+- Every skipped requirement-block merge operation produces exactly one finding, and every malformed standalone delta item produces exactly one finding.
+- `Claim.capability` is populated for all claims extracted from merged specs.
+- Merge findings are appended before downstream phases and remain visible in final run output.
+- A merge failure or finding in one capability does not change another capability's merged output.
+- Approximate or case-variant delta headings do not alter merge semantics.
 
 ### Liveness Verification
 - Tests that every non-empty merged capability (at least one surviving requirement) is submitted to claim extraction, coverage analysis, and logical analysis exactly once.
@@ -374,11 +582,19 @@ The verification strategy for this change is intentionally detailed because the 
 - Tests showing logical artifacts are keyed by sanitized `logicalFile`.
 - Tests showing sanitized key collisions abort before artifact writes.
 - Tests showing non-spec claims are excluded from capability-grouped specs-forward logic.
+- Merged capability produces one specs-forward logical-analysis group per capability.
+- Coverage analysis consumes merged capability specs and excludes removed requirements.
+- Sanitized `logicalFile` collisions abort the pipeline before artifact writes.
+- Capability with zero merged requirements is skipped from downstream specs-forward phases with `spec_merge.empty_capability_skipped`.
 
 ### Evidence And Artifact Verification
 - Update or add Alloy-backed capability artifacts so they reflect merged capability semantics.
 - Review documentation updates for consistency with implementation and tests.
 - Capture verification evidence in a form suitable for archive so future readers can trace scenarios, invariants, and outcomes.
+- Unit and integration tests must be tagged or documented so each major scenario and invariant is traceable to the spec.
+- Any Alloy-backed capability models affected by the merge phase must be updated so the executable/formal artifacts agree with the revised pipeline semantics.
+- The change must preserve deterministic outputs across repeated runs for parser, merge, coverage, and logic-grouping evidence.
+- Any counterexample or bug discovered during implementation must become a permanent regression test.
 
 ## Documentation Updates
 

@@ -534,14 +534,14 @@ Use this `ARCHITECTURE.md` when you need to know where a change belongs in the c
 
 All spec.md files define the system's verifiable behavior using EARS format and RFC 2119 keywords:
 
-| Pattern           | Template                                                               | When to use                    |
-|-------------------|------------------------------------------------------------------------|--------------------------------|
-| Ubiquitous        | `THE <system> SHALL <response>.`                                       | Always active                  |
-| State-driven      | `WHILE <precondition>, THE <system> SHALL <response>.`                 | Active in a continuous state   |
-| Event-driven      | `WHEN <trigger>, THE <system> SHALL <response>.`                       | Discrete event causes behavior |
-| Unwanted-behavior | `IF <trigger>, THEN THE <system> SHALL <response>.`                    | Error/failure mitigation       |
-| Complex           | `WHILE <precondition>, WHEN <trigger>, THE <system> SHALL <response>.` | Both state and event required  |
-| Optional          | `WHERE <feature is included>, THE <system> SHALL <response>.`          | Optional/configurable behavior |
+| Pattern           | Template                                                               | When to use                        |
+|-------------------|------------------------------------------------------------------------|------------------------------------|
+| Ubiquitous        | `THE <system> SHALL <response>.`                                       | Always active                      |
+| State-driven      | `WHILE <precondition>, THE <system> SHALL <response>.`                 | Active in a continuous state       |
+| Event-driven      | `WHEN <trigger>, THE <system> SHALL <response>.`                       | Discrete event causes behavior     |
+| Unwanted-behavior | `IF <trigger>, THEN THE <system> SHALL <response>.`                    | Error/failure handling, edge cases |
+| Complex           | `WHILE <precondition>, WHEN <trigger>, THE <system> SHALL <response>.` | Both state and event required      |
+| Optional          | `WHERE <feature is included>, THE <system> SHALL <response>.`          | Optional/configurable behavior     |
 
 RFC 2119: SHALL/MUST = absolute requirement, SHOULD = recommended, MAY = optional.
 

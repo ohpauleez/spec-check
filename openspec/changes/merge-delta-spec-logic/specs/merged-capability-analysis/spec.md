@@ -28,7 +28,7 @@ WHEN a capability has a selected delta spec and no finalized base spec, THE spec
 WHEN the spec-check tool merges a selected delta spec into a capability, THE spec-check tool SHALL apply `REMOVED` operations first, `MODIFIED` operations second, and `ADDED` operations last, all at the requirement-block level using canonical requirement identifiers, and SHALL preserve deterministic output ordering.
 
 **References:**
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Merge Semantics`
+- `openspec/changes/merge-delta-spec-logic/design.md#Merge Semantics`
 - `openspec/changes/merge-delta-spec-logic/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/merge-delta-spec-logic/design.md#Merge Contract`
 
@@ -67,7 +67,7 @@ IF a selected delta spec contains malformed, ambiguous, duplicate, or unsupporte
 
 **References:**
 - `openspec/changes/merge-delta-spec-logic/proposal.md#Failure Modes`
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Findings And Error Handling`
+- `openspec/changes/merge-delta-spec-logic/design.md#Findings Catalog`
 - `openspec/changes/merge-delta-spec-logic/design.md#Failure And Reliability`
 
 #### Scenario: Unsupported Standalone Scenario Surfaced [MCA-MERGE-STANDALONE]

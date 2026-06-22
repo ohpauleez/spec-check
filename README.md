@@ -56,9 +56,10 @@ Using `spec-check` to analyze an entire project can take ~10-15 minutes (most of
 
 ```sh
 node dist/spec-check.js \
-  openspec/specs/catalog-and-parse \
+  openspec/specs/catalog-and-parse/spec.md \
   openspec/specs/claim-graph-and-coverage/spec.md \
   openspec/specs/formalization-and-logic-analysis/spec.md \
+  openspec/specs/merged-capability-analysis/spec.md \
   openspec/specs/reporting-and-evidence/spec.md \
   openspec/specs/source-traceability-and-code-backwards/spec.md \
   docs/design.md \

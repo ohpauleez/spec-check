@@ -170,8 +170,8 @@ describe("adversarial inputs", () => {
         specs: [{
           file: "spec.md",
           requirements: [
-            { title: "First", identifier: "REQ-DUPLICATE", body: "WHEN x, THE system SHALL do A.", earsType: "event-driven", references: ["proposal.md#Scope"], provenance: { file: "spec.md", line: 5 } },
-            { title: "Second", identifier: "REQ-DUPLICATE", body: "WHEN y, THE system SHALL do B.", earsType: "event-driven", references: ["proposal.md#Scope"], provenance: { file: "spec.md", line: 10 } },
+            { title: "First", identifier: "REQ-DUPLICATE", body: "WHEN x, THE system SHALL do A.", earsType: "event-driven", deltaOperation: "base", references: ["proposal.md#Scope"], provenance: { file: "spec.md", line: 5 } },
+            { title: "Second", identifier: "REQ-DUPLICATE", body: "WHEN y, THE system SHALL do B.", earsType: "event-driven", deltaOperation: "base", references: ["proposal.md#Scope"], provenance: { file: "spec.md", line: 10 } },
           ],
           scenarios: [],
           deltaSections: ["ADDED"],
@@ -186,7 +186,7 @@ describe("adversarial inputs", () => {
       const result = buildClaimGraph({
         specs: [{
           file: "",
-          requirements: [{ title: "", identifier: "REQ-EMPTY", body: "", earsType: "non-ears", references: [], provenance: { file: "", line: 0 } }],
+          requirements: [{ title: "", identifier: "REQ-EMPTY", body: "", earsType: "non-ears", deltaOperation: "base", references: [], provenance: { file: "", line: 0 } }],
           scenarios: [],
           deltaSections: [],
           structuralFindings: [],
@@ -226,7 +226,7 @@ describe("adversarial inputs", () => {
       const result = buildClaimGraph({
         specs: [{
           file: "m.md",
-          requirements: [{ title: "E", identifier: "MIX-EMPTY", body: "", earsType: "non-ears", references: [], provenance: { file: "m.md", line: 1 } }],
+          requirements: [{ title: "E", identifier: "MIX-EMPTY", body: "", earsType: "non-ears", deltaOperation: "base", references: [], provenance: { file: "m.md", line: 1 } }],
           scenarios: [],
           deltaSections: [],
           structuralFindings: [],

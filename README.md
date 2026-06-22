@@ -18,7 +18,7 @@ Canonical project docs:
 `spec-check` exists to catch specification defects early enough that developers can correct them before defects spread through the software development lifecycle. It is designed for projects that use the [`srs-driven`](https://github.com/ohpauleez/openspec_srs-driven) OpenSpec schema and treat lightweight formal methods as practical engineering discipline.
 
 At a high level it supports:
-- **specs-forward analysis**: qualitative review, coverage analysis, formalization, and solver-backed logic checks across `proposal.md`, `design.md`, and active `spec.md` files
+- **specs-forward analysis**: qualitative review, coverage analysis, formalization, and solver-backed logic checks across `proposal.md`, `design.md`, and active `spec.md` files (when delta specs are present, finalized and delta specs are merged per capability before analysis)
 - **formalization pipeline**: translates requirement and scenario claims into typed logic IR, clusters alternate interpretations, and generates SMT-LIB artifacts for Z3 analysis
 - **optional source-backed analysis**: traces requirements to source evidence, generates EARS-preferring code-derived specifications, formalizes them through the same pipeline, and uses solver-backed cross-side implication (ie: how strongly aligned are the specs and code?)
 - **evidence-preserving reports**: bounded Markdown reports with provenance, intermediate artifacts, and manifest-based completion semantics
@@ -56,9 +56,10 @@ Using `spec-check` to analyze an entire project can take ~10-15 minutes (most of
 
 ```sh
 node dist/spec-check.js \
-  openspec/specs/catalog-and-parse \
+  openspec/specs/catalog-and-parse/spec.md \
   openspec/specs/claim-graph-and-coverage/spec.md \
   openspec/specs/formalization-and-logic-analysis/spec.md \
+  openspec/specs/merged-capability-analysis/spec.md \
   openspec/specs/reporting-and-evidence/spec.md \
   openspec/specs/source-traceability-and-code-backwards/spec.md \
   docs/design.md \
@@ -118,7 +119,7 @@ The main repository areas are:
 - [src/index.ts](src/index.ts) - CLI entrypoint and exit code mapping
 - [src/cli/](src/cli/) - argv parsing, config loading, pipeline orchestration
 - [src/domain/](src/domain/) - deterministic domain logic, parsers, claim graph, formalization, findings, and errors
-- [src/domain/parser/](src/domain/parser/) - line-oriented parsers for proposal, design, spec, and task documents
+- [src/domain/parser/](src/domain/parser/) - line-oriented parsers for proposal, design, spec, and task documents; per-capability delta merge
 - [src/domain/spec-forward/](src/domain/spec-forward/) - qualitative review and coverage analysis
 - [src/domain/formal/](src/domain/formal/) - formalization sampling, validation, clustering, SMT-LIB compilation, and solver analysis
 - [src/domain/code-backwards/](src/domain/code-backwards/) - source traceability, code-derived spec generation, cross-side implication, and blind comparison

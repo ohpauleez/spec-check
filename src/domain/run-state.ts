@@ -8,6 +8,9 @@
 import type { Finding } from "./findings.js";
 import { invariant, postcondition } from "./assert.js";
 
+// Cached at module load to avoid reading process.env on every addFindings call.
+const IS_DEVELOPMENT = process.env["NODE_ENV"] === "development";
+
 export interface RunState {
   readonly findings: readonly Finding[];
   readonly completedPhases: readonly string[];
@@ -70,7 +73,7 @@ export function addFindings(state: RunState, findings: readonly Finding[]): RunS
   );
 
   // O(n) defense-in-depth check, only in development.
-  if (process.env["NODE_ENV"] === "development") {
+  if (IS_DEVELOPMENT) {
     const nextSet = new Set(nextFindings);
     const missingPrior = state.findings.some((priorFinding) => !nextSet.has(priorFinding));
     invariant(!missingPrior, "findings immutability violated; prior finding removed");

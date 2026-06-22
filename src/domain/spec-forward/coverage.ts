@@ -7,7 +7,7 @@
  *
  * Key exports: `analyzeCoverage`
  */
-import type { ParsedProposal, ParsedSpec, ParsedTaskDocument } from "../model.js";
+import type { MergedCapabilitySpec, ParsedProposal, ParsedSpec, ParsedTaskDocument } from "../model.js";
 import type { Claim, ClaimGraph } from "../claim-graph.js";
 import type { Finding } from "../findings.js";
 import { severityForObligation } from "../claim-graph.js";
@@ -67,6 +67,7 @@ export function analyzeCoverage(input: {
   readonly claimGraph: ClaimGraph;
   readonly proposal?: ParsedProposal;
   readonly specs: readonly ParsedSpec[];
+  readonly mergedSpecs?: readonly MergedCapabilitySpec[];
   readonly tasks?: ParsedTaskDocument;
 }): readonly Finding[] {
   const findings: Finding[] = [];
@@ -75,11 +76,17 @@ export function analyzeCoverage(input: {
   // across the O(upstream x downstream) comparisons in sub-analyses.
   const tokenCache = buildTokenCache(input.claimGraph.claims);
 
-  findings.push(...detectMissingSpecFiles(input.proposal, input.specs));
-  findings.push(...detectUnsupportedReferences(input.claimGraph));
-  findings.push(...detectCoverageGaps(input.claimGraph, tokenCache));
-  findings.push(...detectContradictionsAndDrift(input.claimGraph, tokenCache));
-  findings.push(...detectTaskEvidenceInconsistency(input.claimGraph, tokenCache));
+  // Single-pass partition: eliminates 7 redundant .filter() calls across detectors.
+  // Each detector receives exactly the claim slices it needs.
+  const partition = partitionClaims(input.claimGraph.claims);
+  const nonSpecClaims = [...partition.upstream, ...partition.tasks];
+  const downstream = [...partition.requirements, ...partition.scenarios];
+
+  findings.push(...detectMissingSpecFiles(input.proposal, input.specs, input.mergedSpecs));
+  findings.push(...detectUnsupportedReferences(nonSpecClaims, partition.requirements));
+  findings.push(...detectCoverageGaps(partition.upstream, downstream, tokenCache));
+  findings.push(...detectContradictionsAndDrift(partition.upstream, partition.requirements, tokenCache));
+  findings.push(...detectTaskEvidenceInconsistency(partition.tasks, partition.requirements, tokenCache));
 
   return findings;
 }
@@ -100,6 +107,7 @@ export function analyzeCoverage(input: {
 function detectMissingSpecFiles(
   proposal: ParsedProposal | undefined,
   specs: readonly ParsedSpec[],
+  mergedSpecs?: readonly MergedCapabilitySpec[],
 ): readonly Finding[] {
   if (proposal === undefined) {
     return [];
@@ -115,11 +123,19 @@ function detectMissingSpecFiles(
     .filter((line) => line.startsWith("- "))
     .map((line) => normalizeCapabilityName(line.slice(2)));
 
-  const availableCapabilities = new Set<string>(
-    specs
-      .map((spec) => normalizeCapabilityName(spec.file.split("/").slice(-2)[0] ?? ""))
-      .filter((name) => name.length > 0),
-  );
+  const availableCapabilities = new Set<string>();
+  if (mergedSpecs !== undefined && mergedSpecs.length > 0) {
+    for (const mergedSpec of mergedSpecs) {
+      availableCapabilities.add(normalizeCapabilityName(mergedSpec.capability));
+    }
+  } else {
+    for (const spec of specs) {
+      const capability = normalizeCapabilityName(spec.file.split("/").slice(-2)[0] ?? "");
+      if (capability.length > 0) {
+        availableCapabilities.add(capability);
+      }
+    }
+  }
 
   const findings: Finding[] = [];
   for (const capability of declaredCapabilities) {
@@ -143,25 +159,24 @@ function detectMissingSpecFiles(
 /**
  * Detect requirements that reference upstream files not present in the claim graph.
  *
- * @param graph - claim graph containing all parsed claims
+ * @param nonSpecClaims - pre-partitioned non-spec claims (upstream + task evidence)
+ * @param requirements - pre-partitioned requirement claims to check references for
  * @returns findings for each requirement referencing unsupported upstream content
  *
  * @remarks
- * Precondition: `graph.claims` includes all upstream and downstream claims.
+ * Precondition: `nonSpecClaims` and `requirements` are pre-partitioned slices of the claim graph.
  * Postcondition: finding severity matches the obligation level of the referencing requirement.
  * Invariant: only requirement claims are checked; empty references and archived
  * provenance references (`openspec/changes/archive/`) are skipped.
  * Failure modes: none — pure computation.
  */
-function detectUnsupportedReferences(graph: ClaimGraph): readonly Finding[] {
-  const upstreamClaims = graph.claims.filter((claim) => claim.kind !== "requirement" && claim.kind !== "scenario");
+function detectUnsupportedReferences(
+  nonSpecClaims: readonly Claim[],
+  requirements: readonly Claim[],
+): readonly Finding[] {
   const findings: Finding[] = [];
 
-  for (const claim of graph.claims) {
-    if (claim.kind !== "requirement") {
-      continue;
-    }
-
+  for (const claim of requirements) {
     for (const reference of claim.references) {
       if (reference.length === 0) {
         continue;
@@ -173,7 +188,7 @@ function detectUnsupportedReferences(graph: ClaimGraph): readonly Finding[] {
         continue;
       }
 
-      const supported = upstreamClaims.some((upstream) => upstream.provenance.file.endsWith(reference.split("#")[0] ?? ""));
+      const supported = nonSpecClaims.some((upstream) => upstream.provenance.file.endsWith(reference.split("#")[0] ?? ""));
       if (supported) {
         continue;
       }
@@ -199,19 +214,22 @@ function detectUnsupportedReferences(graph: ClaimGraph): readonly Finding[] {
 /**
  * Detect upstream claims that lack keyword-level overlap with any downstream requirement or scenario.
  *
- * @param graph - claim graph containing upstream and downstream claims
+ * @param upstream - pre-partitioned upstream claims (proposal, design, assumption, invariant, failure_mode)
+ * @param downstream - pre-partitioned downstream claims (requirements + scenarios)
  * @param tokenCache - pre-computed keyword token sets for all claims
  * @returns warning findings for each upstream claim without downstream coverage
  *
  * @remarks
- * Precondition: `tokenCache` has entries for all claims in `graph`.
+ * Precondition: `tokenCache` has entries for all claims in `upstream` and `downstream`.
  * Postcondition: each finding identifies one upstream claim lacking downstream support.
  * Invariant: overlap is determined by shared keyword tokens (minimum 5 characters).
  * Failure modes: none — pure computation.
  */
-function detectCoverageGaps(graph: ClaimGraph, tokenCache: TokenCache): readonly Finding[] {
-  const upstream = graph.claims.filter((claim) => isUpstreamClaim(claim.kind));
-  const downstream = graph.claims.filter((claim) => claim.kind === "requirement" || claim.kind === "scenario");
+function detectCoverageGaps(
+  upstream: readonly Claim[],
+  downstream: readonly Claim[],
+  tokenCache: TokenCache,
+): readonly Finding[] {
   const findings: Finding[] = [];
 
   for (const sourceClaim of upstream) {
@@ -239,25 +257,28 @@ function detectCoverageGaps(graph: ClaimGraph, tokenCache: TokenCache): readonly
 /**
  * Detect contradictions (negation conflicts) and semantic drift between upstream and downstream claims.
  *
- * @param graph - claim graph containing upstream and downstream claims
+ * @param upstream - pre-partitioned upstream claims (proposal, design, assumption, invariant, failure_mode)
+ * @param requirements - pre-partitioned requirement claims
  * @param tokenCache - pre-computed keyword token sets for all claims
  * @returns findings for contradictions and drift between overlapping claim pairs
  *
  * @remarks
- * Precondition: `tokenCache` has entries for all claims in `graph`.
+ * Precondition: `tokenCache` has entries for all claims in `upstream` and `requirements`.
  * Postcondition: contradiction findings are emitted at the requirement's obligation severity;
  * drift findings are always warnings.
  * Invariant: only claim pairs with keyword overlap are compared.
  * Failure modes: none — pure computation.
  */
-function detectContradictionsAndDrift(graph: ClaimGraph, tokenCache: TokenCache): readonly Finding[] {
-  const upstream = graph.claims.filter((claim) => isUpstreamClaim(claim.kind));
-  const downstream = graph.claims.filter((claim) => claim.kind === "requirement");
+function detectContradictionsAndDrift(
+  upstream: readonly Claim[],
+  requirements: readonly Claim[],
+  tokenCache: TokenCache,
+): readonly Finding[] {
   const findings: Finding[] = [];
 
   for (const sourceClaim of upstream) {
     const sourceTokens = tokenCache.get(sourceClaim);
-    for (const requirement of downstream) {
+    for (const requirement of requirements) {
       if (!cachedTokensOverlap(sourceTokens, tokenCache.get(requirement))) {
         continue;
       }
@@ -301,20 +322,23 @@ function detectContradictionsAndDrift(graph: ClaimGraph, tokenCache: TokenCache)
 /**
  * Detect task evidence claims that lack matching requirements or conflict with them.
  *
- * @param graph - claim graph containing task evidence and requirement claims
+ * @param tasks - pre-partitioned task evidence claims
+ * @param requirements - pre-partitioned requirement claims
  * @param tokenCache - pre-computed keyword token sets for all claims
  * @returns findings for unmatched task evidence and task/requirement conflicts
  *
  * @remarks
- * Precondition: `tokenCache` has entries for all claims in `graph`.
+ * Precondition: `tokenCache` has entries for all claims in `tasks` and `requirements`.
  * Postcondition: each orphan task evidence produces a `coverage.task_gap` finding;
  * each negation conflict produces a `coverage.task_conflict` finding.
  * Invariant: overlap between task and requirement is keyword-based.
  * Failure modes: none — pure computation.
  */
-function detectTaskEvidenceInconsistency(graph: ClaimGraph, tokenCache: TokenCache): readonly Finding[] {
-  const tasks = graph.claims.filter((claim) => claim.kind === "task_evidence");
-  const requirements = graph.claims.filter((claim) => claim.kind === "requirement");
+function detectTaskEvidenceInconsistency(
+  tasks: readonly Claim[],
+  requirements: readonly Claim[],
+  tokenCache: TokenCache,
+): readonly Finding[] {
   const findings: Finding[] = [];
 
   for (const taskClaim of tasks) {
@@ -356,17 +380,54 @@ function detectTaskEvidenceInconsistency(graph: ClaimGraph, tokenCache: TokenCac
 }
 
 /**
- * Determine whether a claim kind belongs to the upstream category.
- *
- * @param kind - claim kind discriminator from the Claim union
- * @returns true if the kind is an upstream claim type (proposal, design, assumption, invariant, or failure mode)
+ * Pre-partitioned claim arrays by role, built in a single pass over the claim graph.
  *
  * @remarks
- * Postcondition: returns true only for the closed set of upstream claim kinds.
+ * Invariant: the union of all four arrays equals the original claims array (no claims lost).
+ * The partition is exhaustive over the {@link ClaimKind} discriminant.
+ */
+interface ClaimPartition {
+  readonly upstream: readonly Claim[];
+  readonly requirements: readonly Claim[];
+  readonly scenarios: readonly Claim[];
+  readonly tasks: readonly Claim[];
+}
+
+/**
+ * Partition claims by their role in coverage analysis in a single O(n) pass.
+ *
+ * Eliminates 7 redundant `.filter()` calls that previously occurred across
+ * individual detector functions, each of which iterated the full claim array.
+ *
+ * @param claims - all claims from the claim graph
+ * @returns a {@link ClaimPartition} with claims bucketed by analysis role
+ *
+ * @remarks
+ * Precondition: `claims` contains valid Claim objects with a recognized `kind`.
+ * Postcondition: every input claim appears in exactly one output bucket.
+ * Invariant: exhaustive switch over {@link ClaimKind} — adding a new kind produces
+ * a compile-time error until the partition is updated.
  * Failure modes: none — pure computation.
  */
-function isUpstreamClaim(kind: Claim["kind"]): boolean {
-  return kind === "proposal_property" || kind === "design_property" || kind === "assumption" || kind === "invariant" || kind === "failure_mode";
+function partitionClaims(claims: readonly Claim[]): ClaimPartition {
+  const upstream: Claim[] = [];
+  const requirements: Claim[] = [];
+  const scenarios: Claim[] = [];
+  const tasks: Claim[] = [];
+  for (const claim of claims) {
+    switch (claim.kind) {
+      case "requirement": requirements.push(claim); break;
+      case "scenario": scenarios.push(claim); break;
+      case "task_evidence": tasks.push(claim); break;
+      case "proposal_property":
+      case "design_property":
+      case "assumption":
+      case "invariant":
+      case "failure_mode":
+        upstream.push(claim); break;
+    }
+  }
+  return { upstream, requirements, scenarios, tasks };
 }
 
 /** Pre-computed keyword token sets indexed by claim identity (reference equality). */

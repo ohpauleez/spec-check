@@ -55,6 +55,7 @@ describe("code-backwards pipeline", () => {
               identifier: "CAT-PIPELINE-REQ",
               body: "WHEN source runs, THE system SHALL behave.",
               earsType: "event-driven",
+              deltaOperation: "base",
               references: ["proposal.md#Scope"],
               provenance: { file: "spec.md", line: 1 },
             },

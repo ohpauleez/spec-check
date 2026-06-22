@@ -57,9 +57,9 @@ describe("claim graph properties", () => {
         const spec: ParsedSpec = {
           file: "spec.md",
           requirements: [
-            { title: "R1", identifier: "R1", body: mandatory, earsType: "event-driven", references: [], provenance: { file: "spec.md", line: 1 } },
-            { title: "R2", identifier: "R2", body: advisory, earsType: "event-driven", references: [], provenance: { file: "spec.md", line: 2 } },
-            { title: "R3", identifier: "R3", body: informational, earsType: "non-ears", references: [], provenance: { file: "spec.md", line: 3 } },
+            { title: "R1", identifier: "R1", body: mandatory, earsType: "event-driven", deltaOperation: "base", references: [], provenance: { file: "spec.md", line: 1 } },
+            { title: "R2", identifier: "R2", body: advisory, earsType: "event-driven", deltaOperation: "base", references: [], provenance: { file: "spec.md", line: 2 } },
+            { title: "R3", identifier: "R3", body: informational, earsType: "non-ears", deltaOperation: "base", references: [], provenance: { file: "spec.md", line: 3 } },
           ],
           scenarios: [],
           deltaSections: ["ADDED"],

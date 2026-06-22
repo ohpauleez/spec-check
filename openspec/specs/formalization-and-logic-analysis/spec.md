@@ -149,9 +149,9 @@ fact clusters_respect_equivalence {
 WHEN an external LLM call returns text that contains a valid JSON payload wrapped in markdown fences or explanatory text, THE spec-check tool SHALL recover the payload deterministically before schema validation.
 
 **References:**
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Failure Modes`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Make JSON extraction tolerant but keep schema validation strict`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Failure Modes`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Make JSON extraction tolerant but keep schema validation strict`
 
 #### Scenario: Accept Markdown-Fenced JSON [FLA-JSON-FENCE]
 WHEN an external LLM response wraps a valid JSON payload in markdown code fences, THE spec-check tool SHALL strip the outer fence markers and SHALL parse the enclosed JSON payload.
@@ -159,7 +159,7 @@ WHEN an external LLM response wraps a valid JSON payload in markdown code fences
 **Postcondition:** Common markdown formatting does not cause an otherwise valid payload to be rejected.
 
 ##### Evidence
-- Implementation: [opencode.ts:409 extractJsonPayload()](/src/adapters/opencode.ts#L409), [opencode.ts:437 stripMarkdownFences()](/src/adapters/opencode.ts#L437)
+- Implementation: [opencode.ts:406 extractJsonPayload()](/src/adapters/opencode.ts#L406), [opencode.ts:434 stripMarkdownFences()](/src/adapters/opencode.ts#L434)
 - Test: [opencode.test.ts:147 accepts markdown-fenced JSON payloads](/test/contract/opencode.test.ts#L147)
 - Example:
 ```typescript
@@ -174,7 +174,7 @@ WHEN an external LLM response contains explanatory text before or after a valid 
 **Postcondition:** Recoverable wrapper text does not prevent downstream schema validation.
 
 ##### Evidence
-- Implementation: [opencode.ts:409 extractJsonPayload()](/src/adapters/opencode.ts#L409), [opencode.ts:470 extractFirstJsonValue()](/src/adapters/opencode.ts#L470)
+- Implementation: [opencode.ts:406 extractJsonPayload()](/src/adapters/opencode.ts#L406), [opencode.ts:467 extractFirstJsonValue()](/src/adapters/opencode.ts#L467)
 - Test: [opencode.test.ts:168 accepts wrapped prefixed/suffixed JSON payloads](/test/contract/opencode.test.ts#L168)
 - Test (property): [opencode.test.ts:189 accepts prefix+json wrappers when prefix excludes braces/brackets](/test/contract/opencode.test.ts#L189)
 - Example:
@@ -190,22 +190,68 @@ IF an external LLM response does not contain a recoverable valid JSON payload, T
 **Postcondition:** Malformed payloads are surfaced explicitly rather than accepted silently.
 
 ##### Evidence
-- Implementation: [opencode.ts:409 extractJsonPayload()](/src/adapters/opencode.ts#L409)
-- Test: [opencode.test.ts:459 throws on truncated JSON (unbalanced braces)](/test/contract/opencode.test.ts#L459), [opencode.test.ts:465 throws on input with only prose text](/test/contract/opencode.test.ts#L465)
+- Implementation: [opencode.ts:406 extractJsonPayload()](/src/adapters/opencode.ts#L406)
+- Test: [opencode.test.ts:664 throws on truncated JSON (unbalanced braces)](/test/contract/opencode.test.ts#L664), [opencode.test.ts:670 throws on input with only prose text](/test/contract/opencode.test.ts#L670)
 - Example:
 ```typescript
 const { extractJsonPayload } = await import("./src/adapters/opencode.ts");
 extractJsonPayload("I cannot provide a JSON response"); //=> throws Error
 ```
 
+#### Requirement model
+
+```alloy
+// --- JSON payload extraction: structural invariants (pure function) ---
+// JSON extraction is deterministic and total: every input is either
+// recoverable (fenced, wrapped, pure) or irrecoverable (rejected with error).
+
+abstract sig JsonInput {}
+sig MarkdownFenced, PrefixedSuffixed, PureJson, Irrecoverable extends JsonInput {}
+
+sig JsonExtraction {
+  input : one JsonInput,
+  recovered : one Bool
+}
+
+// Precondition: input is raw LLM response text (always available after call)
+// Postconditions by input type:
+fact fenced_accepted {
+  all je : JsonExtraction | je.input in MarkdownFenced implies je.recovered = True
+}
+fact wrapped_accepted {
+  all je : JsonExtraction | je.input in PrefixedSuffixed implies je.recovered = True
+}
+fact pure_accepted {
+  all je : JsonExtraction | je.input in PureJson implies je.recovered = True
+}
+fact irrecoverable_rejected {
+  all je : JsonExtraction | je.input in Irrecoverable implies je.recovered = False
+}
+
+// Safety: recovered payloads are never from irrecoverable inputs
+assert recovered_implies_valid_input {
+  all je : JsonExtraction | je.recovered = True implies je.input not in Irrecoverable
+}
+
+// Safety: irrecoverable inputs are explicitly rejected (no silent acceptance)
+assert irrecoverable_never_silent {
+  all je : JsonExtraction | je.input in Irrecoverable implies je.recovered = False
+}
+
+// Invariant: extraction is a total function (every input maps to exactly one result)
+assert extraction_total {
+  all je : JsonExtraction | je.recovered = True or je.recovered = False
+}
+```
+
 ### Requirement: Formalize Requirement And Scenario Claims Into Logic Artifacts [FLA-FORMALIZE-CLAIMS]
 WHEN requirement and scenario claims are available for formal analysis, THE spec-check tool SHALL translate each claim into a typed logic representation and generated SMT-LIB artifacts that preserve the claim identifier, source provenance, obligation level, and supporting declarations needed for solver analysis, and SHALL use the run-configured universal timeout for every external LLM formalization invocation.
 
 **References:**
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Make JSON extraction tolerant but keep schema validation strict`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Make JSON extraction tolerant but keep schema validation strict`
 
 #### Scenario: Generate Inspectable Logic Artifacts [FLA-FORMAL-ARTS]
 WHEN a claim is selected for formalization, THE spec-check tool SHALL emit inspectable logic and SMT artifacts that let a reviewer trace the formal result back to the originating requirement or scenario.
@@ -214,8 +260,7 @@ WHEN a claim is selected for formalization, THE spec-check tool SHALL emit inspe
 
 ##### Evidence
 - Implementation: [formalize.ts:154 formalizeClaims()](/src/domain/formal/formalize.ts#L154), [formalize.ts:476 buildFormalizationPrompt()](/src/domain/formal/formalize.ts#L476)
-- Test: [formalize.test.ts:45 formalizeClaims produces valid candidates](/test/contract/formalize.test.ts#L45), [formalize.test.ts:159 buildFormalizationPrompt fences claim text as untrusted](/test/contract/formalize.test.ts#L159)
-- Test (invariant): [safety-liveness.invariant.test.ts:177 LIVE-11: formalization completes with valid output](/test/invariant/safety-liveness.invariant.test.ts#L177)
+- Test: [formalize.test.ts:45 formalizeClaims produces valid candidates from mock responses](/test/contract/formalize.test.ts#L45), [formalize.test.ts:159 buildFormalizationPrompt fences claim text as untrusted](/test/contract/formalize.test.ts#L159), [safety-liveness.invariant.test.ts:177 LIVE-11: if opencode responds with valid output, formalization completes](/test/invariant/safety-liveness.invariant.test.ts#L177)
 
 #### Scenario: Abort On Complete Formalization Failure [FLA-FORMAL-FAIL]
 IF no formalization candidates are produced for the entire phase after bounded retries, THEN THE spec-check tool SHALL abort the run with exit code `2` rather than continue with zero formal evidence.
@@ -320,8 +365,7 @@ WHEN a formalization sample passes schema validation for sort consistency, asser
 
 ##### Evidence
 - Implementation: [validate.ts:52 validateFormalizationSample()](/src/domain/formal/validate.ts#L52)
-- Test: [validate.test.ts:14 accepts valid sample](/test/contract/validate.test.ts#L14), [validate.test.ts:62 accepts nested balanced parentheses](/test/contract/validate.test.ts#L62)
-- Test (invariant): [safety-liveness.invariant.test.ts:68 SAFE-3: no sample enters clustering without validation](/test/invariant/safety-liveness.invariant.test.ts#L68)
+- Test: [validate.test.ts:14 accepts valid sample](/test/contract/validate.test.ts#L14), [validate.test.ts:62 accepts nested balanced parentheses](/test/contract/validate.test.ts#L62), [safety-liveness.invariant.test.ts:68 SAFE-3: no formalization sample enters clustering without schema validation](/test/invariant/safety-liveness.invariant.test.ts#L68)
 - Example:
 ```typescript
 const { validateFormalizationSample } = await import("./src/domain/formal/validate.ts");
@@ -336,8 +380,7 @@ IF a formalization sample violates the logic IR schema, THEN THE spec-check tool
 
 ##### Evidence
 - Implementation: [validate.ts:52 validateFormalizationSample()](/src/domain/formal/validate.ts#L52)
-- Test: [validate.test.ts:20 rejects non-object input](/test/contract/validate.test.ts#L20), [validate.test.ts:26 rejects missing claimId](/test/contract/validate.test.ts#L26), [validate.test.ts:32 rejects invalid obligation](/test/contract/validate.test.ts#L32), [validate.test.ts:38 rejects unbalanced assertion parentheses](/test/contract/validate.test.ts#L38), [validate.test.ts:47 rejects function with undeclared sort](/test/contract/validate.test.ts#L47)
-- Test (invariant): [safety-liveness.invariant.test.ts:68 SAFE-3: no sample enters clustering without validation](/test/invariant/safety-liveness.invariant.test.ts#L68)
+- Test: [validate.test.ts:20 rejects non-object input](/test/contract/validate.test.ts#L20), [validate.test.ts:26 rejects missing claimId](/test/contract/validate.test.ts#L26), [validate.test.ts:32 rejects invalid obligation](/test/contract/validate.test.ts#L32), [validate.test.ts:38 rejects unbalanced assertion parentheses](/test/contract/validate.test.ts#L38), [validate.test.ts:47 rejects function with undeclared sort](/test/contract/validate.test.ts#L47), [safety-liveness.invariant.test.ts:68 SAFE-3: no formalization sample enters clustering without schema validation](/test/invariant/safety-liveness.invariant.test.ts#L68)
 - Example:
 ```typescript
 const { validateFormalizationSample } = await import("./src/domain/formal/validate.ts");
@@ -460,7 +503,7 @@ WHEN the spec-check tool compiles logic IR into SMT-LIB text, THE compiled outpu
 
 ##### Evidence
 - Implementation: [smtlib.ts:41 compileSmtlib()](/src/domain/formal/smtlib.ts#L41)
-- Test: [smtlib.test.ts:27 compiles logic IR with mapping comments](/test/contract/smtlib.test.ts#L27), [smtlib.test.ts:45 produces single smt2 without solver commands](/test/contract/smtlib.test.ts#L45)
+- Test: [smtlib.test.ts:27 compiles logic IR with mapping comments](/test/contract/smtlib.test.ts#L27), [smtlib.test.ts:45 produces a single smt2 without solver commands (callers append them)](/test/contract/smtlib.test.ts#L45)
 - Example:
 ```typescript
 const { compileSmtlib } = await import("./src/domain/formal/smtlib.ts");
@@ -530,15 +573,17 @@ assert safe_ids_preserved {
 ```
 
 ### Requirement: Per-Spec Combined SMT-LIB Compilation [FLA-SPEC-COMBINE]
-WHEN the spec-check tool performs logic analysis, THE spec-check tool SHALL combine all formalized claims from a single spec file into exactly one SMT-LIB file, SHALL deduplicate variable and function declarations across claims, and SHALL use named assertions (`(assert (! expr :named label))`) to enable unsat-core identification. The compiled output SHALL NOT include solver commands (`check-sat`, `set-option`, `get-unsat-core`) — the logic analysis orchestrator appends these at query time using a two-phase approach (Phase 1: satisfiability check only; Phase 2: re-run with `(set-option :produce-unsat-cores true)` and `(get-unsat-core)` only when UNSAT is detected).
+WHEN the spec-check tool performs specs-forward logic analysis, THE spec-check tool SHALL combine all formalized claims from a single merged capability analysis unit into exactly one SMT-LIB file, SHALL deduplicate variable and function declarations across claims, and SHALL use named assertions (`(assert (! expr :named label))`) to enable unsat-core identification. The compiled output SHALL NOT include solver commands (`check-sat`, `set-option`, `get-unsat-core`) — the logic analysis orchestrator appends these at query time using a two-phase approach (Phase 1: satisfiability check only; Phase 2: re-run with `(set-option :produce-unsat-cores true)` and `(get-unsat-core)` only when UNSAT is detected).
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Scope`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Interaction Protocols`
 
 #### Scenario: Variable And Function Deduplication [FLA-SPEC-DEDUP]
-WHEN multiple claims from the same spec declare identical variable or function names with identical sorts or signatures, THE spec-check tool SHALL emit only one declaration in the combined output.
+WHEN multiple claims from the same merged capability analysis unit declare identical variable or function names with identical sorts or signatures, THE spec-check tool SHALL emit only one declaration in the combined output.
 
 **Postcondition:** The combined SMT-LIB file has no duplicate declarations from compatible claims.
 
@@ -547,7 +592,7 @@ WHEN multiple claims from the same spec declare identical variable or function n
 - Test: [smtlib.test.ts:67 deduplicates identical variable declarations](/test/contract/smtlib.test.ts#L67), [smtlib.test.ts:79 deduplicates identical function declarations](/test/contract/smtlib.test.ts#L79)
 
 #### Scenario: Function Signature Conflict Detection [FLA-SPEC-CONFLICT]
-IF two claims from the same spec declare the same function name with incompatible signatures, THEN THE spec-check tool SHALL emit a `logic.merge_conflict` finding, SHALL exclude the conflicting claim from the combined file, and SHALL preserve both claim identifiers in the finding evidence.
+IF two claims from the same merged capability analysis unit declare the same function name with incompatible signatures, THEN THE spec-check tool SHALL emit a `logic.merge_conflict` finding, SHALL exclude the conflicting claim from the combined file, and SHALL preserve both claim identifiers in the finding evidence.
 
 **Postcondition:** Signature conflicts are surfaced as findings rather than producing malformed solver input.
 
@@ -757,7 +802,7 @@ WHEN sample A implies sample B and sample B implies sample A, THE spec-check too
 ##### Evidence
 - Implementation: [clustering.ts:313 buildEquivalenceClusters()](/src/domain/formal/clustering.ts#L313)
 - Test: [clustering.test.ts:101 mutual unsat produces single cluster](/test/contract/clustering.test.ts#L101)
-- Test (property): [logic.property.test.ts:20 cluster construction is deterministic and symmetric](/test/property/logic.property.test.ts#L20)
+- Test (property): [logic.property.test.ts:20 cluster construction is deterministic and symmetric for mutual pairs](/test/property/logic.property.test.ts#L20)
 - Example:
 ```typescript
 const { buildEquivalenceClusters } = await import("./src/domain/formal/clustering.ts");
@@ -773,7 +818,7 @@ WHEN the same formalization samples and solver results are processed on two sepa
 
 ##### Evidence
 - Implementation: [clustering.ts:313 buildEquivalenceClusters()](/src/domain/formal/clustering.ts#L313)
-- Test (property): [logic.property.test.ts:20 cluster construction is deterministic and symmetric](/test/property/logic.property.test.ts#L20)
+- Test (property): [logic.property.test.ts:20 cluster construction is deterministic and symmetric for mutual pairs](/test/property/logic.property.test.ts#L20)
 
 #### Requirement model
 
@@ -796,20 +841,22 @@ assert clustering_deterministic {
 ```
 
 ### Requirement: Run Per-Spec Combined Solver Analysis [FLA-RUN-LOGIC]
-WHEN formal artifacts are available, THE spec-check tool SHALL group representative claims by source spec file, SHALL compile each group into a single combined SMT-LIB file with named assertions, SHALL invoke Z3 per spec group using a two-phase approach (Phase 1: satisfiability check only; Phase 2: re-invoke with unsat-core support only when contradiction is detected), and SHALL classify contradictions with severity derived from the highest-obligation claim in the unsat core.
+WHEN formal artifacts are available, THE spec-check tool SHALL group representative spec-derived claims by merged capability analysis unit, SHALL compile each group into a single combined SMT-LIB file with named assertions, SHALL invoke Z3 per merged capability group using a two-phase approach (Phase 1: satisfiability check only; Phase 2: re-invoke with unsat-core support only when contradiction is detected), and SHALL classify contradictions with severity derived from the highest-obligation claim in the unsat core.
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Quality Attributes`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Interaction Protocols`
 
 #### Scenario: Report Contradiction With Unsat-Core Identification [FLA-LOGIC-CORE]
-WHEN a per-spec combined query returns unsat, THE spec-check tool SHALL parse the unsat core to identify the specific conflicting claims, SHALL report a `logic.contradiction` finding referencing those claims, and SHALL derive severity from the highest-obligation claim in the core (mandatory → error, advisory → warning, informational → info).
+WHEN a per-merged-capability combined query returns unsat, THE spec-check tool SHALL parse the unsat core to identify the specific conflicting claims, SHALL report a `logic.contradiction` finding referencing those claims, and SHALL derive severity from the highest-obligation claim in the core (mandatory → error, advisory → warning, informational → info).
 
-**Postcondition:** Reviewers can identify which specific claims within a spec are mutually contradictory.
+**Postcondition:** Reviewers can identify which specific claims within a merged capability view are mutually contradictory.
 
 ##### Evidence
-- Implementation: [logic-analysis.ts:208 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L208)
+- Implementation: [logic-analysis.ts:135 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L135)
 - Test: [logic-analysis.test.ts:36 mandatory contradiction reported at severity error](/test/contract/logic-analysis.test.ts#L36), [logic-analysis.test.ts:181 unsat core identifies specific conflicting claims](/test/contract/logic-analysis.test.ts#L181)
 - Test (integration): [z3-smtlib.integration.test.ts:75 directly contradictory bare assertions produce UNSAT](/test/integration/z3-smtlib.integration.test.ts#L75)
 
@@ -830,31 +877,145 @@ obligationToSeverity("informational"); //=> info
 ```
 
 #### Scenario: Preserve Inconclusive Solver Result [FLA-LOGIC-TIMEOUT]
-IF the solver returns timeout or unknown for a per-spec query, THEN THE spec-check tool SHALL preserve the inconclusive result as evidence and SHALL emit a `logic.inconclusive` finding at warning severity.
+IF the solver returns timeout or unknown for a per-merged-capability query, THEN THE spec-check tool SHALL preserve the inconclusive result as evidence and SHALL emit a `logic.inconclusive` finding at warning severity.
 
 **Postcondition:** Inconclusive logic results remain visible to reviewers and do not masquerade as success.
 
 ##### Evidence
-- Implementation: [logic-analysis.ts:293 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L293)
+- Implementation: [logic-analysis.ts:135 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L135)
 - Test: [logic-analysis.test.ts:76 timeout/unknown result preserved as inconclusive finding](/test/contract/logic-analysis.test.ts#L76)
 
 #### Scenario: Sat Result Triggers Deeper Analysis [FLA-LOGIC-SAT]
-WHEN a per-spec combined query returns sat, THE spec-check tool SHALL NOT emit a global contradiction finding for that spec, but SHALL proceed with pairwise guard-activation contradiction checks and completeness gap detection to identify conditional contradictions and unspecified states that the global satisfiability check cannot surface.
+WHEN a per-merged-capability combined query returns sat, THE spec-check tool SHALL NOT emit a global contradiction finding for that merged capability, but SHALL proceed with pairwise guard-activation contradiction checks and completeness gap detection to identify conditional contradictions and unspecified states that the global satisfiability check cannot surface.
 
-**Postcondition:** A globally satisfiable spec is not assumed free of all issues; deeper conditional analysis follows.
+**Postcondition:** A globally satisfiable merged capability is not assumed free of all issues; deeper conditional analysis follows.
 
 ##### Evidence
-- Implementation: [logic-analysis.ts:324 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L324)
+- Implementation: [logic-analysis.ts:135 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L135)
 - Test: [logic-analysis.test.ts:140 sat result does not generate contradiction finding](/test/contract/logic-analysis.test.ts#L140)
 
 #### Scenario: Solver Error Produces Finding [FLA-LOGIC-ERROR]
-IF the solver emits error diagnostics (such as `(error ...)` lines in stdout) indicating malformed input, THEN THE spec-check tool SHALL emit a `logic.solver_error` finding at error severity referencing all claims in the affected spec group, and SHALL persist the solver input and output as evidence.
+IF the solver emits error diagnostics (such as `(error ...)` lines in stdout) indicating malformed input, THEN THE spec-check tool SHALL emit a `logic.solver_error` finding at error severity referencing all claims in the affected merged capability group, and SHALL persist the solver input and output as evidence.
 
 **Postcondition:** Solver errors are surfaced as explicit findings rather than silently treated as successful analysis.
 
 ##### Evidence
-- Implementation: [logic-analysis.ts:258 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L258)
+- Implementation: [logic-analysis.ts:135 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L135)
 - Test: [logic-analysis.test.ts:232 solver error produces logic.solver_error finding](/test/contract/logic-analysis.test.ts#L232)
+
+### Requirement: Group Specs-Forward Logic By Merged Capability [FLA-GROUP-MERGED]
+WHEN the spec-check tool prepares specs-forward logical analysis, THE spec-check tool SHALL group spec-derived claims by merged capability identity rather than by raw source-spec file path, SHALL use the merged capability `logicalFile` as the artifact-naming and report-grouping key, and SHALL exclude non-spec claims from this capability-grouped logic path.
+
+**References:**
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Postconditions`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Provenance And Grouping Contract`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Verification Strategy`
+
+#### Scenario: One Logic Group Per Merged Capability [FLA-GROUP-ONE]
+WHEN one capability has finalized-plus-delta inputs that merge into one active capability view, THE spec-check tool SHALL produce exactly one specs-forward logical-analysis group for that capability.
+
+**Postcondition:** Base and delta files for the same capability are no longer analyzed as separate solver groups.
+
+##### Evidence
+- Implementation: [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345)
+- Test: [pipeline-helpers.test.ts:77 produces one logic group per non-empty merged capability with no omissions](/test/contract/pipeline-helpers.test.ts#L77), [merge-logic-routing.test.ts:35 runs one logic group per merged capability and detects contradictions in one run](/test/contract/merge-logic-routing.test.ts#L35)
+
+#### Scenario: Synthetic Logical Key Drives Artifact Naming [FLA-GROUP-LOGICAL]
+WHEN the spec-check tool persists solver artifacts or reports for a merged capability logic group, THE spec-check tool SHALL derive those artifact names from the merged capability `logicalFile` key rather than from the original base or delta source file paths.
+
+**Postcondition:** Capability-scoped logic artifacts align with merged capability semantics while original claim provenance remains unchanged.
+
+##### Evidence
+- Implementation: [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345), [pipeline-helpers.ts:403 sanitizeLogicalFileForArtifacts()](/src/cli/pipeline-helpers.ts#L403), [logic-analysis.ts:207 artifactBase computation in analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L207)
+- Test: [pipeline-helpers.test.ts:126 groups by Claim.capability instead of provenance.file](/test/contract/pipeline-helpers.test.ts#L126), [merge-logic-routing.test.ts:57 writes logic artifacts under synthetic merged logicalFile artifact key](/test/contract/merge-logic-routing.test.ts#L57)
+
+#### Scenario: Sanitized Logical Key Collision Aborts Pipeline [FLA-GROUP-COLLISION]
+IF two merged capability logical keys would sanitize to the same artifact-path key, THEN THE spec-check tool SHALL abort the pipeline before writing any logic artifacts.
+
+**Postcondition:** Persisted solver evidence remains deterministic and collision-free.
+
+##### Evidence
+- Implementation: [pipeline-helpers.ts:386 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L386), [pipeline-helpers.ts:403 sanitizeLogicalFileForArtifacts()](/src/cli/pipeline-helpers.ts#L403)
+- Test: [pipeline-helpers.test.ts:150 fails on sanitized logicalFile collisions](/test/contract/pipeline-helpers.test.ts#L150)
+
+#### Requirement model
+
+```alloy
+// --- Merged capability grouping: logical keys and collision detection ---
+
+sig LogicalKey {
+  sanitizedForm : one LogicalKey    // self-referencing: the sanitized version
+}
+
+sig LogicalGroup {
+  groupCap : one Spec,              // the merged capability this group represents
+  logicalKey : one LogicalKey,      // derived from merged capability identity
+  groupClaims : set Claim           // claims in this group (spec-derived only)
+}
+
+// Invariant: one logic group per merged capability [FLA-GROUP-ONE]
+fact one_group_per_capability {
+  all disj lg1, lg2 : LogicalGroup | lg1.groupCap != lg2.groupCap
+}
+
+// Invariant: groups only contain claims from their capability
+fact group_claims_from_capability {
+  all lg : LogicalGroup | lg.groupClaims in { c : Claim | c.spec = lg.groupCap }
+}
+
+// Invariant: non-spec claims excluded from capability-grouped logic path
+fact non_spec_excluded {
+  all lg : LogicalGroup, c : lg.groupClaims | c.spec = lg.groupCap
+}
+
+// Invariant: logical key drives artifact naming (not source file)
+fact logical_key_drives_naming {
+  all lg : LogicalGroup | some lg.logicalKey.sanitizedForm
+}
+
+// Collision predicate: two groups sanitize to same key [FLA-GROUP-COLLISION]
+pred logical_key_collision {
+  some disj lg1, lg2 : LogicalGroup |
+    lg1.logicalKey.sanitizedForm = lg2.logicalKey.sanitizedForm
+}
+
+// Failure mode: collision aborts pipeline before writing artifacts
+pred collision_aborts_pipeline {
+  Pipeline.phase = CompilationPh
+  logical_key_collision
+  // Effect: abort immediately
+  Pipeline.phase' = AbortedPh
+  Pipeline.exitCode' = 2
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+}
+
+// Safety: collision always aborts (never silently overwrites)
+assert collision_implies_abort {
+  always (
+    (Pipeline.phase = CompilationPh and logical_key_collision and
+     Pipeline.phase' != CompilationPh)
+    implies Pipeline.phase' = AbortedPh)
+}
+
+// Safety: without collision, compilation phase does not abort from this path
+assert no_collision_no_grouping_abort {
+  always (
+    (Pipeline.phase = CompilationPh and not logical_key_collision)
+    implies not collision_aborts_pipeline)
+}
+
+// Liveness: every merged capability eventually produces exactly one logic group
+// (given that compilation phase is reached and no collision)
+assert group_formation_complete {
+  always (
+    (Pipeline.phase = CompilationPh and not logical_key_collision)
+    implies (all sp : Spec | some lg : LogicalGroup | lg.groupCap = sp
+      implies one lg2 : LogicalGroup | lg2.groupCap = sp))
+}
+```
 
 #### Requirement model
 
@@ -1036,7 +1197,7 @@ WHEN the spec-check tool emits a pairwise contradiction finding, THE severity SH
 **Postcondition:** Pairwise contradiction severity is consistent with the obligation-aware severity model used by the global contradiction check.
 
 ##### Evidence
-- Implementation: [logic-analysis-checks.ts:131 deriveSeverityFromClaims()](/src/domain/formal/logic-analysis-checks.ts#L131)
+- Implementation: [logic-analysis-sexpr.ts:309 deriveSeverityFromClaims()](/src/domain/formal/logic-analysis-sexpr.ts#L309)
 - Test: [logic-analysis.test.ts:253 pairwise severity derived from highest-obligation claim](/test/contract/logic-analysis.test.ts#L253)
 
 #### Requirement model
@@ -1302,7 +1463,7 @@ WHEN a per-spec solver query returns sat, THE spec-check tool SHALL persist the 
 **Postcondition:** The satisfiable result is available for reviewer inspection.
 
 ##### Evidence
-- Implementation: [logic-analysis.ts:335 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L335)
+- Implementation: [logic-analysis.ts:135 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L135)
 - Test: [logic-analysis.test.ts:96 persists SMT-LIB input, stdout, stderr](/test/contract/logic-analysis.test.ts#L96)
 
 #### Scenario: Unsat Core Persisted [FLA-PERSIST-UNSAT]
@@ -1311,7 +1472,7 @@ WHEN a per-spec solver query returns unsat, THE spec-check tool SHALL persist th
 **Postcondition:** The contradictory assertion subset (unsat core) is available for reviewer inspection and maps back to specific claims via named assertion labels.
 
 ##### Evidence
-- Implementation: [logic-analysis.ts:226 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L226)
+- Implementation: [logic-analysis.ts:135 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L135)
 - Test: [logic-analysis.test.ts:96 persists SMT-LIB input, stdout, stderr](/test/contract/logic-analysis.test.ts#L96)
 
 #### Requirement model
@@ -1337,17 +1498,100 @@ assert unsat_has_core {
 ### State machine and invariant checks
 
 ```alloy
-// --- Failure mode summary ---
-// 1. Total formalization failure: abort with exit code 2
-// 2. Partial formalization failure: continue with available candidates
-// 3. Schema validation failure: exclude bad samples, preserve as evidence
-// 4. Signature conflicts: exclude conflicting claim, emit merge_conflict finding
-// 5. Clustering ambiguity: emit ambiguity finding, no representative selected
-// 6. Solver timeout: classify as inconclusive, emit warning, continue
-// 7. Solver error: emit solver_error finding at error severity, persist evidence
-// 8. Pair budget exhaustion: stop checking, no indefinite block
+// ============================================================
+// FAILURE MODES — Explicit predicates with guard/effect/frame
+// ============================================================
+//
+// Each failure mode is modeled as a named predicate with:
+//   - Guard: phase and condition that triggers the failure
+//   - Effect: state changes (phase transition, findings, exit code)
+//   - Frame: all mutable relations not affected are preserved
+//
+// FM-1: Total formalization failure -> abort with exit code 2
+// (Already modeled above as formalize_abort)
+//
+// FM-2: Partial formalization failure -> continue with available candidates
+// (Already modeled above as formalize_partial)
+//
+// FM-3: Schema validation failure -> exclude bad sample, preserve as evidence
+// (Already modeled above as validate_reject)
+//
+// FM-4: Signature conflicts -> exclude conflicting claim, emit merge_conflict
+// (Already modeled above as emit_merge_conflict)
+//
+// FM-5: Clustering ambiguity -> emit ambiguity finding, no representative
+// (Already modeled above as cluster_divergent)
+//
+// FM-6: Solver timeout -> classify as inconclusive, emit warning, continue
+// (Already modeled above as solver_inconclusive)
+//
+// FM-7: Solver error -> emit solver_error finding, persist evidence
+// (Already modeled above as solver_error_found)
 
-// --- Transition system ---
+// FM-8: Pair budget exhaustion -> stop checking, bounded termination
+pred pair_budget_exhausted {
+  // Guard: analysis phase, pairwise checks in progress
+  Pipeline.phase = AnalysisPh
+  // Effect: no additional pairwise findings emitted (budget spent)
+  // The pipeline continues to the next analysis step
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// FM-9: Logical key collision -> abort pipeline before writing artifacts
+// (Already modeled above as collision_aborts_pipeline)
+
+// FM-10: JSON extraction failure -> sample rejected before schema validation
+pred json_extraction_failure {
+  // Guard: formalization phase, LLM response is irrecoverable
+  Pipeline.phase = FormalizationPh
+  // Effect: no sample created from this response (state unchanged)
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// --- Failure mode safety assertions ---
+
+// FM-8: pair budget exhaustion never produces false findings
+assert budget_exhaustion_no_false_findings {
+  always (pair_budget_exhausted implies Pipeline.findings' = Pipeline.findings)
+}
+
+// FM-9: collision abort always sets exit code 2
+assert collision_abort_sets_exit_code {
+  always (collision_aborts_pipeline implies Pipeline.exitCode' = 2)
+}
+
+// FM-10: JSON failures never corrupt pipeline state
+assert json_failure_no_state_corruption {
+  always (json_extraction_failure implies (
+    Pipeline.candidates' = Pipeline.candidates and
+    Pipeline.findings' = Pipeline.findings))
+}
+
+// Cross-cutting: every abort sets exit code 2
+assert all_aborts_set_exit_code {
+  always (Pipeline.phase' = AbortedPh implies Pipeline.exitCode' = 2)
+}
+
+// Cross-cutting: non-abort failures preserve phase
+assert non_abort_failures_preserve_phase {
+  always (
+    (pair_budget_exhausted or json_extraction_failure)
+    implies Pipeline.phase' != AbortedPh)
+}
+
+// ============================================================
+// TRANSITION SYSTEM
+// ============================================================
 
 pred advance_to_compilation {
   Pipeline.phase = ClusteringPh
@@ -1361,6 +1605,7 @@ pred advance_to_compilation {
 
 pred advance_to_analysis {
   Pipeline.phase = CompilationPh
+  not logical_key_collision
   Pipeline.phase' = AnalysisPh
   Pipeline.candidates' = Pipeline.candidates
   Pipeline.representatives' = Pipeline.representatives
@@ -1399,52 +1644,93 @@ pred init_state {
 
 fact transitions {
   init_state and always (
-    // Formalization events
+    // Formalization events (including FM-1, FM-2, FM-10)
     formalize_success or formalize_abort or formalize_partial
-    // Validation events
+    or json_extraction_failure
+    // Validation events (including FM-3)
     or (some s : Sample | validate_accept[s] or validate_reject[s])
     or validation_complete
-    // Clustering events
+    // Clustering events (including FM-5)
     or (some c : Claim, cl : Cluster | cluster_select_representative[c, cl])
     or (some c : Claim | cluster_divergent[c])
-    // Compilation events
+    // Compilation events (including FM-4, FM-9)
     or (some disj c1, c2 : Claim | emit_merge_conflict[c1, c2])
+    or collision_aborts_pipeline
     // Phase transitions
     or advance_to_compilation or advance_to_analysis or advance_to_reporting
-    // Solver analysis events
+    // Solver analysis events (including FM-6, FM-7)
     or (some sqr : SpecQueryResult |
         solver_reports_contradiction[sqr] or solver_inconclusive[sqr] or
         solver_sat_deeper[sqr] or solver_error_found[sqr])
-    // Pairwise events
+    // Pairwise events (including FM-8)
     or (some pc : PairwiseCheck | pairwise_contradiction[pc] or pairwise_compatible[pc])
+    or pair_budget_exhausted
     // Completeness events
     or (some gc : GapCheck | completeness_gap_detected[gc] or exhaustive_guards[gc])
     or (some sp : Spec | completeness_gap_skipped[sp])
-    // Stutter
+    // Stutter (required for deadlock-free infinite traces)
     or stutter
   )
 }
 
-// --- Global safety properties ---
+// ============================================================
+// GLOBAL SAFETY PROPERTIES
+// ============================================================
 
-// Phases only advance forward (monotonic)
+// S1: Phases only advance forward (monotonic); abort is absorbing
 assert phase_monotonic {
   always (Pipeline.phase = AbortedPh implies after always Pipeline.phase = AbortedPh)
 }
 
-// Findings accumulate monotonically (never removed)
+// S2: Reporting is also absorbing (terminal state)
+assert reporting_absorbing {
+  always (Pipeline.phase = ReportingPh implies after always Pipeline.phase = ReportingPh)
+}
+
+// S3: Findings accumulate monotonically (never removed)
 assert findings_monotonic {
   always (Pipeline.findings in Pipeline.findings')
 }
 
-// Evidence accumulates monotonically (never removed)
+// S4: Evidence accumulates monotonically (never removed)
 assert evidence_monotonic {
   always (Pipeline.evidence in Pipeline.evidence')
 }
 
-// --- Liveness properties ---
+// S5: Candidates accumulate monotonically during validation
+assert candidates_monotonic_in_validation {
+  always (Pipeline.phase = ValidationPh implies
+    Pipeline.candidates in Pipeline.candidates')
+}
 
-// Pipeline eventually terminates given fair scheduling
+// S6: Representatives accumulate monotonically during clustering
+assert representatives_monotonic_in_clustering {
+  always (Pipeline.phase = ClusteringPh implies
+    Pipeline.representatives in Pipeline.representatives')
+}
+
+// S7: Pipeline reaches at most one terminal state
+assert single_terminal_state {
+  always (Pipeline.phase in (ReportingPh + AbortedPh) implies
+    after always Pipeline.phase' = Pipeline.phase)
+}
+
+// S8: No finding can reference a claim not in the pipeline domain
+assert findings_reference_valid_claims {
+  always (all f : Pipeline.findings | f.involvedClaims in Claim)
+}
+
+// S9: Exit code is only set when aborting
+assert exit_code_only_on_abort {
+  always (some Pipeline.exitCode' implies
+    (Pipeline.phase' = AbortedPh or some Pipeline.exitCode))
+}
+
+// ============================================================
+// LIVENESS PROPERTIES
+// ============================================================
+
+// L1: Pipeline eventually terminates given fair scheduling
 pred pipeline_fairness {
   always eventually (Pipeline.phase' != Pipeline.phase or
                      Pipeline.phase in (ReportingPh + AbortedPh))
@@ -1454,79 +1740,212 @@ assert pipeline_terminates {
   pipeline_fairness implies eventually (Pipeline.phase in (ReportingPh + AbortedPh))
 }
 
-// --- Commands ---
+// L2: Every submitted solver query eventually resolves
+// Guaranteed by bounded timeout: no query runs longer than its budget.
+pred solver_fairness {
+  always (Pipeline.phase = AnalysisPh implies
+    eventually Pipeline.phase != AnalysisPh)
+}
+
+assert solver_queries_resolve {
+  (pipeline_fairness and solver_fairness) implies eventually (
+    Pipeline.phase in (ReportingPh + AbortedPh))
+}
+
+// L3: Merged capabilities eventually produce exactly one logic group
+// (given compilation phase is reached without collision)
+assert merged_cap_group_formation {
+  pipeline_fairness implies always (
+    (Pipeline.phase = CompilationPh and not logical_key_collision)
+    implies eventually Pipeline.phase = AnalysisPh)
+}
+
+// L4: Evidence is eventually persisted for every analysis event
+assert evidence_eventually_persisted {
+  pipeline_fairness implies always (
+    Pipeline.phase = AnalysisPh implies
+      eventually (Pipeline.evidence' != Pipeline.evidence or
+                  Pipeline.phase != AnalysisPh))
+}
+
+// L5: Collision detection terminates finitely
+assert collision_check_terminates {
+  always (Pipeline.phase = CompilationPh implies
+    eventually (Pipeline.phase != CompilationPh))
+}
+
+// L6: Formalization phase eventually completes
+pred formalization_fairness {
+  always (Pipeline.phase = FormalizationPh implies
+    eventually Pipeline.phase != FormalizationPh)
+}
+
+assert formalization_eventually_resolves {
+  formalization_fairness implies eventually (
+    Pipeline.phase in (ValidationPh + AbortedPh))
+}
+
+// L7: Pairwise analysis terminates (bounded by pair budget)
+assert pairwise_terminates {
+  solver_fairness implies always (
+    Pipeline.phase = AnalysisPh implies
+      eventually (Pipeline.phase != AnalysisPh or pair_budget_exhausted))
+}
+
+// ============================================================
+// COMMANDS — Scenario exploration
+// ============================================================
 
 run show_pipeline {} for 3 Claim, 1 Spec, 4 Sample, 2 Cluster,
   2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 8 steps
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
+  2 LogicalGroup, 2 LogicalKey, 2 JsonExtraction, 4 JsonInput, 5 Int, 8 steps
 
 run scenario_contradiction {
   eventually (some f : Pipeline.findings | f.findingType = Contradiction)
 } for 3 Claim, 1 Spec, 3 Sample, 2 Cluster, 2 Finding,
   2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion, 2 Declaration,
   2 DeclName, 2 DeclSignature, 1 CombinedSpec, 1 CompiledArtifact,
-  2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 10 steps
+  2 ClaimId, 2 ImplicationResult, 1 GapCheck,
+  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 10 steps
 
 run scenario_abort {
   eventually (Pipeline.phase = AbortedPh and Pipeline.exitCode = 2)
 } for 2 Claim, 1 Spec, 2 Sample, 1 Cluster, 1 Finding,
   1 SpecQueryResult, 0 PairwiseCheck, 1 Assertion, 1 Declaration,
   1 DeclName, 1 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact,
-  1 ClaimId, 0 ImplicationResult, 0 GapCheck, 5 Int, 5 steps
+  1 ClaimId, 0 ImplicationResult, 0 GapCheck,
+  0 LogicalGroup, 0 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 5 steps
+
+run scenario_collision_abort {
+  eventually collision_aborts_pipeline
+} for 2 Claim, 2 Spec, 2 Sample, 1 Cluster, 1 Finding,
+  0 SpecQueryResult, 0 PairwiseCheck, 1 Assertion, 1 Declaration,
+  1 DeclName, 1 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact,
+  1 ClaimId, 0 ImplicationResult, 0 GapCheck,
+  2 LogicalGroup, 2 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 8 steps
+
+run scenario_json_recovery {
+  some je : JsonExtraction | je.input in MarkdownFenced and je.recovered = True
+  some je : JsonExtraction | je.input in Irrecoverable and je.recovered = False
+} for 0 Claim, 0 Spec, 0 Sample, 0 Cluster, 0 Finding,
+  0 SpecQueryResult, 0 PairwiseCheck, 0 Assertion, 0 Declaration,
+  0 DeclName, 0 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact,
+  0 ClaimId, 0 ImplicationResult, 0 GapCheck,
+  0 LogicalGroup, 0 LogicalKey, 3 JsonExtraction, 4 JsonInput, 5 Int, 1 steps
+
+run scenario_pairwise_budget {
+  eventually pair_budget_exhausted
+} for 3 Claim, 1 Spec, 3 Sample, 2 Cluster, 2 Finding,
+  1 SpecQueryResult, 2 PairwiseCheck, 3 Assertion, 2 Declaration,
+  2 DeclName, 2 DeclSignature, 1 CombinedSpec, 1 CompiledArtifact,
+  2 ClaimId, 2 ImplicationResult, 1 GapCheck,
+  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps
+
+// ============================================================
+// COMMANDS — Property verification (check)
+// ============================================================
 
 check abort_no_conclusions for 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
   2 Finding, 1 SpecQueryResult, 0 PairwiseCheck, 2 Assertion,
   1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
-  0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck, 5 Int, 12 steps expect 0
+  0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck,
+  1 LogicalGroup, 1 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
 
 check only_valid_in_candidates for 3 Claim, 1 Spec, 4 Sample, 2 Cluster,
   2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 12 steps expect 0
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
+  1 LogicalGroup, 1 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
 
 check symmetric_implication_same_cluster for 3 Claim, 1 Spec, 5 Sample, 3 Cluster,
   1 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
-  0 CompiledArtifact, 1 ClaimId, 4 ImplicationResult, 0 GapCheck, 5 Int, 1 steps expect 0
+  0 CompiledArtifact, 1 ClaimId, 4 ImplicationResult, 0 GapCheck,
+  0 LogicalGroup, 0 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 1 steps expect 0
 
 check sat_no_global_contradiction for 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
   3 Finding, 2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 12 steps expect 0
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
+  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
 
 check compatible_no_false_positive for 3 Claim, 1 Spec, 3 Sample, 2 Cluster,
   2 Finding, 1 SpecQueryResult, 2 PairwiseCheck, 3 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 10 steps expect 0
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
+  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 10 steps expect 0
 
 check ubiquitous_no_spurious_gap for 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
   2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 3 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 10 steps expect 0
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
+  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 10 steps expect 0
 
 check findings_monotonic for 3 Claim, 1 Spec, 3 Sample, 2 Cluster,
   3 Finding, 2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 15 steps expect 0
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
+  1 LogicalGroup, 1 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 15 steps expect 0
 
 check phase_monotonic for 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
   2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
-  0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck, 5 Int, 15 steps expect 0
+  0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck,
+  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 15 steps expect 0
+
+check reporting_absorbing for 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
+  2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
+  1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
+  0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck,
+  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 15 steps expect 0
 
 check all_queries_persisted for 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
   3 Finding, 3 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 12 steps expect 0
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
+  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
 
 check timeout_never_contradiction for 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
   3 Finding, 3 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck, 5 Int, 12 steps expect 0
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
+  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
+
+check collision_implies_abort for 2 Claim, 2 Spec, 2 Sample, 1 Cluster,
+  1 Finding, 0 SpecQueryResult, 0 PairwiseCheck, 1 Assertion,
+  1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
+  0 CompiledArtifact, 1 ClaimId, 0 ImplicationResult, 0 GapCheck,
+  2 LogicalGroup, 2 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
+
+check all_aborts_set_exit_code for 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
+  3 Finding, 2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
+  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
+  2 LogicalGroup, 2 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 15 steps expect 0
+
+check budget_exhaustion_no_false_findings for 3 Claim, 1 Spec, 3 Sample, 2 Cluster,
+  2 Finding, 1 SpecQueryResult, 2 PairwiseCheck, 3 Assertion,
+  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
+  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
+  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
 
 check pipeline_terminates for 2 Claim, 1 Spec, 2 Sample, 1 Cluster,
   2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
-  0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck, 5 Int, 20 steps
+  0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck,
+  1 LogicalGroup, 1 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 20 steps
+
+check solver_queries_resolve for 2 Claim, 1 Spec, 2 Sample, 1 Cluster,
+  2 Finding, 2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
+  1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
+  0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck,
+  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 20 steps
+
+check formalization_eventually_resolves for 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
+  1 Finding, 0 SpecQueryResult, 0 PairwiseCheck, 1 Assertion,
+  1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
+  0 CompiledArtifact, 1 ClaimId, 0 ImplicationResult, 0 GapCheck,
+  0 LogicalGroup, 0 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 15 steps
 ```

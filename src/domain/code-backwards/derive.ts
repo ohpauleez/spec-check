@@ -259,24 +259,35 @@ const EXCLUDED_SOURCE_DIRECTORIES: ReadonlySet<string> = new Set([
   ".venv",
 ]);
 
+/** Maximum directory traversal depth for source context collection. */
+const MAX_SOURCE_WALK_DEPTH = 50;
+
 /**
  * Recursively walk a directory and collect relative file paths.
  *
  * @param baseDir - absolute root path used to compute relative paths
  * @param currentDir - absolute path of the directory currently being traversed
  * @param results - mutable accumulator for discovered relative file paths
+ * @param depth - remaining recursion budget; stops descending when zero
  * @returns resolves when traversal is complete; results are appended to `results`
  *
  * @remarks
  * Precondition: `baseDir` is a prefix of `currentDir`.
+ * Precondition: `depth >= 0`.
  * Postcondition: all regular files reachable from `currentDir` (excluding directories
  * in {@link EXCLUDED_SOURCE_DIRECTORIES}) are appended to `results` as relative paths
- * from `baseDir`.
+ * from `baseDir`, up to the depth limit.
  * Failure modes: if `readdir` fails on `currentDir`, returns without appending
- * anything — does not throw.
+ * anything — does not throw. Silently stops if depth is exhausted.
  * Safety: mutates `results` array; caller owns the array exclusively.
+ * Bounded recursion: cannot exceed `MAX_SOURCE_WALK_DEPTH` stack frames.
  */
-async function walkDirectory(baseDir: string, currentDir: string, results: string[]): Promise<void> {
+async function walkDirectory(baseDir: string, currentDir: string, results: string[], depth: number = MAX_SOURCE_WALK_DEPTH): Promise<void> {
+  if (depth <= 0) {
+    // Safety: silently stop — source context is best-effort, not critical.
+    return;
+  }
+
   let entries;
   try {
     entries = await readdir(currentDir, { withFileTypes: true });
@@ -292,7 +303,7 @@ async function walkDirectory(baseDir: string, currentDir: string, results: strin
 
     const fullPath = join(currentDir, entry.name);
     if (entry.isDirectory()) {
-      await walkDirectory(baseDir, fullPath, results);
+      await walkDirectory(baseDir, fullPath, results, depth - 1);
     } else if (entry.isFile()) {
       results.push(relative(baseDir, fullPath));
     }
@@ -446,9 +457,9 @@ function parseInformalizationResponse(
         severity: "warning",
         category: "code_derived.invalid_capability_entry",
         provenance: { file: "<informalization>" },
-      description: "Skipped malformed capability entry in informalization response",
-      rationale: "Each capability entry must conform to the expected shape to produce a valid derived spec",
-      evidence: [{ kind: "raw", value: JSON.stringify(entry).slice(0, 200) }],
+        description: "Skipped malformed capability entry in informalization response",
+        rationale: "Each capability entry must conform to the expected shape to produce a valid derived spec",
+        evidence: [{ kind: "raw", value: JSON.stringify(entry).slice(0, 200) }],
       });
     }
   }

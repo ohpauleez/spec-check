@@ -1,3 +1,5 @@
+import { precondition } from "./assert.js";
+
 /**
  * Branded types for compile-time prevention of value confusion.
  *
@@ -148,13 +150,25 @@ export function toOutputDirPath(raw: string): OutputDirPath {
  * @param raw - path string to validate and brand
  * @returns branded RelativePath
  *
+ * @throws {Error} when `raw` starts with `/` or contains `..` traversal segments
+ *
  * @remarks
- * Precondition: `raw` does not start with `/` and does not contain `..` traversal
- * that would escape the parent directory. Runtime confinement checking is performed
- * separately by `resolveConfinedOutputPath`.
- * Postcondition: returned value carries the `RelativePath` brand.
+ * Precondition: `raw` does not start with `/` and no path segment is literally `..`.
+ * Only actual traversal segments are rejected — filenames containing `..` as a
+ * substring (e.g., `data/version..2/file.md`) are permitted because they do not
+ * escape the parent directory. Enforced at runtime so that malicious or malformed
+ * paths are rejected at the branding boundary rather than relying solely on
+ * downstream `resolveConfinedOutputPath` calls.
+ * Postcondition: returned value carries the `RelativePath` brand and is free of
+ * absolute-path prefixes and parent-directory traversal segments.
  */
 export function toRelativePath(raw: string): RelativePath {
+  // Check per-segment: only reject segments that are literally ".." (traversal),
+  // not filenames that happen to contain ".." as a substring.
+  precondition(
+    !raw.startsWith("/") && !raw.split("/").some((seg) => seg === ".."),
+    `invalid relative path (must not be absolute or contain '..' traversal segments): ${raw}`,
+  );
   return raw as RelativePath;
 }
 

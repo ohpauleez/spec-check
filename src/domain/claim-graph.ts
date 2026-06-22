@@ -6,6 +6,7 @@
  * Exports: ClaimKind, Claim, ClaimGraph, buildClaimGraph.
  */
 import type {
+  MergedCapabilitySpec,
   ParsedDesign,
   ParsedProposal,
   ParsedRequirement,
@@ -153,9 +154,32 @@ export function buildClaimGraph(input: {
   readonly proposal?: ParsedProposal;
   readonly design?: ParsedDesign;
   readonly specs: readonly ParsedSpec[];
+  readonly mergedSpecs?: readonly MergedCapabilitySpec[];
   readonly tasks?: ParsedTaskDocument;
 }): ClaimGraphOutput {
   const claims: Claim[] = [];
+  const findings: Finding[] = [];
+
+  // --- Allocation strategy note ---
+  // Each extract function allocates a fresh local array, populates it, and returns
+  // it. The caller spreads the result into `claims` via `push(...extracted)`.
+  //
+  // This produces small intermediate arrays (typically 5–50 elements each, one per
+  // artifact type) that are immediately eligible for GC. An alternative design —
+  // passing `claims` as a mutable accumulator — would eliminate these allocations
+  // but sacrifices two properties the style guide (typescript_style.md) prioritizes:
+  //
+  // 1. Safety: Each extract function is a pure transformation (input → output) with
+  //    no side effects on external state. This makes them independently testable and
+  //    composable without reasoning about shared mutable references.
+  //
+  // 2. Readability: Return-value semantics make data flow explicit at the call site.
+  //    The reader sees exactly what each function contributes without tracing an
+  //    accumulator parameter through multiple frames.
+  //
+  // The allocations are bounded (one per artifact type), occur exactly once per
+  // pipeline run, and are well within V8's TurboFan fast-path for small arrays.
+  // Per the style guide's Safety > Performance ordering, this tradeoff is correct.
 
   if (input.proposal !== undefined) {
     claims.push(...extractProposalClaims(input.proposal));
@@ -163,14 +187,38 @@ export function buildClaimGraph(input: {
   if (input.design !== undefined) {
     claims.push(...extractDesignClaims(input.design));
   }
-  for (const spec of input.specs) {
-    claims.push(...extractSpecClaims(spec));
+  if (input.mergedSpecs !== undefined && input.mergedSpecs.length > 0) {
+    for (const mergedSpec of input.mergedSpecs) {
+      claims.push(...extractMergedSpecClaims(mergedSpec));
+    }
+
+    // Guard: detect raw specs that are not represented in any merged spec's
+    // sourceFiles. If mergedSpecs is non-empty, all raw spec claims come from the
+    // merged view — any uncovered raw spec has its claims silently dropped. Emit a
+    // warning so this does not go unnoticed if path conventions are ever relaxed.
+    const coveredFiles = new Set(input.mergedSpecs.flatMap((ms) => ms.sourceFiles));
+    for (const spec of input.specs) {
+      if (!coveredFiles.has(spec.file)) {
+        findings.push({
+          severity: "warning",
+          category: "claim_graph.unmerged_spec_ignored",
+          provenance: { file: spec.file },
+          description: `Spec file "${spec.file}" is not covered by any merged capability and its claims were not included in the graph`,
+          rationale: "When merged specs are present, raw spec claims are replaced by the merged view. A spec file missing from all MergedCapabilitySpec.sourceFiles indicates a gap in capability assignment.",
+          evidence: [{ kind: "spec_file", value: spec.file }],
+        });
+      }
+    }
+  } else {
+    for (const spec of input.specs) {
+      claims.push(...extractSpecClaims(spec));
+    }
   }
   if (input.tasks !== undefined) {
     claims.push(...extractTaskClaims(input.tasks));
   }
 
-  const findings = detectOrphanClaims(claims);
+  findings.push(...detectOrphanClaims(claims));
   return { graph: { claims }, findings };
 }
 
@@ -196,6 +244,19 @@ function extractSpecClaims(spec: ParsedSpec): readonly Claim[] {
   return claims;
 }
 
+function extractMergedSpecClaims(spec: MergedCapabilitySpec): readonly Claim[] {
+  const claims: Claim[] = [];
+
+  for (const requirement of spec.requirements) {
+    claims.push(claimFromRequirement(requirement, spec.capability));
+  }
+  for (const scenario of spec.scenarios) {
+    claims.push(claimFromScenario(scenario, spec.capability));
+  }
+
+  return claims;
+}
+
 /**
  * Convert a single parsed requirement into a typed claim.
  *
@@ -205,7 +266,7 @@ function extractSpecClaims(spec: ParsedSpec): readonly Claim[] {
  * @remarks
  * Postcondition: the claim's `id` is set only when `requirement.identifier` is defined.
  */
-function claimFromRequirement(requirement: ParsedRequirement): Claim {
+function claimFromRequirement(requirement: ParsedRequirement, capability?: CapabilityName): Claim {
   return {
     ...(requirement.identifier === undefined ? {} : { id: toClaimId(requirement.identifier) }),
     kind: "requirement",
@@ -213,6 +274,7 @@ function claimFromRequirement(requirement: ParsedRequirement): Claim {
     obligation: deriveObligation(requirement.body),
     provenance: requirement.provenance,
     references: requirement.references,
+    ...(capability === undefined ? {} : { capability }),
   };
 }
 
@@ -226,7 +288,7 @@ function claimFromRequirement(requirement: ParsedRequirement): Claim {
  * Postcondition: the claim's `id` is set only when `scenario.identifier` is defined.
  * Postcondition: `references` is always empty for scenario-derived claims.
  */
-function claimFromScenario(scenario: ParsedScenario): Claim {
+function claimFromScenario(scenario: ParsedScenario, capability?: CapabilityName): Claim {
   return {
     ...(scenario.identifier === undefined ? {} : { id: toClaimId(scenario.identifier) }),
     kind: "scenario",
@@ -234,6 +296,7 @@ function claimFromScenario(scenario: ParsedScenario): Claim {
     obligation: deriveObligation(scenario.body),
     provenance: scenario.provenance,
     references: [],
+    ...(capability === undefined ? {} : { capability }),
   };
 }
 

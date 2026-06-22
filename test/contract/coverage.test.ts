@@ -20,6 +20,7 @@ const makeSpec = (capability: string, requirements: { title: string; id: string;
     identifier: r.id,
     body: r.body,
     earsType: "event-driven" as const,
+    deltaOperation: "base" as const,
     references: r.refs,
     provenance: { file: `specs/${capability}/spec.md`, line: i * 5 + 3 },
   })),

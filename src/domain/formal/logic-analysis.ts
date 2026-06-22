@@ -49,6 +49,7 @@ export interface LogicAnalysisOutput {
  */
 export interface SpecClaimGroup {
   readonly specFile: string;
+  readonly artifactKey?: string;
   readonly claims: readonly LogicIrClaim[];
 }
 
@@ -203,7 +204,7 @@ async function analyzeSpecGroup(
     ...(z3Path === undefined ? {} : { z3Path }),
   });
 
-  const artifactBase = `smt/${compiled.sanitizedSpecId}`;
+  const artifactBase = `smt/${group.artifactKey ?? compiled.sanitizedSpecId}`;
 
   if (result.kind === "unsat") {
     // UNSAT branch — Goal: Extract the minimal conflicting claim subset.

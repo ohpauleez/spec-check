@@ -121,4 +121,81 @@ describe("config loading and precedence", () => {
     if (!resolved.ok) return;
     expect(resolved.value.timeoutMs).toBe(60000);
   });
+
+  it("rejects timeout above maximum", async () => {
+    traceSpec("CAT-CLI-TIMEOUT");
+    const resolved = await resolveRunConfig({
+      inputs: ["in"],
+      timeoutMs: "1000000",
+      help: false,
+      version: false,
+      allowArchive: false,
+    });
+
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(resolved.error.kind).toBe("timeout_validation_error");
+    if (resolved.error.kind !== "timeout_validation_error") return;
+    expect(resolved.error.message).toContain("must be in range");
+  });
+
+  it("rejects invalid --pair-budget (non-numeric)", async () => {
+    traceSpec("CAT-CLI-CONFIG");
+    const resolved = await resolveRunConfig({
+      inputs: ["in"],
+      pairBudget: "abc",
+      help: false,
+      version: false,
+      allowArchive: false,
+    });
+
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(resolved.error.kind).toBe("pair_budget_validation_error");
+  });
+
+  it("rejects invalid --pair-budget (zero)", async () => {
+    traceSpec("CAT-CLI-CONFIG");
+    const resolved = await resolveRunConfig({
+      inputs: ["in"],
+      pairBudget: "0",
+      help: false,
+      version: false,
+      allowArchive: false,
+    });
+
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(resolved.error.kind).toBe("pair_budget_validation_error");
+  });
+
+  it("rejects invalid --pair-budget (negative)", async () => {
+    traceSpec("CAT-CLI-CONFIG");
+    const resolved = await resolveRunConfig({
+      inputs: ["in"],
+      pairBudget: "-5",
+      help: false,
+      version: false,
+      allowArchive: false,
+    });
+
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(resolved.error.kind).toBe("pair_budget_validation_error");
+  });
+
+  it("accepts valid --pair-budget", async () => {
+    traceSpec("CAT-CLI-CONFIG");
+    const resolved = await resolveRunConfig({
+      inputs: ["in"],
+      pairBudget: "50",
+      help: false,
+      version: false,
+      allowArchive: false,
+    });
+
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.pairBudget).toBe(50);
+  });
 });

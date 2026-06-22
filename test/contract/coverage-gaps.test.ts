@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { describe, expect, it } from "vitest";
 
 import { traceSpec } from "../support/spec-trace.js";
-import { resolveConfinedOutputPath, writeOutputAtomic } from "../../src/adapters/fs.js";
+import { writeOutputAtomic } from "../../src/adapters/fs.js";
 import { isCommandAvailable } from "../../src/adapters/process.js";
 import { traceClaimsToSource } from "../../src/domain/code-backwards/trace.js";
 import { buildClaimGraph } from "../../src/domain/claim-graph.js";
@@ -92,7 +92,7 @@ describe("source traceability scope and hierarchy", () => {
     const graph = buildClaimGraph({
       specs: [{
         file: "spec.md",
-        requirements: [{ title: "R", identifier: "STC-ID-TEST-REQ", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", references: [], provenance: { file: "spec.md", line: 1 } }],
+        requirements: [{ title: "R", identifier: "STC-ID-TEST-REQ", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", deltaOperation: "base", references: [], provenance: { file: "spec.md", line: 1 } }],
         scenarios: [],
         deltaSections: ["ADDED"],
         structuralFindings: [],
@@ -117,7 +117,7 @@ describe("source traceability scope and hierarchy", () => {
     const graph = buildClaimGraph({
       specs: [{
         file: "spec.md",
-        requirements: [{ title: "R", identifier: "STC-ID-SRC", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", references: [], provenance: { file: "spec.md", line: 1 } }],
+        requirements: [{ title: "R", identifier: "STC-ID-SRC", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", deltaOperation: "base", references: [], provenance: { file: "spec.md", line: 1 } }],
         scenarios: [],
         deltaSections: ["ADDED"],
         structuralFindings: [],
@@ -139,7 +139,7 @@ describe("source traceability scope and hierarchy", () => {
     const graph = buildClaimGraph({
       specs: [{
         file: "spec.md",
-        requirements: [{ title: "R", identifier: "SCOPE-IN-REQ", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", references: [], provenance: { file: "spec.md", line: 1 } }],
+        requirements: [{ title: "R", identifier: "SCOPE-IN-REQ", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", deltaOperation: "base", references: [], provenance: { file: "spec.md", line: 1 } }],
         scenarios: [],
         deltaSections: ["ADDED"],
         structuralFindings: [],
@@ -153,8 +153,8 @@ describe("source traceability scope and hierarchy", () => {
 
   it("source outside scope is excluded via path boundary", () => {
     traceSpec("STC-SCOPE-OUT");
-    // resolveConfinedOutputPath prevents traversal outside root
-    expect(() => resolveConfinedOutputPath(toOutputDirPath("/tmp/output"), toRelativePath("../../outside"))).toThrow("escapes");
+    // Defense-in-depth: toRelativePath rejects traversal paths at branding boundary.
+    expect(() => toRelativePath("../../outside")).toThrow("invalid relative path");
   });
 
   it("unreadable source directory results in error", async () => {
@@ -183,8 +183,8 @@ describe("source traceability scope and hierarchy", () => {
       specs: [{
         file: "spec.md",
         requirements: [
-          { title: "Code", identifier: "HIER-CODE-REQ", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", references: [], provenance: { file: "spec.md", line: 1 } },
-          { title: "Doc", identifier: "HIER-DOC-REQ", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", references: [], provenance: { file: "spec.md", line: 2 } },
+          { title: "Code", identifier: "HIER-CODE-REQ", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", deltaOperation: "base", references: [], provenance: { file: "spec.md", line: 1 } },
+          { title: "Doc", identifier: "HIER-DOC-REQ", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", deltaOperation: "base", references: [], provenance: { file: "spec.md", line: 2 } },
         ],
         scenarios: [],
         deltaSections: ["ADDED"],
@@ -217,6 +217,7 @@ describe("source traceability scope and hierarchy", () => {
           identifier: "WEAK-ONLY-REQ",
           body: "WHEN x, THE system SHALL y.",
           earsType: "event-driven",
+          deltaOperation: "base",
           references: [],
           provenance: { file: "spec.md", line: 1 },
         }],

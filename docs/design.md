@@ -125,7 +125,7 @@ The goal is not a proof of the whole system. The goal is justified confidence: t
 | Concern | Authoritative Source | Consequence |
 |---|---|---|
 | specification intent | committed OpenSpec artifacts (proposal, design, spec files) | the tool reads but never mutates specification inputs |
-| capability behavior | active `openspec/specs/**/spec.md` plus at most one in-dev delta per capability | archived specs are excluded by default; explicitly provided archived inputs can be admitted with `--allow-archive` |
+| capability behavior | active `openspec/specs/**/spec.md` plus at most one in-dev delta per capability; when both exist, per-capability merge produces a single merged active view by applying delta operations (ADDED/MODIFIED/REMOVED) against the finalized base | archived specs are excluded by default; explicitly provided archived inputs can be admitted with `--allow-archive` |
 | code-derived guarantees | source directory and its tests/contracts | code-derived analysis is bounded to the declared `--src` scope |
 | analysis conclusions | preserved evidence under the output directory | no final verdict rests on an unpreserved opaque LLM response |
 | run completion | manifest file written last in output directory | manifest absence means incomplete run |
@@ -175,6 +175,7 @@ graph TD
     subgraph Domain["Domain Core (src/domain/)"]
         Catalog["parser/catalog.ts<br/>Input discovery + classification"]
         Parser["parser/spec.ts, proposal.ts,<br/>design.ts, task.ts<br/>Structured parsing"]
+        Merge["parser/merge.ts<br/>Per-capability delta merge"]
         Claims["claim-graph.ts<br/>Normalization + obligation"]
         Coverage["spec-forward/coverage.ts<br/>Gap and contradiction detection"]
         Qualitative["spec-forward/qualitative.ts<br/>LLM-backed review passes"]
@@ -217,7 +218,8 @@ graph TD
     Runner --> Helpers
     Helpers --> Catalog
     Catalog --> Parser
-    Parser --> Claims
+    Parser --> Merge
+    Merge --> Claims
     Claims --> Coverage
     Claims --> Qualitative
     Claims --> Formalize
@@ -250,7 +252,8 @@ graph TD
 flowchart TD
     A[argv + config] --> B[catalog]
     B --> C[structured parse]
-    C --> D[claim graph]
+    C --> CM[per-capability merge]
+    CM --> D[claim graph]
     D --> E[qualitative review]
     D --> F[coverage analysis]
     D --> G[formalization sampling]
@@ -292,6 +295,7 @@ This split matters for assurance. The more the decision logic is isolated from t
 | **Phase runner** ([`src/cli/phase-runner.ts`](src/cli/phase-runner.ts)) | Progress event decoration: exactly one `started` and one `completed`/`failed` event per phase | Generic decorator; no phase-specific knowledge |
 | **Catalog** ([`src/domain/parser/catalog.ts`](src/domain/parser/catalog.ts)) | Resolve input set, classify documents, handle delta/final conflicts | Deterministic given the same inputs; at most one finalized + one delta spec per capability |
 | **Structured parsers** ([`src/domain/parser/`](src/domain/parser/)) | Line-oriented parsing for proposal, design, spec, and task documents | Every input line is either classified or preserved as unparsed evidence |
+| **Per-capability merge** ([`src/domain/parser/merge.ts`](src/domain/parser/merge.ts)) | Merge finalized and delta specs per capability; apply ADDED/MODIFIED/REMOVED semantics; emit merge findings | Output is deterministic; every skipped operation produces exactly one finding; no silent discard of base items |
 | **Claim graph builder** ([`src/domain/claim-graph.ts`](src/domain/claim-graph.ts)) | Normalize parsed content into typed claims with provenance and obligation | No claim exists without provenance; extraction is deterministic |
 | **Qualitative analysis** ([`src/domain/spec-forward/qualitative.ts`](src/domain/spec-forward/qualitative.ts)) | Package parsed content for LLM-backed review passes; validate response schemas | `opencode` responses are schema-validated before acceptance; exactly 2 passes on success |
 | **Coverage analysis** ([`src/domain/spec-forward/coverage.ts`](src/domain/spec-forward/coverage.ts)) | Compare proposal/design claims against capability specs | Deterministic given the same claim graph; no LLM or solver dependency |
@@ -334,6 +338,9 @@ erDiagram
     Document ||--o{ Claim : produces
     Document ||--o{ Finding : "structural findings"
     Capability ||--o{ Claim : groups
+    Capability ||--|| MergedCapabilitySpec : "merged view"
+    MergedCapabilitySpec ||--o{ Claim : "spec claims"
+    MergedCapabilitySpec ||--o{ Finding : "merge findings"
     Claim ||--o{ FormalizationSample : "formalization"
     FormalizationSample ||--o{ EquivalenceCluster : "clustering"
     EquivalenceCluster ||--|| SolverArtifact : "compiled"
@@ -351,9 +358,10 @@ erDiagram
 |---|---|---|---|
 | Document | A proposal, design, capability spec, or task file | input filesystem | read-only; never mutated by analysis; classified by basename |
 | Capability | A logical behavior group represented by one spec file and its purpose | active catalog | resolved from finalized specs plus at most one in-development delta; lexicographically first delta wins on conflict |
+| Merged Capability Spec | The active merged view of a capability after applying delta operations against the finalized base | merge phase | produced per capability; contains merged requirements, scenarios, findings, and provenance-preserving source file links |
 | Requirement | A capability-level behavioral obligation in EARS format | parsed spec file | must carry a canonical bracketed identifier; classified into one of 8 EARS types |
 | Scenario | A concrete, testable behavioral case that refines a requirement | parsed spec file | must carry a canonical bracketed identifier |
-| Claim | A normalized statement derived from requirements, scenarios, properties, or code | claim graph builder | always carries provenance and obligation level; extraction order is deterministic |
+| Claim | A normalized statement derived from requirements, scenarios, properties, or code | claim graph builder | always carries provenance, obligation level, and capability; extraction from merged specs is deterministic |
 | Finding | An analysis result with severity, rationale, provenance, and evidence | analysis phases | never exists without provenance; never silently removed; category is dot-separated hierarchical |
 | Formalization Sample | One candidate formal encoding of a claim as logic IR | LLM-backed formalization | schema-validated before acceptance; variables, functions, sorts, and assertion syntax all checked |
 | Equivalence Cluster | A group of mutually implying formalization samples | solver-backed clustering | BFS-based connected components; represents one interpretation of a claim |
@@ -372,6 +380,10 @@ Document ───────────────────────�
        │                                           │
        v                                           │
   Structured Parser ──> Unparsed Lines (evidence)  │
+       │                                           │
+       v                                           │
+  Per-Capability Merge                             │
+  (finalized base + delta operations = merged view)│
        │                                           │
        v                                           │
      Claim ───────────────────────────────┐        │
@@ -509,6 +521,9 @@ Relevant code: [`src/domain/findings.ts`](src/domain/findings.ts)
 | **D-8** | The manifest is the last file written | `invalidateStaleManifest()` at run start; `writeManifest()` at run end | Manifest absence signals incomplete run |
 | **D-9** | Compiled SMT-LIB never includes `(check-sat)` | `compileSmtlib()` and `compileSpecSmtlib()` | Caller appends solver commands at query time |
 | **D-10** | Claim extraction order is deterministic: proposal → design → specs → tasks | `buildClaimGraph()` iteration order | Property tests |
+| **D-11** | Per-capability merge output is deterministic given the same parsed inputs | `mergeSpecsByCapability()` module-level invariant | Property and determinism tests |
+| **D-12** | Merged active view preserves every base requirement unless a matching REMOVED operation or duplicate-base exclusion finding exists | Merge layer postcondition | Contract and property tests |
+| **D-13** | Every skipped merge operation produces exactly one finding; no silent discard | Merge finding completeness invariant | Property tests |
 
 **Spec references:** [`catalog-and-parse`](openspec/specs/catalog-and-parse/spec.md) -- `[CAT-PARSE-DETERMINISM]`, `[CAT-PRESERVE-LOSS]`; [`claim-graph-and-coverage`](openspec/specs/claim-graph-and-coverage/spec.md); [`reporting-and-evidence`](openspec/specs/reporting-and-evidence/spec.md) -- `[RAE-FINDING-SHAPE]`, `[RAE-FINDINGS-IMMUTABLE]`, `[RAE-ATOMIC-MANIFEST]`.
 
@@ -539,6 +554,7 @@ Relevant code: [`src/domain/findings.ts`](src/domain/findings.ts)
 | Dependency check | Resolved config available | `opencode` and `z3` confirmed on PATH | `DependencyError` |
 | Catalog | At least one input path resolves to readable artifacts | Catalog identifies every document and its classification; archived specs excluded; delta conflicts surfaced as findings | `CatalogError` |
 | Structured parsing | Cataloged documents are readable UTF-8 | Each document produces a typed model; all lines classified or preserved as unparsed evidence | Structural findings with provenance |
+| Per-capability merge | Parsed specs available; catalog identifies finalized and delta documents per capability | Merged capability specs produced with deterministic output; merge findings emitted for skipped operations and structural issues; no capability has more than one delta | `PipelineAbortError` on sanitized artifact-key collisions or internal merge exceptions |
 | Claim graph | At least one document parsed with recognizable structure | Every recognized element normalized into a typed claim with provenance | Orphaned claims surfaced as defects |
 | Qualitative analysis | Claim graph has at least one claim; `opencode` available | Schema-validated findings from exactly 2 LLM passes with severity, rationale, provenance, and evidence | `QualitativeError` after bounded retries |
 | Coverage analysis | Claims from proposal/design and at least one spec | Missing coverage, contradictions, unsupported references, and task inconsistencies reported | Deterministic; no external dependencies |
@@ -646,7 +662,9 @@ stateDiagram-v2
     CheckDependencies --> BuildCatalog: dependencies available
     BuildCatalog --> FatalExit: unreadable input
     BuildCatalog --> ParseDocuments: catalog valid
-    ParseDocuments --> IngestionComplete: all documents parsed
+    ParseDocuments --> MergePerCapability: all documents parsed
+    MergePerCapability --> FatalExit: artifact-key collision or internal error
+    MergePerCapability --> IngestionComplete: merge succeeded
     IngestionComplete --> [*]
     FatalExit --> [*]
 ```
@@ -659,7 +677,9 @@ stateDiagram-v2
 | `z3` not on PATH | `DependencyError` | exit `4` |
 | input path unreadable | `CatalogError` | exit `5` |
 | multiple deltas for same capability | surface finding; keep lexicographically first | catalog with conflict findings |
-| document parsed successfully | typed model + structural findings | proceed to claim graph |
+| document parsed successfully | typed model + structural findings | proceed to merge |
+| merge produces sanitized artifact-key collision | `PipelineAbortError` | exit with error |
+| merge completes with findings | merged capability specs + merge findings | proceed to claim graph |
 
 #### Invariants
 
@@ -669,6 +689,8 @@ stateDiagram-v2
 | ING-2 | Catalog is deterministic given the same input paths and filesystem state |
 | ING-3 | Delta conflict resolution is deterministic: lexicographically first delta wins |
 | ING-4 | Every input line is either classified into a typed model or preserved as unparsed evidence |
+| ING-5 | Per-capability merge is deterministic and produces exactly one finding per skipped operation |
+| ING-6 | No capability receives more than one delta spec (runtime precondition assertion) |
 
 ### 6.3 Specs-Forward Analysis Pipeline
 
@@ -677,6 +699,7 @@ Relevant code: [`src/cli/run-cli.ts`](src/cli/run-cli.ts) (`runAnalysisPhases`),
 ```mermaid
 stateDiagram-v2
     [*] --> BuildClaimGraph
+    note right of BuildClaimGraph: consumes merged capability specs
     BuildClaimGraph --> RunQualitative: claims available
     RunQualitative --> RunCoverage: qualitative complete
     RunQualitative --> FatalExit: zero valid responses after retries
@@ -892,6 +915,7 @@ sequenceDiagram
     participant C as run-cli.ts
     participant Cat as Catalog
     participant P as Parser
+    participant MG as Merge
     participant CG as Claim Graph
     participant A as Analysis Phases
     participant S as Source Phases
@@ -911,8 +935,10 @@ sequenceDiagram
     Cat-->>C: typed catalog + conflict findings
     C->>P: parse each cataloged document
     P-->>C: typed models + structural findings
-    C->>CG: normalize into claim graph
-    CG-->>C: typed claims with provenance
+    C->>MG: merge per capability (finalized + delta)
+    MG-->>C: merged capability specs + merge findings
+    C->>CG: normalize into claim graph (from merged specs)
+    CG-->>C: typed claims with provenance + capability
     C->>A: qualitative, coverage, formalization, clustering, logic
     A-->>C: analysis findings with evidence
     alt --src enabled
@@ -1436,6 +1462,7 @@ src/
     parser/
       catalog.ts                input discovery and classification
       spec.ts                   spec parsing with EARS classification
+      merge.ts                  per-capability delta merge (ADDED/MODIFIED/REMOVED)
       proposal.ts               proposal section parsing
       design.ts                 design section parsing
       task.ts                   task document parsing

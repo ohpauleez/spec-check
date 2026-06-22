@@ -38,9 +38,8 @@ format:
 	@$(NPM) run lint:fix
 
 .PHONY : check
-check:
+check: dist
 	@$(NPM) run lint \
-	&& $(NPM) run build \
 	&& $(NPM) run test:trace
 
 .PHONY : test
@@ -51,7 +50,6 @@ test:
 dist:
 	@$(NPM) run build \
 	&& $(NPM) run bundle
-	#&& $(NPM) run smoke:parity
 
 .PHONY : run
 run:

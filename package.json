@@ -24,8 +24,7 @@
     "test": "vitest run",
     "test:trace": "DEVBOX_TRACE_COVERAGE=1 vitest run",
     "test:watch": "vitest",
-    "bundle": "node ./build/esbuild.ts",
-    "smoke:parity": "npm run build && npm run bundle && node ./scripts/smoke-parity.mjs"
+    "bundle": "node ./build/esbuild.ts"
   },
   "devDependencies": {
     "@eslint/js": "^10.0.1",

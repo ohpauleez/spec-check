@@ -119,9 +119,9 @@ pred finding_evidence_preserved [f : Finding] {
 WHEN the catalog layer reports that no active documents survived, THE spec-check tool SHALL surface a CLI-visible `CatalogError` with exit code `5` and a cause-specific remediation message.
 
 **References:**
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Failure Modes`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Represent empty-catalog outcomes as structured catalog diagnostics`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Failure Modes`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Represent empty-catalog outcomes as structured catalog diagnostics`
 
 #### Scenario: Report No Recognized Documents [RAE-CATALOG-NODOCS]
 WHEN catalog construction reports `no_recognized_docs`, THE spec-check tool SHALL emit a message explaining that no OpenSpec proposal, design, or spec documents were found in the provided inputs.
@@ -178,9 +178,9 @@ msg.includes("2"); //=> true
 WHEN one or more analysis phases complete, THE spec-check tool SHALL write the phase reports and synthesized summary reports defined for the selected analysis mode under the configured output directory. IF the run stops at catalog construction because no active documents survive, THEN THE spec-check tool SHALL report the catalog error instead of emitting vacuous downstream analysis reports.
 
 **References:**
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Quality Attributes`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Represent empty-catalog outcomes as structured catalog diagnostics`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Quality Attributes`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Represent empty-catalog outcomes as structured catalog diagnostics`
 
 #### Scenario: Emit Phase-Specific Reports [RAE-REPORT-PHASES]
 WHEN specs-forward analysis completes for a run, THE spec-check tool SHALL emit distinct reports for qualitative analysis (first pass), qualitative properties and invariants (second pass), coverage analysis, and logic analysis, plus any optional source or tasks reports enabled for that run.
@@ -412,9 +412,9 @@ assert no_unsupported_verdicts_in_output {
 WHEN the spec-check tool creates a finding, THE spec-check tool SHALL use a stable finding shape with required fields: severity, category, provenance, description, rationale, and evidence references. Optional fields include suggestion and related claim identifiers. When catalog-empty conditions are represented as findings or finding-like diagnostics, the same explanatory completeness SHALL apply.
 
 **References:**
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Domain Model`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Represent empty-catalog outcomes as structured catalog diagnostics`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Domain Model`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Represent empty-catalog outcomes as structured catalog diagnostics`
 
 #### Scenario: Finding With All Required Fields [RAE-SHAPE-COMPLETE]
 WHEN a finding is created, THE spec-check tool SHALL populate severity, category, provenance, description, rationale, and at least one evidence reference.

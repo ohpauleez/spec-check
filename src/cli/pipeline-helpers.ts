@@ -13,7 +13,9 @@ import type { SourceTrace } from "../domain/code-backwards/trace.js";
 import type { FormalizationCandidate } from "../domain/formal/formalize.js";
 import type { SpecClaimGroup } from "../domain/formal/logic-analysis.js";
 import type { PipelineContext } from "./pipeline-types.js";
-import { toRelativePath, type RelativePath } from "../domain/branded.js";
+import type { CatalogDocument, MergedCapabilitySpec } from "../domain/model.js";
+import { toCapabilityName, toRelativePath, type RelativePath } from "../domain/branded.js";
+import { precondition } from "../domain/assert.js";
 import { isCommandAvailable } from "../adapters/process.js";
 import { writeOutputAtomic } from "../adapters/fs.js";
 import { buildClaimGraph } from "../domain/claim-graph.js";
@@ -21,6 +23,7 @@ import { parseDesign } from "../domain/parser/design.js";
 import { parseProposal } from "../domain/parser/proposal.js";
 import { parseSpec } from "../domain/parser/spec.js";
 import { parseTaskDocument } from "../domain/parser/task.js";
+import { mergeSpecsByCapability } from "../domain/parser/merge.js";
 import { analyzeCoverage } from "../domain/spec-forward/coverage.js";
 import { clusterFormalizationSamples } from "../domain/formal/clustering.js";
 import { deriveSpecsFromSource } from "../domain/code-backwards/derive.js";
@@ -108,7 +111,7 @@ export function computeSkippedPhases(config: RunConfig): readonly string[] {
  * independent and executed concurrently for spec documents via `Promise.all`.
  */
 export async function parseAllDocuments(catalogOutput: {
-  readonly catalog: { readonly documents: readonly { readonly path: string; readonly type: string }[] };
+  readonly catalog: { readonly documents: readonly { readonly path: string; readonly type: string; readonly source: "final" | "delta" }[] };
 }): Promise<Pick<PipelineContext, "proposal" | "design" | "specs" | "tasks">> {
   const docs = catalogOutput.catalog.documents;
   const proposalDoc = docs.find((d) => d.type === "proposal");
@@ -118,7 +121,7 @@ export async function parseAllDocuments(catalogOutput: {
 
   const proposal = proposalDoc === undefined ? undefined : await parseProposal(proposalDoc.path);
   const design = designDoc === undefined ? undefined : await parseDesign(designDoc.path);
-  const specs = await Promise.all(specDocs.map((s) => parseSpec(s.path)));
+  const specs = await Promise.all(specDocs.map((s) => parseSpec(s.path, s.source)));
   const tasks = taskDoc === undefined ? undefined : await parseTaskDocument(taskDoc.path);
 
   return {
@@ -127,6 +130,52 @@ export async function parseAllDocuments(catalogOutput: {
     ...(design === undefined ? {} : { design }),
     ...(tasks === undefined ? {} : { tasks }),
   };
+}
+
+/**
+ * Narrow raw catalog documents to spec documents with branded capability names.
+ *
+ * @param documents - catalog documents of any type
+ * @returns only spec-typed documents with non-undefined capabilities, branded
+ *
+ * @remarks
+ * Precondition: none — any document array is accepted.
+ * Postcondition: every returned document has `type === "spec"` and a branded
+ * `CapabilityName`. Non-spec documents and spec documents without capabilities
+ * are excluded.
+ */
+function toCatalogSpecDocuments(
+  documents: readonly { readonly path: string; readonly type: string; readonly source: "final" | "delta"; readonly capability?: string }[],
+): readonly CatalogDocument[] {
+  return documents
+    .filter((document): document is { readonly path: string; readonly type: "spec"; readonly source: "final" | "delta"; readonly capability: string } => {
+      return document.type === "spec" && document.capability !== undefined;
+    })
+    .map((document) => ({
+      path: document.path,
+      type: "spec" as const,
+      source: document.source,
+      capability: toCapabilityName(document.capability),
+    }));
+}
+
+/**
+ * Merge parsed specs into active per-capability merged views.
+ *
+ * @param input - catalog documents and parsed specs to merge
+ * @returns merged capability specs, one per distinct capability
+ *
+ * @remarks
+ * Precondition: `input.parsedSpecs` includes parsed output for every spec-typed
+ * catalog document that has a matching path.
+ * Postcondition: returned array contains one `MergedCapabilitySpec` per capability
+ * with at least one catalog document, in first-seen capability order.
+ */
+export function runMergePhase(input: {
+  readonly catalogDocuments: readonly { readonly path: string; readonly type: string; readonly source: "final" | "delta"; readonly capability?: string }[];
+  readonly parsedSpecs: PipelineContext["specs"];
+}): readonly MergedCapabilitySpec[] {
+  return mergeSpecsByCapability(toCatalogSpecDocuments(input.catalogDocuments), input.parsedSpecs);
 }
 
 /**
@@ -212,13 +261,16 @@ export function collectParserFindings(ctx: Pick<PipelineContext, "proposal" | "d
  *
  * Failure modes: none — pure computation over in-memory parsed documents, cannot throw.
  */
-export function runClaimGraphPhase(ctx: Pick<PipelineContext, "proposal" | "design" | "specs" | "tasks">): {
+export function runClaimGraphPhase(ctx: Pick<PipelineContext, "proposal" | "design" | "specs" | "mergedSpecs" | "tasks">): {
   readonly graph: ClaimGraphOutput["graph"];
   readonly claimFindings: readonly Finding[];
   readonly coverageFindings: readonly Finding[];
 } {
+  const activeMergedSpecs = ctx.mergedSpecs.filter((spec) => spec.requirements.length > 0);
+
   const graphOutput = buildClaimGraph({
     specs: ctx.specs,
+    mergedSpecs: activeMergedSpecs,
     ...(ctx.proposal === undefined ? {} : { proposal: ctx.proposal }),
     ...(ctx.design === undefined ? {} : { design: ctx.design }),
     ...(ctx.tasks === undefined ? {} : { tasks: ctx.tasks }),
@@ -227,6 +279,7 @@ export function runClaimGraphPhase(ctx: Pick<PipelineContext, "proposal" | "desi
   const coverageFindings = analyzeCoverage({
     claimGraph: graphOutput.graph,
     specs: ctx.specs,
+    mergedSpecs: activeMergedSpecs,
     ...(ctx.proposal === undefined ? {} : { proposal: ctx.proposal }),
     ...(ctx.tasks === undefined ? {} : { tasks: ctx.tasks }),
   });
@@ -292,22 +345,66 @@ export async function runClusteringPhase(
 export function groupRepresentativesBySpec(
   candidates: readonly FormalizationCandidate[],
   representatives: readonly LogicIrClaim[],
+  mergedSpecs?: readonly MergedCapabilitySpec[],
 ): SpecClaimGroup[] {
-  const groups = new Map<string, LogicIrClaim[]>();
+  const groups = new Map<string, { claims: LogicIrClaim[]; logicalFile: string; artifactKey: string }>();
   const order: string[] = [];
-
-  for (let i = 0; i < representatives.length; i++) {
-    const file = candidates[i]!.claim.provenance.file;
-    let group = groups.get(file);
-    if (group === undefined) {
-      group = [];
-      groups.set(file, group);
-      order.push(file);
+  const logicalFileByCapability = new Map<string, string>();
+  if (mergedSpecs !== undefined) {
+    for (const spec of mergedSpecs) {
+      logicalFileByCapability.set(spec.capability, spec.logicalFile);
     }
-    group.push(representatives[i]!);
   }
 
-  return order.map((file) => ({ specFile: file, claims: groups.get(file)! }));
+  for (let i = 0; i < representatives.length; i++) {
+    const representative = representatives[i]!;
+    const candidate = candidates[i]!;
+    const capability = candidate.claim.capability;
+    if (mergedSpecs !== undefined && capability === undefined) {
+      continue;
+    }
+    const logicalFile = capability === undefined
+      ? candidate.claim.provenance.file
+      : (logicalFileByCapability.get(capability) ?? `<merged-spec/${capability}>`);
+    const groupKey = logicalFile;
+    let group = groups.get(groupKey);
+    if (group === undefined) {
+      group = {
+        claims: [],
+        logicalFile,
+        artifactKey: sanitizeLogicalFileForArtifacts(logicalFile),
+      };
+      groups.set(groupKey, group);
+      order.push(groupKey);
+    }
+    group.claims.push(representative);
+  }
+
+  const artifactKeys = new Set<string>();
+  for (const groupKey of order) {
+    const group = groups.get(groupKey)!;
+    precondition(!artifactKeys.has(group.artifactKey), `duplicate sanitized logicalFile key: ${group.artifactKey}`);
+    artifactKeys.add(group.artifactKey);
+  }
+
+  return order.map((groupKey) => {
+    const group = groups.get(groupKey)!;
+    return {
+      specFile: group.logicalFile,
+      artifactKey: group.artifactKey,
+      claims: group.claims,
+    };
+  });
+}
+
+/**
+ * Convert merged logical file key into deterministic artifact-safe key.
+ */
+export function sanitizeLogicalFileForArtifacts(logicalFile: string): string {
+  const stripped = logicalFile.startsWith("<") && logicalFile.endsWith(">")
+    ? logicalFile.slice(1, -1)
+    : logicalFile;
+  return stripped.replaceAll("/", "-");
 }
 
 // ---------------------------------------------------------------------------

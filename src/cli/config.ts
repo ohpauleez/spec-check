@@ -46,23 +46,20 @@ interface ConfigFileShape {
   readonly allowArchive?: boolean;
 }
 
-interface TimeoutValidationOk {
-  readonly ok: true;
-  readonly value: number;
-}
-
-interface TimeoutValidationErr {
-  readonly ok: false;
-  readonly message: string;
-}
-
-type TimeoutValidationResult = TimeoutValidationOk | TimeoutValidationErr;
+/**
+ * Internal alias for timeout parsing results. Uses the project-wide `Result`
+ * type rather than a bespoke one-off discriminated union.
+ *
+ * - Ok branch: validated timeout in milliseconds (safe integer in range).
+ * - Err branch: human-readable diagnostic message describing the constraint violation.
+ */
+type TimeoutParseResult = Result<number, string>;
 
 /**
  * Discriminated union of configuration resolution errors.
  *
  * @remarks
- * Invariant: the `kind` discriminant is exhaustive — consumers must handle all six variants.
+ * Invariant: the `kind` discriminant is exhaustive — consumers must handle all seven variants.
  * Invariant: file-related variants carry the offending `path` for diagnostic output.
  *
  * Variants:
@@ -72,6 +69,8 @@ type TimeoutValidationResult = TimeoutValidationOk | TimeoutValidationErr;
  *   `message` describes the structural expectation that was violated.
  * - `timeout_validation_error` — the resolved timeout value (from CLI `--timeout-ms` or config file
  *   `timeoutMs`) failed range or type validation; `message` includes the source and constraint.
+ * - `pair_budget_validation_error` — the resolved pair budget value (from CLI `--pair-budget` or config
+ *   file `pairBudget`) failed validation; `message` includes the source and constraint.
  * - `missing_inputs` — neither CLI positional arguments nor the config file supplied any input paths.
  * - `output_inside_src` — the resolved output directory is equal to or nested inside the source
  *   directory, violating the [CAT-CLI-OUTSRC] confinement rule.
@@ -87,6 +86,9 @@ type TimeoutValidationResult = TimeoutValidationOk | TimeoutValidationErr;
  *     case "timeout_validation_error":
  *       console.error(`Invalid timeout: ${result.error.message}`);
  *       break;
+ *     case "pair_budget_validation_error":
+ *       console.error(`Invalid pair budget: ${result.error.message}`);
+ *       break;
  *     case "missing_inputs":
  *       console.error("No input paths provided");
  *       break;
@@ -100,6 +102,7 @@ export type ConfigError =
   | { readonly kind: "config_parse_error"; readonly path: string }
   | { readonly kind: "config_validation_error"; readonly path: string; readonly message: string }
   | { readonly kind: "timeout_validation_error"; readonly message: string }
+  | { readonly kind: "pair_budget_validation_error"; readonly message: string }
   | { readonly kind: "missing_inputs" }
   | { readonly kind: "output_inside_src" };
 
@@ -201,7 +204,12 @@ export async function resolveRunConfig(args: CliArgs): Promise<Result<RunConfig,
 
   const timeoutMsResult = parseTimeoutMs(args.timeoutMs, fromFile.value.timeoutMs);
   if (!timeoutMsResult.ok) {
-    return err({ kind: "timeout_validation_error", message: timeoutMsResult.message });
+    return err({ kind: "timeout_validation_error", message: timeoutMsResult.error });
+  }
+
+  const pairBudgetResult = parsePairBudget(args.pairBudget, fromFile.value.pairBudget);
+  if (!pairBudgetResult.ok) {
+    return pairBudgetResult;
   }
 
   return ok({
@@ -211,7 +219,7 @@ export async function resolveRunConfig(args: CliArgs): Promise<Result<RunConfig,
     caps: args.caps ?? fromFile.value.caps,
     z3: args.z3 ?? fromFile.value.z3,
     model: toModelName(args.model ?? fromFile.value.model ?? DEFAULT_MODEL),
-    pairBudget: parsePairBudget(args.pairBudget, fromFile.value.pairBudget),
+    pairBudget: pairBudgetResult.value,
     timeoutMs: timeoutMsResult.value,
     // allowArchive is additive: either CLI --allow-archive presence OR config file
     // allowArchive: true activates admission. This differs from other flags where CLI
@@ -343,10 +351,10 @@ function isConfigFileShape(value: unknown): value is ConfigFileShape {
  * - Non-numeric CLI string → `{ ok: false, message: "--timeout-ms must be a base-10 integer" }`
  * - Out-of-range value → `{ ok: false, message: "<source> must be in range [...]" }`
  */
-function parseTimeoutMs(cliValue: string | undefined, configValue: number | undefined): TimeoutValidationResult {
+function parseTimeoutMs(cliValue: string | undefined, configValue: number | undefined): TimeoutParseResult {
   if (cliValue !== undefined) {
     if (!/^\d+$/u.test(cliValue)) {
-      return { ok: false, message: "--timeout-ms must be a base-10 integer" };
+      return err("--timeout-ms must be a base-10 integer");
     }
     const parsed = Number(cliValue);
     return validateTimeoutMs(parsed, "--timeout-ms");
@@ -356,7 +364,7 @@ function parseTimeoutMs(cliValue: string | undefined, configValue: number | unde
     return validateTimeoutMs(configValue, "config timeoutMs");
   }
 
-  return { ok: true, value: DEFAULT_TIMEOUT_MS };
+  return ok(DEFAULT_TIMEOUT_MS);
 }
 
 /**
@@ -375,41 +383,47 @@ function parseTimeoutMs(cliValue: string | undefined, configValue: number | unde
  * - Non-safe-integer → `"<source> must be a safe integer"`
  * - Out of range → `"<source> must be in range [30000, 900000]"`
  */
-function validateTimeoutMs(value: number, source: string): TimeoutValidationResult {
+function validateTimeoutMs(value: number, source: string): TimeoutParseResult {
   if (!Number.isSafeInteger(value)) {
-    return { ok: false, message: `${source} must be a safe integer` };
+    return err(`${source} must be a safe integer`);
   }
   if (value < TIMEOUT_MIN_MS || value > TIMEOUT_MAX_MS) {
-    return { ok: false, message: `${source} must be in range [${String(TIMEOUT_MIN_MS)}, ${String(TIMEOUT_MAX_MS)}]` };
+    return err(`${source} must be in range [${String(TIMEOUT_MIN_MS)}, ${String(TIMEOUT_MAX_MS)}]`);
   }
-  return { ok: true, value };
+  return ok(value);
 }
 
 /**
- * Parse the pair budget from CLI string or config file number, applying defaults.
+ * Parse and validate the pair budget from CLI string or config file number.
  *
  * @param cliValue - string from CLI `--pair-budget` flag (e.g., "200"), or undefined if not provided
  * @param configValue - numeric value from config file's `pairBudget` field, or undefined if absent
- * @returns resolved pair budget as a positive integer; falls back to {@link DEFAULT_PAIR_BUDGET}
- *   when both inputs are undefined or invalid
+ * @returns on success, a positive integer pair budget; on failure, a `ConfigError` describing
+ *   why the value was rejected
  *
  * @remarks
  * Precondition: none — handles all edge cases (undefined, NaN, non-positive, non-finite).
- * Postcondition: returned value is always a positive finite integer.
+ * Postcondition (Ok): returned value is a positive finite integer.
+ * Priority: CLI value wins over config file value; both win over DEFAULT_PAIR_BUDGET.
  *
- * Priority: CLI value wins over config file value; both win over the default.
- * Invalid CLI values (NaN, zero, negative) silently fall back to the default rather
- * than propagating an error (matching the "lenient CLI, strict config" philosophy).
- *
- * Failure modes: none — pure computation, cannot throw.
+ * Failure modes (represented in the returned Result, never thrown):
+ * - Non-numeric CLI string → `{ kind: "pair_budget_validation_error", message: "..." }`
+ * - Zero or negative value → `{ kind: "pair_budget_validation_error", message: "..." }`
+ * - Non-integer value → `{ kind: "pair_budget_validation_error", message: "..." }`
  */
-function parsePairBudget(cliValue: string | undefined, configValue: number | undefined): number {
+function parsePairBudget(cliValue: string | undefined, configValue: number | undefined): Result<number, ConfigError> {
   if (cliValue !== undefined) {
     const parsed = Number.parseInt(cliValue, 10);
-    return Number.isFinite(parsed) && parsed > 0 ? parsed : DEFAULT_PAIR_BUDGET;
+    if (!Number.isFinite(parsed) || parsed <= 0) {
+      return err({ kind: "pair_budget_validation_error", message: "--pair-budget must be a positive integer" });
+    }
+    return ok(parsed);
   }
-  if (configValue !== undefined && Number.isFinite(configValue) && configValue > 0) {
-    return configValue;
+  if (configValue !== undefined) {
+    if (!Number.isFinite(configValue) || configValue <= 0 || !Number.isSafeInteger(configValue)) {
+      return err({ kind: "pair_budget_validation_error", message: "config pairBudget must be a positive safe integer" });
+    }
+    return ok(configValue);
   }
-  return DEFAULT_PAIR_BUDGET;
+  return ok(DEFAULT_PAIR_BUDGET);
 }

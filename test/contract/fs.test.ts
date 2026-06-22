@@ -14,14 +14,16 @@ describe("filesystem adapter contracts", () => {
     expect(result).toBe("/tmp/out/report.md");
   });
 
-  it("rejects path traversal outside boundary", () => {
+  it("rejects path traversal at branding boundary", () => {
     traceSpec("RAE-CONFINE-FAIL");
-    expect(() => resolveConfinedOutputPath(toOutputDirPath("/tmp/out"), toRelativePath("../../etc/passwd"))).toThrow("escapes");
+    // Defense-in-depth: toRelativePath rejects traversal paths before they reach resolveConfinedOutputPath.
+    expect(() => toRelativePath("../../etc/passwd")).toThrow("invalid relative path");
   });
 
-  it("rejects absolute path outside boundary", () => {
+  it("rejects absolute path at branding boundary", () => {
     traceSpec("RAE-CONFINE-FAIL");
-    expect(() => resolveConfinedOutputPath(toOutputDirPath("/tmp/out"), toRelativePath("/etc/passwd"))).toThrow("escapes");
+    // Defense-in-depth: toRelativePath rejects absolute paths before they reach resolveConfinedOutputPath.
+    expect(() => toRelativePath("/etc/passwd")).toThrow("invalid relative path");
   });
 
   it("computes sha256 lowercase hex of correct length", () => {
@@ -36,5 +38,19 @@ describe("filesystem adapter contracts", () => {
     await writeOutputAtomic(toOutputDirPath(dir), toRelativePath("test.md"), "content\n");
     const content = await readFile(join(dir, "test.md"), "utf8");
     expect(content).toBe("content\n");
+  });
+
+  it("accepts filenames containing '..' as a substring (not a traversal segment)", () => {
+    // Per-segment check: only path segments that are literally ".." are rejected.
+    // Filenames like "version..2" contain ".." but are not directory traversal.
+    expect(() => toRelativePath("data/version..2/file.md")).not.toThrow();
+    expect(() => toRelativePath("foo..bar/baz.txt")).not.toThrow();
+    expect(() => toRelativePath("a..b")).not.toThrow();
+  });
+
+  it("still rejects actual '..' traversal segments", () => {
+    expect(() => toRelativePath("data/../secret.txt")).toThrow("invalid relative path");
+    expect(() => toRelativePath("../escape")).toThrow("invalid relative path");
+    expect(() => toRelativePath("a/b/../../c")).toThrow("invalid relative path");
   });
 });

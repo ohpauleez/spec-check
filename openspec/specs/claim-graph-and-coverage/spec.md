@@ -138,8 +138,8 @@ WHEN parsed proposal, design, merged capability spec, or task content is availab
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Domain Model`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Domain Model`
-- `openspec/changes/merge-delta-spec-logic/design.md#Interaction Protocols`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Domain Model`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Interaction Protocols`
 
 #### Scenario: Preserve Claim Provenance [CGC-CLAIM-PROVEN]
 WHEN the tool derives a claim from a requirement, scenario, design section, or task summary, THE spec-check tool SHALL attach the source file and nearest heading needed to trace that claim back to its origin.
@@ -596,7 +596,7 @@ WHEN the proposal declares capabilities and capability requirements declare refe
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Capabilities`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Capabilities`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Capabilities`
 
 #### Scenario: Report Missing Spec File [CGC-REF-MISSFILE]
 WHEN the proposal declares a capability and no corresponding active merged capability view exists for that capability, THE spec-check tool SHALL emit a missing-spec-file finding for the absent capability.
@@ -642,9 +642,9 @@ findings.some(f => f.category === "coverage.unsupported_reference"); //=> true
 WHEN the spec-check tool performs proposal-to-spec mapping and downstream coverage analysis, THE spec-check tool SHALL use merged capability specs as the active capability source of truth rather than raw per-file parsed specs.
 
 **References:**
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Postconditions`
-- `openspec/changes/merge-delta-spec-logic/design.md#Interaction Protocols`
-- `openspec/changes/merge-delta-spec-logic/design.md#Verification Strategy`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Postconditions`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Interaction Protocols`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Verification Strategy`
 
 #### Scenario: Removed Requirements Do Not Participate In Coverage [CGC-COVERAGE-REMOVED]
 WHEN a requirement is removed from the active merged capability view by a valid `REMOVED` delta operation, THE spec-check tool SHALL exclude that removed requirement from downstream coverage analysis.
@@ -881,7 +881,7 @@ WHEN the spec-check tool builds a claim graph from the same parsed inputs and me
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Quality Attributes`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Quality Attributes`
 
 #### Scenario: Identical Parsed Input Produces Identical Claims [CGC-DETERM-SAME]
 WHEN the same set of parsed documents is processed on two separate runs, THE spec-check tool SHALL produce an identical set of typed claims with identical provenance and obligation levels.
@@ -933,7 +933,7 @@ WHEN the spec-check tool performs coverage analysis on the same claim graph and 
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Quality Attributes`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Quality Attributes`
 
 #### Scenario: Same Graph Produces Same Findings [CGC-COVDET-SAME]
 WHEN the same claim graph is analyzed for coverage on two separate runs, THE spec-check tool SHALL produce byte-identical coverage findings.

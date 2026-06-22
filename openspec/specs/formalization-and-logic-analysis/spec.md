@@ -149,9 +149,9 @@ fact clusters_respect_equivalence {
 WHEN an external LLM call returns text that contains a valid JSON payload wrapped in markdown fences or explanatory text, THE spec-check tool SHALL recover the payload deterministically before schema validation.
 
 **References:**
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Failure Modes`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Make JSON extraction tolerant but keep schema validation strict`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Failure Modes`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Make JSON extraction tolerant but keep schema validation strict`
 
 #### Scenario: Accept Markdown-Fenced JSON [FLA-JSON-FENCE]
 WHEN an external LLM response wraps a valid JSON payload in markdown code fences, THE spec-check tool SHALL strip the outer fence markers and SHALL parse the enclosed JSON payload.
@@ -202,10 +202,10 @@ extractJsonPayload("I cannot provide a JSON response"); //=> throws Error
 WHEN requirement and scenario claims are available for formal analysis, THE spec-check tool SHALL translate each claim into a typed logic representation and generated SMT-LIB artifacts that preserve the claim identifier, source provenance, obligation level, and supporting declarations needed for solver analysis, and SHALL use the run-configured universal timeout for every external LLM formalization invocation.
 
 **References:**
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Make JSON extraction tolerant but keep schema validation strict`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Make JSON extraction tolerant but keep schema validation strict`
 
 #### Scenario: Generate Inspectable Logic Artifacts [FLA-FORMAL-ARTS]
 WHEN a claim is selected for formalization, THE spec-check tool SHALL emit inspectable logic and SMT artifacts that let a reviewer trace the formal result back to the originating requirement or scenario.
@@ -536,8 +536,8 @@ WHEN the spec-check tool performs specs-forward logic analysis, THE spec-check t
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Scope`
-- `openspec/changes/merge-delta-spec-logic/design.md#Interaction Protocols`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Scope`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Interaction Protocols`
 
 #### Scenario: Variable And Function Deduplication [FLA-SPEC-DEDUP]
 WHEN multiple claims from the same merged capability analysis unit declare identical variable or function names with identical sorts or signatures, THE spec-check tool SHALL emit only one declaration in the combined output.
@@ -804,8 +804,8 @@ WHEN formal artifacts are available, THE spec-check tool SHALL group representat
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Quality Attributes`
-- `openspec/changes/merge-delta-spec-logic/design.md#Interaction Protocols`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Quality Attributes`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Interaction Protocols`
 
 #### Scenario: Report Contradiction With Unsat-Core Identification [FLA-LOGIC-CORE]
 WHEN a per-merged-capability combined query returns unsat, THE spec-check tool SHALL parse the unsat core to identify the specific conflicting claims, SHALL report a `logic.contradiction` finding referencing those claims, and SHALL derive severity from the highest-obligation claim in the core (mandatory → error, advisory → warning, informational → info).
@@ -864,9 +864,9 @@ IF the solver emits error diagnostics (such as `(error ...)` lines in stdout) in
 WHEN the spec-check tool prepares specs-forward logical analysis, THE spec-check tool SHALL group spec-derived claims by merged capability identity rather than by raw source-spec file path, SHALL use the merged capability `logicalFile` as the artifact-naming and report-grouping key, and SHALL exclude non-spec claims from this capability-grouped logic path.
 
 **References:**
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Postconditions`
-- `openspec/changes/merge-delta-spec-logic/design.md#Provenance And Grouping Contract`
-- `openspec/changes/merge-delta-spec-logic/design.md#Verification Strategy`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Postconditions`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Provenance And Grouping Contract`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Verification Strategy`
 
 #### Scenario: One Logic Group Per Merged Capability [FLA-GROUP-ONE]
 WHEN one capability has finalized-plus-delta inputs that merge into one active capability view, THE spec-check tool SHALL produce exactly one specs-forward logical-analysis group for that capability.

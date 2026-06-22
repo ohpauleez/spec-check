@@ -103,10 +103,10 @@ one sig RunState {
 WHEN catalog construction completes with zero active documents, THE spec-check tool SHALL classify the empty result as exactly one of: no recognized OpenSpec documents, archived-only recognized documents, or all recognized documents excluded by policy.
 
 **References:**
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Domain Model`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Represent empty-catalog outcomes as structured catalog diagnostics`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Domain Model`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Represent empty-catalog outcomes as structured catalog diagnostics`
 
 #### Scenario: No Recognized Documents [CAT-EMPTY-NODOCS]
 WHEN the provided input paths yield zero recognized proposal, design, or spec documents, THE spec-check tool SHALL classify the empty catalog result as `no_recognized_docs`.
@@ -142,10 +142,10 @@ IF recognized documents are present but another admission or filtering policy re
 THE spec-check CLI SHALL accept positional input paths and optional `--output`, `--src`, `--caps`, `--z3`, `--config`, `--timeout-ms`, `--allow-archive`, `--help`, and `--version` flags, and SHALL reject unrecognized flags or missing required inputs with exit code `2` before any analysis begins.
 
 **References:**
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Define archive activation as an explicit admission policy, not a discovery policy`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Define archive activation as an explicit admission policy, not a discovery policy`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
 
 #### Scenario: Help Flag Prints Help And Exits [CAT-CLI-HELP]
 WHEN the user invokes `spec-check --help` or `spec-check -h`, THE spec-check CLI SHALL print command overview and help information together with version information and exit with code `0` without running any analysis.
@@ -403,12 +403,12 @@ assert invalid_config_blocks_downstream {
 WHEN a developer runs `spec-check` with one or more input paths, THE spec-check tool SHALL discover the referenced OpenSpec artifacts, classify proposal, design, spec, and optional task inputs, resolve active capability state from current and in-development specs, and exclude archived change specs from downstream analysis unless the run explicitly allows archived inputs for those provided paths, and SHALL preserve the selected finalized and delta spec sources needed for later per-capability merge.
 
 **References:**
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Represent empty-catalog outcomes as structured catalog diagnostics`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Define archive activation as an explicit admission policy, not a discovery policy`
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Context`
-- `openspec/changes/merge-delta-spec-logic/design.md#Proposed Design`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Represent empty-catalog outcomes as structured catalog diagnostics`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Define archive activation as an explicit admission policy, not a discovery policy`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Context`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Proposed Design`
 
 #### Scenario: Resolve Active Capability Set [CAT-DISCOVER-ACTIVE]
 WHEN the input set includes finalized capability specs and in-development change specs, THE spec-check tool SHALL build one active capability catalog that uses finalized specs plus at most one selected in-development delta per capability, SHALL surface skipped conflicts as findings, and SHALL preserve the selected finalized and delta documents as merge-eligible inputs for that capability.
@@ -681,8 +681,8 @@ WHEN the spec-check tool parses a capability spec file, THE spec-check tool SHAL
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Domain Model`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Scope`
-- `openspec/changes/merge-delta-spec-logic/design.md#Component Design`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Scope`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Component Design`
 
 #### Scenario: EARS Requirement Recognized [CAT-EARS-MATCH]
 WHEN a requirement body follows a recognized EARS pattern, THE spec-check tool SHALL classify it with the appropriate EARS type (ubiquitous, event-driven, state-driven, unwanted-behavior, conditional).
@@ -827,7 +827,7 @@ WHEN the spec-check tool parses the same input content on separate runs, THE spe
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Quality Attributes`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Quality Attributes`
 
 #### Scenario: Identical Input Produces Identical Parse [CAT-DETERM-SAME]
 WHEN the same document content is parsed on two separate runs, THE spec-check tool SHALL produce byte-identical parsed models.

@@ -22,10 +22,10 @@ The structural invariants and safety properties of this capability are modeled i
 WHEN specs-forward analysis begins for a capability that has a finalized spec and a selected active delta spec, THE spec-check tool SHALL produce exactly one merged active capability view by applying the delta requirement sections to the finalized requirement blocks before claim extraction, coverage analysis, and solver grouping.
 
 **References:**
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Motivation`
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Domain Model`
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/merge-delta-spec-logic/design.md#Proposed Design`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Motivation`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Domain Model`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Proposed Design`
 
 #### Scenario: Finalized And Delta Inputs Produce One Active View [MCA-MERGE-ACTIVE]
 WHEN one capability has both finalized and selected delta spec inputs, THE spec-check tool SHALL merge them into one active capability view and SHALL use that merged view as the only spec-derived input to downstream specs-forward claim extraction.
@@ -46,9 +46,9 @@ WHEN a capability has a selected delta spec and no finalized base spec, THE spec
 WHEN the spec-check tool merges a selected delta spec into a capability, THE spec-check tool SHALL apply `REMOVED` operations first, `MODIFIED` operations second, and `ADDED` operations last, all at the requirement-block level using canonical requirement identifiers, and SHALL preserve deterministic output ordering.
 
 **References:**
-- `openspec/changes/merge-delta-spec-logic/design.md#Merge Semantics`
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/merge-delta-spec-logic/design.md#Merge Contract`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Merge Semantics`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Merge Contract`
 
 #### Scenario: Added Requirement Appended After Surviving Base Requirements [MCA-DELTA-ADD]
 WHEN an `ADDED` requirement block has no colliding requirement or scenario identifiers, THE spec-check tool SHALL append that requirement block after the surviving base requirement blocks in delta-document order.
@@ -84,9 +84,9 @@ IF a `MODIFIED` replacement would introduce a requirement or scenario identifier
 IF a selected delta spec contains malformed, ambiguous, duplicate, or unsupported merge content, THEN THE spec-check tool SHALL emit explicit `spec_merge.*` findings and SHALL skip only the affected merge operation or malformed item.
 
 **References:**
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Failure Modes`
-- `openspec/changes/merge-delta-spec-logic/design.md#Findings Catalog`
-- `openspec/changes/merge-delta-spec-logic/design.md#Failure And Reliability`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Failure Modes`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Findings Catalog`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Failure And Reliability`
 
 #### Scenario: Unsupported Standalone Scenario Surfaced [MCA-MERGE-STANDALONE]
 IF a delta section contains a scenario that is not associated with a parsed requirement block, THEN THE spec-check tool SHALL emit `spec_merge.standalone_scenario_unsupported` and SHALL exclude that scenario from the merged capability view.
@@ -142,9 +142,9 @@ IF a capability produces zero surviving merged requirements after removals and e
 WHEN the spec-check tool emits merged requirements, merged scenarios, and derived claims from a merged capability view, THE spec-check tool SHALL preserve the original source-file provenance on each contributing item and SHALL use a separate synthetic merged capability key only for grouping and artifact naming.
 
 **References:**
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/merge-delta-spec-logic/design.md#System Invariant Tactics`
-- `openspec/changes/merge-delta-spec-logic/design.md#Artifact-Key Contract`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#System Invariant Tactics`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Artifact-Key Contract`
 
 #### Scenario: Source Provenance Survives Merge [MCA-MERGE-SOURCE]
 WHEN a merged requirement or scenario originates from either the finalized spec or the selected delta spec, THE spec-check tool SHALL preserve that item's original source file and line provenance in the merged output and any derived claim.
@@ -165,8 +165,8 @@ WHEN the same finalized and delta inputs are merged on separate runs, THE spec-c
 WHEN the spec-check tool completes capability merging and at least one merged capability contains surviving requirements, THE spec-check tool SHALL submit every non-empty merged capability to downstream specs-forward claim extraction, coverage analysis, and logical analysis exactly once.
 
 **References:**
-- `openspec/changes/merge-delta-spec-logic/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/merge-delta-spec-logic/design.md#Merge Contract`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Merge Contract`
 
 #### Scenario: Non-Empty Merged Capability Is Analyzed [MCA-LIVENESS-NONEMPTY]
 WHEN a merged capability contains at least one surviving requirement after merge application, THE spec-check tool SHALL include that capability in downstream specs-forward claim extraction, coverage analysis, and logical analysis.

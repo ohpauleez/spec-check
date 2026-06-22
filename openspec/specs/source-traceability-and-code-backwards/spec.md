@@ -359,9 +359,9 @@ assert source_never_modified {
 WHEN source-backed analysis sends large source context to an external LLM, THE spec-check tool SHALL provide the bounded instruction prompt separately from the selected source files and SHALL attach the selected source files as reference inputs rather than embedding their full contents inline.
 
 **References:**
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Deliver large analysis context through file attachments`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Deliver large analysis context through file attachments`
 
 #### Scenario: Attach In-Budget Source Files [STC-SOURCE-FILE-BUDGET]
 WHEN source-backed generation selects source files within the configured content budget, THE spec-check tool SHALL attach exactly those in-budget files to the LLM invocation.
@@ -385,11 +385,11 @@ WHEN the spec-check tool attaches source files for code-derived generation, THE 
 WHEN source-backed analysis is enabled, THE spec-check tool SHALL generate EARS-preferring behavioral specification files per declared capability using only source-scoped evidence, blind to original requirement text, SHALL persist the generated specifications as Markdown files in a `gen_specs/` directory under the configured output directory, and SHALL use the run-configured universal timeout for every external LLM generation invocation.
 
 **References:**
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Motivation`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Assumptions and Dependencies`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Deliver large analysis context through file attachments`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Motivation`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Assumptions and Dependencies`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Deliver large analysis context through file attachments`
 
 #### Scenario: Generate Capability-Aligned Derived Specs [STC-GEN-CAPABILITY]
 WHEN the source tree contains sufficient evidence relevant to a declared capability, THE spec-check tool SHALL generate an EARS-preferring behavioral specification for that capability using only the provided source scope, implementation code, verified contracts, and traced tests as evidence.
@@ -508,10 +508,10 @@ assert gen_blind_boundary {
 WHEN code-derived specifications have been generated, THE spec-check tool SHALL formalize them using the same pipeline as specs-forward analysis: bounded LLM sampling, schema validation against the logic IR, equivalence clustering with solver-backed implication checks, and representative selection based on the configured stability threshold. THE spec-check tool SHALL persist the resulting SMT-LIB artifacts in a `gen_specs_smt/` directory under the output directory and SHALL use the run-configured universal timeout for every external LLM formalization invocation on generated claims.
 
 **References:**
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Scope`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Quality Attributes`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Scope`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Quality Attributes`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
 
 #### Scenario: Stable Code-Derived Formalization [STC-FORMAL-STABLE]
 WHEN formalization sampling for a code-derived claim produces an equivalence cluster that meets the configured stability threshold, THE spec-check tool SHALL select the highest-confidence sample as the representative formalization for that code-derived claim.
@@ -675,10 +675,10 @@ assert solver_timeout_nonblocking {
 WHEN both original formalizations (from specs-forward) and code-derived formalizations (from source analysis) exist, THE spec-check tool SHALL run a two-tiered comparison: first a capability-level aggregate bidirectional implication check per matched capability, then bounded pairwise bidirectional implication checks with greedy bipartite matching within each capability, and SHALL use the implication results as the primary strength classification mechanism. IF any comparison step invokes an external LLM-backed fallback or explanation phase, THE spec-check tool SHALL use the run-configured universal timeout for each such LLM call.
 
 **References:**
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Motivation`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Quality Attributes`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Motivation`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Quality Attributes`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
 
 #### Scenario: Classify Same Guarantee [STC-IMPLY-SAME]
 WHEN the solver confirms that original claim A implies code-derived claim B and code-derived claim B implies original claim A, THE spec-check tool SHALL classify the relationship as `same`.
@@ -955,10 +955,10 @@ assert divergence_surfaced {
 WHEN comparing code-derived guarantees against original specifications, THE spec-check tool SHALL use solver-backed cross-side implication as the primary classification mechanism and SHALL use blind LLM comparison as the explanatory layer that provides human-readable rationale. THE spec-check tool SHALL NOT expose original requirement text to the code-derived side during any comparison phase, and SHALL use the run-configured universal timeout for every blind comparison invocation.
 
 **References:**
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Failure Modes`
-- `openspec/changes/prompt-file-input-timeout/proposal.md#Quality Attributes`
-- `openspec/changes/prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Failure Modes`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Quality Attributes`
+- `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
 
 #### Scenario: Solver Implication As Primary Classifier [STC-COMPARE-PRIMARY]
 WHEN cross-side implication results are available and conclusive (same, stronger, weaker, or different) for a claim pair, THE spec-check tool SHALL use the solver-backed classification as the final verdict.

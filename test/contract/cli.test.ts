@@ -62,6 +62,20 @@ describe("CLI argument parsing", () => {
     expect(parsed.value.inputs.length).toBe(0);
   });
 
+  it("resolveRunConfig rejects empty inputs with missing_inputs error", async () => {
+    traceSpec("CAT-CLI-NOINPUT");
+    const resolved = await resolveRunConfig({
+      inputs: [],
+      help: false,
+      version: false,
+      allowArchive: false,
+    });
+
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(resolved.error.kind).toBe("missing_inputs");
+  });
+
   it("parses help and version flags", () => {
     traceSpec("CAT-CLI-HELP", "CAT-CLI-VERSION");
     const help = parseArgv(["--help"]);
@@ -177,15 +191,16 @@ describe("formatCatalogEmptyMessage", () => {
     expect(msg).toContain("capability resolution excluded all specs");
   });
 
-  it("handles missing optional fields with safe defaults", () => {
+  it("formats each empty-catalog variant with contextual details", () => {
     traceSpec("CAT-CATALOG-EMPTY", "RAE-SHAPE-CATALOG", "CAT-DISCOVER-EMPTY");
-    const noRecognized = formatCatalogEmptyMessage({ kind: "no_recognized_docs" });
+    const noRecognized = formatCatalogEmptyMessage({ kind: "no_recognized_docs", inputCount: 0 });
     expect(noRecognized).toContain("0");
 
-    const allArchived = formatCatalogEmptyMessage({ kind: "all_archived" });
-    expect(allArchived).toContain("0");
+    const allArchived = formatCatalogEmptyMessage({ kind: "all_archived", archivedCount: 3 });
+    expect(allArchived).toContain("3");
 
-    const allFiltered = formatCatalogEmptyMessage({ kind: "all_filtered" });
-    expect(allFiltered).toContain("unknown policy reason");
+    const allFiltered = formatCatalogEmptyMessage({ kind: "all_filtered", filterReason: "archive policy", filteredCount: 2 });
+    expect(allFiltered).toContain("archive policy");
+    expect(allFiltered).toContain("2");
   });
 });

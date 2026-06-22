@@ -59,7 +59,7 @@ describe("global invariants", () => {
     const spec: ParsedSpec = {
       file: "spec.md",
       requirements: [
-        { title: "R1", identifier: "R1", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", references: ["nonexistent.md#Section"], provenance: { file: "spec.md", line: 1 } },
+        { title: "R1", identifier: "R1", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", deltaOperation: "base", references: ["nonexistent.md#Section"], provenance: { file: "spec.md", line: 1 } },
       ],
       scenarios: [],
       deltaSections: ["ADDED"],
@@ -101,8 +101,9 @@ describe("global invariants", () => {
 
   it("INV-7: all writes are confined to the configured output directory", async () => {
     traceSpec("RAE-OUTPUT-CONFINE", "RAE-CONFINE-FAIL");
-    expect(() => resolveConfinedOutputPath(toOutputDirPath("/tmp/output"), toRelativePath("../../etc/passwd"))).toThrow("escapes");
-    expect(() => resolveConfinedOutputPath(toOutputDirPath("/tmp/output"), toRelativePath("../secret.txt"))).toThrow("escapes");
+    // Defense-in-depth: toRelativePath rejects traversal paths at branding boundary.
+    expect(() => toRelativePath("../../etc/passwd")).toThrow("invalid relative path");
+    expect(() => toRelativePath("../secret.txt")).toThrow("invalid relative path");
 
     // Valid paths should not throw
     const valid = resolveConfinedOutputPath(toOutputDirPath("/tmp/output"), toRelativePath("report/summary.md"));

@@ -105,8 +105,8 @@ describe("determinism - extended", () => {
     const spec = {
       file: "spec.md",
       requirements: [
-        { title: "R1", identifier: "DET-GRAPH-R1", body: "WHEN x, THE system SHALL y.", earsType: "event-driven" as const, references: [], provenance: { file: "spec.md", line: 1 } },
-        { title: "R2", identifier: "DET-GRAPH-R2", body: "THE system SHOULD log.", earsType: "non-ears" as const, references: [], provenance: { file: "spec.md", line: 2 } },
+        { title: "R1", identifier: "DET-GRAPH-R1", body: "WHEN x, THE system SHALL y.", earsType: "event-driven" as const, deltaOperation: "base" as const, references: [], provenance: { file: "spec.md", line: 1 } },
+        { title: "R2", identifier: "DET-GRAPH-R2", body: "THE system SHOULD log.", earsType: "non-ears" as const, deltaOperation: "base" as const, references: [], provenance: { file: "spec.md", line: 2 } },
       ],
       scenarios: [],
       deltaSections: ["ADDED"] as const,
@@ -239,7 +239,7 @@ describe("determinism - extended", () => {
     const spec = {
       file: "spec.md",
       requirements: [
-        { title: "R1", identifier: "DET-COV-R1", body: "WHEN x, THE system SHALL y.", earsType: "event-driven" as const, references: ["missing.md#Section"], provenance: { file: "spec.md", line: 1 } },
+        { title: "R1", identifier: "DET-COV-R1", body: "WHEN x, THE system SHALL y.", earsType: "event-driven" as const, deltaOperation: "base" as const, references: ["missing.md#Section"], provenance: { file: "spec.md", line: 1 } },
       ],
       scenarios: [],
       deltaSections: ["ADDED"] as const,

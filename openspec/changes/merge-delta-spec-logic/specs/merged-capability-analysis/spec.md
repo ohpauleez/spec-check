@@ -1,5 +1,15 @@
 ## ADDED Requirements
 
+### Formal Model
+
+The structural invariants and safety properties of this capability are modeled in [`alloy/merge.als`](alloy/merge.als). The model verifies:
+- One merged view per capability (`oneViewPerCapability`)
+- Provenance preservation (`provenancePreserved`)
+- No phantom introduction (`noPhantomIntroduction`)
+- Excluded operations never in output (`excludedOpsNeverInOutput`)
+- Cross-capability isolation (`capabilityIsolation`)
+- Non-empty capabilities reach downstream (`nonEmptyAnalyzed`)
+
 ### Requirement: Merge Finalized And Delta Specs Per Capability [MCA-MERGE-CAP]
 WHEN specs-forward analysis begins for a capability that has a finalized spec and a selected active delta spec, THE spec-check tool SHALL produce exactly one merged active capability view by applying the delta requirement sections to the finalized requirement blocks before claim extraction, coverage analysis, and solver grouping.
 

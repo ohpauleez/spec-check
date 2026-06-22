@@ -17,16 +17,20 @@ import { err, ok, type Result } from "../result.js";
 import { postcondition } from "../assert.js";
 
 /**
- * Error produced when a catalog input path cannot be read from the filesystem.
+ * Error produced during catalog construction from filesystem traversal.
  *
  * @remarks
- * Invariant: `kind` is always `"unreadable_input"`. The `path` field contains
- * the resolved filesystem path that could not be accessed.
+ * Variants:
+ * - `unreadable_input` — a path could not be stat'd or read (ENOENT, EACCES, etc.);
+ *   carries the resolved filesystem path that could not be accessed.
+ * - `depth_exceeded` — directory traversal exceeded the maximum allowed depth;
+ *   carries the path where the limit was reached.
+ *
+ * Invariant: the `kind` discriminant is exhaustive.
  */
-export interface CatalogBuildError {
-  readonly kind: "unreadable_input";
-  readonly path: string;
-}
+export type CatalogBuildError =
+  | { readonly kind: "unreadable_input"; readonly path: string }
+  | { readonly kind: "depth_exceeded"; readonly path: string };
 
 /**
  * Successful result of catalog construction containing the resolved catalog and any diagnostic findings.
@@ -240,24 +244,33 @@ function classifyEmptyCatalogReason(input: {
   };
 }
 
+/** Maximum directory traversal depth to prevent stack overflow on pathological trees. */
+const MAX_TRAVERSAL_DEPTH = 50;
+
 /**
  * Recursively collect all file paths under a given filesystem path.
  *
  * @param path - resolved absolute filesystem path (file or directory)
- * @returns flat array of file paths on success, or an `unreadable_input` error if stat/readdir fails
+ * @param depth - remaining recursion budget; decremented on each directory descent
+ * @returns flat array of file paths on success, or an error if stat/readdir fails or depth is exceeded
  *
  * @remarks
  * Precondition: `path` is a resolved absolute path.
+ * Precondition: `depth >= 0`.
  * Postcondition: on success, every entry in the returned array is a regular file path.
- * Recursion is bounded by filesystem depth.
+ * Recursion is bounded by `depth` (defaults to {@link MAX_TRAVERSAL_DEPTH}).
  *
  * Failure modes:
  * - Returns `Err` with `kind: "unreadable_input"` if `stat` or `readdir` throws (ENOENT, EACCES, etc.).
- * - Propagates unexpected filesystem errors not caught by the try/catch (e.g., EINTR).
+ * - Returns `Err` with `kind: "depth_exceeded"` if `depth` reaches zero during directory descent.
  *
- * Safety: performs recursive filesystem reads; bounded by directory tree depth.
+ * Safety: bounded recursion; cannot exceed `MAX_TRAVERSAL_DEPTH` stack frames.
  */
-async function collectFiles(path: string): Promise<Result<readonly string[], CatalogBuildError>> {
+async function collectFiles(path: string, depth: number = MAX_TRAVERSAL_DEPTH): Promise<Result<readonly string[], CatalogBuildError>> {
+  if (depth <= 0) {
+    return err({ kind: "depth_exceeded", path });
+  }
+
   let stats;
   try {
     stats = await stat(path);
@@ -284,7 +297,7 @@ async function collectFiles(path: string): Promise<Result<readonly string[], Cat
   for (const entry of entries) {
     const childPath = join(path, entry.name);
     if (entry.isDirectory()) {
-      const nested = await collectFiles(childPath);
+      const nested = await collectFiles(childPath, depth - 1);
       if (!nested.ok) {
         return nested;
       }

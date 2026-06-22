@@ -141,6 +141,8 @@ function parseConfigError(error: ConfigError): SpecCheckError {
       );
     case "timeout_validation_error":
       return makeTypedError("ConfigError", error.message);
+    case "pair_budget_validation_error":
+      return makeTypedError("ConfigError", error.message);
     default:
       return assertNever(error);
   }

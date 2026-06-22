@@ -4,6 +4,7 @@
 export type DocumentType = "proposal" | "design" | "spec" | "task";
 
 import type { CapabilityName } from "./branded.js";
+import type { Finding } from "./findings.js";
 
 /**
  * One discovered input document with deterministic classification.
@@ -119,6 +120,7 @@ export interface ParsedRequirement {
   readonly identifier?: string;
   readonly body: string;
   readonly earsType: EarsType;
+  readonly deltaOperation: DeltaOperation;
   readonly references: readonly string[];
   readonly provenance: LineProvenance;
 }
@@ -134,8 +136,15 @@ export interface ParsedScenario {
   readonly title: string;
   readonly identifier?: string;
   readonly body: string;
+  readonly deltaOperation: DeltaOperation;
+  readonly parentRequirementIdentifier?: string;
   readonly provenance: LineProvenance;
 }
+
+/**
+ * Closed domain of per-item delta semantics used during capability merge.
+ */
+export type DeltaOperation = "base" | "pre-section" | "ADDED" | "MODIFIED" | "REMOVED" | "RENAMED";
 
 /**
  * Parsed representation of an OpenSpec specification document.
@@ -155,6 +164,18 @@ export interface ParsedSpec {
     readonly provenance: LineProvenance;
   }[];
   readonly unparsed: readonly UnparsedLine[];
+}
+
+/**
+ * Active per-capability merged analysis view produced from finalized and delta specs.
+ */
+export interface MergedCapabilitySpec {
+  readonly capability: CapabilityName;
+  readonly sourceFiles: readonly string[];
+  readonly logicalFile: string;
+  readonly requirements: readonly ParsedRequirement[];
+  readonly scenarios: readonly ParsedScenario[];
+  readonly findings: readonly Finding[];
 }
 
 /**

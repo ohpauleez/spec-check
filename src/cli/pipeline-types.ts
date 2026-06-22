@@ -7,7 +7,7 @@
  */
 import type { Finding } from "../domain/findings.js";
 import type { ClaimGraphOutput } from "../domain/claim-graph.js";
-import type { ParsedDesign, ParsedProposal, ParsedSpec, ParsedTaskDocument } from "../domain/model.js";
+import type { MergedCapabilitySpec, ParsedDesign, ParsedProposal, ParsedSpec, ParsedTaskDocument } from "../domain/model.js";
 import type { LogicIrClaim } from "../domain/logic-ir.js";
 import type { ErrorCategory } from "../domain/errors.js";
 import type { RunState } from "../domain/run-state.js";
@@ -68,6 +68,7 @@ export interface PipelineContext {
   readonly proposal?: ParsedProposal;
   readonly design?: ParsedDesign;
   readonly specs: readonly ParsedSpec[];
+  readonly mergedSpecs: readonly MergedCapabilitySpec[];
   readonly tasks?: ParsedTaskDocument;
   readonly coverageFindings: readonly Finding[];
   readonly qualitativeFindings: readonly Finding[];
@@ -80,7 +81,7 @@ export interface PipelineContext {
  */
 export interface IngestionResult {
   readonly state: RunState;
-  readonly catalogResult: { readonly catalog: { readonly documents: readonly { readonly path: string; readonly type: string; readonly capability?: string }[] }; readonly findings: readonly Finding[] };
+  readonly catalogResult: { readonly catalog: { readonly documents: readonly { readonly path: string; readonly type: string; readonly source: "final" | "delta"; readonly capability?: string }[] }; readonly findings: readonly Finding[] };
   readonly ctx: PipelineContext;
 }
 

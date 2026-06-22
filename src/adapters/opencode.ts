@@ -338,21 +338,18 @@ function parseOpencodePayload(stdout: string): unknown {
  */
 function throwOnErrorEvent(events: readonly unknown[]): void {
   for (const event of events) {
-    if (typeof event !== "object" || event === null) {
-      continue;
-    }
-    const record = event as { readonly type?: unknown; readonly error?: unknown };
-    if (record.type !== "error") {
+    const record = asRecord(event);
+    if (record === undefined || record.type !== "error") {
       continue;
     }
     let message = "opencode returned an error event";
-    if (typeof record.error === "object" && record.error !== null) {
-      const errorObj = record.error as { readonly data?: unknown; readonly message?: unknown };
+    const errorObj = asRecord(record.error);
+    if (errorObj !== undefined) {
       if (typeof errorObj.message === "string") {
         message = errorObj.message;
-      } else if (typeof errorObj.data === "object" && errorObj.data !== null) {
-        const data = errorObj.data as { readonly message?: unknown };
-        if (typeof data.message === "string") {
+      } else {
+        const data = asRecord(errorObj.data);
+        if (data !== undefined && typeof data.message === "string") {
           message = data.message;
         }
       }
@@ -542,16 +539,16 @@ function extractFirstJsonValue(text: string): string | undefined {
  * Failure modes: none — pure computation. Never throws.
  */
 function extractTextPart(event: unknown): string | undefined {
-  if (typeof event !== "object" || event === null) {
+  const record = asRecord(event);
+  if (record === undefined || record.type !== "text") {
     return undefined;
   }
 
-  const record = event as { readonly type?: unknown; readonly part?: unknown };
-  if (record.type !== "text" || typeof record.part !== "object" || record.part === null) {
+  const part = asRecord(record.part);
+  if (part === undefined) {
     return undefined;
   }
 
-  const part = record.part as { readonly text?: unknown };
   return typeof part.text === "string" ? part.text : undefined;
 }
 
@@ -578,6 +575,22 @@ function tryParseJson(input: string): Result<unknown, Error> {
 }
 
 /**
+ * Narrow an `unknown` value to a record if it is a non-null object.
+ *
+ * @param value - untrusted value to narrow
+ * @returns the value as `Record<string, unknown>` if it is a non-null object, or `undefined` otherwise
+ *
+ * @remarks
+ * Localizes the single `as` cast required for working with parsed JSON objects.
+ * Precondition: none.
+ * Postcondition: when non-undefined, `value` satisfies `typeof value === "object" && value !== null`.
+ * Safety: the cast is sound because the typeof + null check guarantees the value is an object.
+ */
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return typeof value === "object" && value !== null ? (value as Record<string, unknown>) : undefined;
+}
+
+/**
  * Validate that a parsed JSON payload conforms to the expected structure for the given phase.
  *
  * @param phase - verification phase determining the expected schema shape
@@ -596,7 +609,10 @@ function validatePhaseSchema(
   phase: OpencodePhase,
   payload: unknown,
 ): Result<unknown, OpencodeError> {
-  if (typeof payload !== "object" || payload === null) {
+  // Design note: validation is phase-agnostic — all phases share identical schema
+  // constraints. The phase parameter exists for error reporting context only.
+  const record = asRecord(payload);
+  if (record === undefined) {
     return err({
       kind: "schema_validation_error",
       phase,
@@ -604,8 +620,7 @@ function validatePhaseSchema(
     });
   }
 
-  const maybeRecord = payload as Record<string, unknown>;
-  const findings = maybeRecord.findings;
+  const findings = record.findings;
   if (findings !== undefined && !Array.isArray(findings)) {
     return err({
       kind: "schema_validation_error",

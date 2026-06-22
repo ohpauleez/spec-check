@@ -4,6 +4,8 @@ import { parseHeading, parseCanonicalIdentifier } from "../../src/domain/parser/
 import { parseSpec } from "../../src/domain/parser/spec.js";
 import { parseProposal } from "../../src/domain/parser/proposal.js";
 import { parseDesign } from "../../src/domain/parser/design.js";
+import { mergeSpecsByCapability } from "../../src/domain/parser/merge.js";
+import { toCapabilityName } from "../../src/domain/branded.js";
 import { traceSpec } from "../support/spec-trace.js";
 import { mkdtemp, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -207,5 +209,109 @@ describe("parser structural checks", () => {
     await writeFile(file, content, "utf8");
     const parsed = await parseSpec(file);
     expect(parsed.requirements[0]?.earsType).toBe("event-driven");
+  });
+
+  it("assigns deltaOperation by exact delta heading and scenario inheritance", async () => {
+    traceSpec("CAT-EARS-DELTA", "CAT-EARS-PARENT", "CAT-EARS-PRE-SECTION", "CAT-EARS-EXACT");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-parser-"));
+    const file = join(root, "spec.md");
+    const content = [
+      "Unstructured intro line",
+      "",
+      "### Requirement: Intro req [PARSE-PRE-REQ]",
+      "WHEN intro, THE system SHALL track.",
+      "",
+      "#### Scenario: Intro scenario [PARSE-PRE-SCN]",
+      "WHEN intro, THE system SHALL emit.",
+      "",
+      "## ADDED Requirements",
+      "### Requirement: Added req [PARSE-ADD-REQ]",
+      "WHEN add, THE system SHALL add.",
+      "",
+      "#### Scenario: Added scenario [PARSE-ADD-SCN]",
+      "WHEN add, THE system SHALL confirm.",
+      "",
+      "## MODIFIED Requirements",
+      "### Requirement: Modified req [PARSE-MOD-REQ]",
+      "WHEN mod, THE system SHALL modify.",
+      "",
+      "## REMOVED Requirements",
+      "### Requirement: Removed req [PARSE-REM-REQ]",
+      "WHEN rem, THE system SHALL remove.",
+      "",
+      "## RENAMED Requirements",
+      "### Requirement: Renamed req [PARSE-REN-REQ]",
+      "WHEN ren, THE system SHALL rename.",
+    ].join("\n");
+    await writeFile(file, content, "utf8");
+
+    const parsed = await parseSpec(file, "delta");
+    const byId = new Map(parsed.requirements.map((req) => [req.identifier, req]));
+    const scenarioById = new Map(parsed.scenarios.map((scenario) => [scenario.identifier, scenario]));
+
+    expect(byId.get("PARSE-PRE-REQ")?.deltaOperation).toBe("pre-section");
+    expect(scenarioById.get("PARSE-PRE-SCN")?.deltaOperation).toBe("pre-section");
+    expect(byId.get("PARSE-ADD-REQ")?.deltaOperation).toBe("ADDED");
+    expect(scenarioById.get("PARSE-ADD-SCN")?.deltaOperation).toBe("ADDED");
+    expect(byId.get("PARSE-MOD-REQ")?.deltaOperation).toBe("MODIFIED");
+    expect(byId.get("PARSE-REM-REQ")?.deltaOperation).toBe("REMOVED");
+    expect(byId.get("PARSE-REN-REQ")?.deltaOperation).toBe("RENAMED");
+    expect(scenarioById.get("PARSE-ADD-SCN")?.parentRequirementIdentifier).toBe("PARSE-ADD-REQ");
+  });
+
+  it("keeps finalized items at base operation and exact headings only", async () => {
+    traceSpec("CAT-EARS-FINAL-DELTA", "CAT-EARS-EXACT");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-parser-"));
+    const finalFile = join(root, "final-spec.md");
+    const deltaFile = join(root, "delta-spec.md");
+
+    await writeFile(
+      finalFile,
+      [
+        "## ADDED Requirements",
+        "### Requirement: Final req [PARSE-FINAL-REQ]",
+        "WHEN final, THE system SHALL hold.",
+      ].join("\n"),
+      "utf8",
+    );
+
+    await writeFile(
+      deltaFile,
+      [
+        "## Added Requirements",
+        "### Requirement: Approx req [PARSE-APPROX-REQ]",
+        "WHEN approx, THE system SHALL not switch section.",
+      ].join("\n"),
+      "utf8",
+    );
+
+    const parsedFinal = await parseSpec(finalFile, "final");
+    const parsedApproxDelta = await parseSpec(deltaFile, "delta");
+
+    expect(parsedFinal.requirements[0]?.deltaOperation).toBe("base");
+    expect(parsedApproxDelta.requirements[0]?.deltaOperation).toBe("pre-section");
+
+    const merged = mergeSpecsByCapability(
+      [
+        { path: finalFile, type: "spec", source: "final", capability: toCapabilityName("parser") },
+      ],
+      [parsedFinal],
+    );
+    expect(merged[0]?.findings.some((f) => f.category === "spec_merge.finalized_spec_delta_heading_ignored")).toBe(true);
+  });
+
+  it("keeps parentRequirementIdentifier undefined when scenario has no preceding requirement", async () => {
+    traceSpec("CAT-EARS-NO-PARENT");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-parser-"));
+    const file = join(root, "spec.md");
+    const content = [
+      "## ADDED Requirements",
+      "#### Scenario: Orphan scenario [PARSE-ORPHAN-SCN]",
+      "WHEN orphaned, THE system SHALL preserve it.",
+    ].join("\n");
+    await writeFile(file, content, "utf8");
+
+    const parsed = await parseSpec(file, "delta");
+    expect(parsed.scenarios[0]?.parentRequirementIdentifier).toBeUndefined();
   });
 });

@@ -3,7 +3,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { traceSpec } from "../support/spec-trace.js";
 import { runZ3Query } from "../../src/adapters/z3.js";
 import { callOpencode } from "../../src/adapters/opencode.js";
-import { resolveConfinedOutputPath, writeOutputAtomic } from "../../src/adapters/fs.js";
+import { writeOutputAtomic } from "../../src/adapters/fs.js";
 import { toOutputDirPath, toRelativePath, toSmtlibContent } from "../../src/domain/branded.js";
 
 vi.mock("../../src/adapters/process.js", () => ({
@@ -105,12 +105,10 @@ describe("fault injection", () => {
       expect((thrown as NodeJS.ErrnoException).code).toBe("ENOSPC");
     });
 
-    it("rejects path traversal with precondition error", () => {
+    it("rejects path traversal at branding boundary", () => {
       traceSpec("RAE-CONFINE-FAIL");
-
-      expect(() =>
-        resolveConfinedOutputPath(toOutputDirPath("/tmp/out"), toRelativePath("../../../etc/shadow")),
-      ).toThrow("escapes configured output directory");
+      // Defense-in-depth: toRelativePath rejects traversal paths before they reach resolveConfinedOutputPath.
+      expect(() => toRelativePath("../../../etc/shadow")).toThrow("invalid relative path");
     });
   });
 

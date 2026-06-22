@@ -425,9 +425,214 @@ describe("opencode adapter contract", () => {
     expect(result.error.kind).toBe("timeout");
     expect(mocked).toHaveBeenCalledTimes(2);
   });
+
+  it("rejects invalid timeout below minimum (defense-in-depth)", async () => {
+    traceSpec("CAT-DEPS-OPENCODE");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    const mocked = vi.mocked(runProcess);
+    const result = await callOpencode({
+      model: "m",
+      phase: "formalization",
+      prompt: "test",
+      retries: 1,
+      timeoutMs: 5,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("invalid_timeout");
+    expect(result.error.message).toContain("safe integer in range");
+    expect(mocked).not.toHaveBeenCalled();
+  });
+
+  it("rejects invalid timeout above maximum (defense-in-depth)", async () => {
+    traceSpec("CAT-DEPS-OPENCODE");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    const mocked = vi.mocked(runProcess);
+    const result = await callOpencode({
+      model: "m",
+      phase: "formalization",
+      prompt: "test",
+      retries: 1,
+      timeoutMs: 10_000_000,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("invalid_timeout");
+    expect(mocked).not.toHaveBeenCalled();
+  });
+
+  it("surfaces stderr when process exits non-zero with empty stdout", async () => {
+    traceSpec("CAT-DEPS-OPENCODE");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    const mocked = vi.mocked(runProcess);
+    mocked.mockResolvedValue({
+      exitCode: 1,
+      signal: null,
+      stdout: "",
+      stderr: "Error: model not found",
+      timedOut: false,
+    });
+
+    const result = await callOpencode({
+      model: "bad-model",
+      phase: "formalization",
+      prompt: "test",
+      retries: 1,
+      timeoutMs: 30000,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("spawn_error");
+    expect(result.error.message).toContain("Error: model not found");
+    expect(result.error.message).toContain("exited with code 1");
+  });
+
+  it("reports empty stdout with no stderr on non-zero exit", async () => {
+    traceSpec("CAT-DEPS-OPENCODE");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    const mocked = vi.mocked(runProcess);
+    mocked.mockResolvedValue({
+      exitCode: 127,
+      signal: null,
+      stdout: "",
+      stderr: "",
+      timedOut: false,
+    });
+
+    const result = await callOpencode({
+      model: "m",
+      phase: "formalization",
+      prompt: "test",
+      retries: 1,
+      timeoutMs: 30000,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("spawn_error");
+    expect(result.error.message).toContain("empty stdout, no stderr");
+  });
+
+  it("rejects symlink files", async () => {
+    traceSpec("STC-SOURCE-FILE-CTX");
+    const { mkdtemp, writeFile, symlink } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-symlink-"));
+    const realFile = join(root, "real.md");
+    const linkFile = join(root, "link.md");
+    await writeFile(realFile, "content", "utf8");
+    await symlink(realFile, linkFile);
+
+    const result = await callOpencode({
+      model: "m",
+      phase: "formalization",
+      prompt: "test",
+      files: [linkFile],
+      retries: 1,
+      timeoutMs: 30000,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("invalid_files");
+    expect(result.error.message).toContain("symlink");
+  });
+
+  it("rejects directory paths in files", async () => {
+    traceSpec("STC-SOURCE-FILE-CTX");
+    const { mkdtemp } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-dir-"));
+
+    const result = await callOpencode({
+      model: "m",
+      phase: "formalization",
+      prompt: "test",
+      files: [root],
+      retries: 1,
+      timeoutMs: 30000,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("invalid_files");
+    expect(result.error.message).toContain("not a regular file");
+  });
+
+  it("rejects non-existent paths in files", async () => {
+    traceSpec("STC-SOURCE-FILE-CTX");
+    const result = await callOpencode({
+      model: "m",
+      phase: "formalization",
+      prompt: "test",
+      files: ["/tmp/does-not-exist-spec-check-xyz123.md"],
+      retries: 1,
+      timeoutMs: 30000,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("invalid_files");
+    expect(result.error.message).toContain("unreadable");
+  });
+
+  it("rejects empty string in files array", async () => {
+    traceSpec("STC-SOURCE-FILE-CTX");
+    const result = await callOpencode({
+      model: "m",
+      phase: "formalization",
+      prompt: "test",
+      files: [""],
+      retries: 1,
+      timeoutMs: 30000,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("invalid_files");
+    expect(result.error.message).toContain("non-empty path strings");
+  });
 });
 
 describe("extractJsonPayload edge cases", () => {
+  it("roundtrip property: extractJsonPayload(JSON.stringify(v)) produces v", () => {
+    traceSpec("FLA-VALIDATE-SAMPLE", "FLA-JSON-RECOVER");
+    fc.assert(
+      fc.property(
+        fc.oneof(
+          fc.dictionary(fc.string(), fc.jsonValue()),
+          fc.array(fc.jsonValue()),
+        ),
+        (value) => {
+          const result = extractJsonPayload(JSON.stringify(value));
+          expect(result).toEqual(value);
+        },
+      ),
+      { numRuns: 100 },
+    );
+  });
+
+  it("roundtrip property with prose prefix: extracts embedded JSON correctly", () => {
+    traceSpec("FLA-VALIDATE-SAMPLE", "FLA-JSON-RECOVER");
+    fc.assert(
+      fc.property(
+        fc.dictionary(fc.string(), fc.jsonValue()),
+        (value) => {
+          const jsonStr = JSON.stringify(value);
+          // Prefix that does not contain { or [ to avoid ambiguity.
+          const wrapped = `Here is the result:\n${jsonStr}`;
+          const result = extractJsonPayload(wrapped);
+          expect(result).toEqual(value);
+        },
+      ),
+      { numRuns: 50 },
+    );
+  });
   it("handles nested braces inside JSON string values", () => {
     traceSpec("FLA-VALIDATE-SAMPLE");
     const input = '{"message": "use {x} and {y} for templates", "findings": []}';

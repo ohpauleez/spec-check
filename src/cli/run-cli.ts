@@ -11,7 +11,8 @@ import type { LogicIrClaim } from "../domain/logic-ir.js";
 import type { ClaimGraphOutput } from "../domain/claim-graph.js";
 import type { PipelineContext, IngestionResult, AnalysisResult } from "./pipeline-types.js";
 import { createInitialRunState, addFindings, type RunState } from "../domain/run-state.js";
-import { buildCatalog, inferCapabilityName } from "../domain/parser/catalog.js";
+import { buildCatalog, inferCapabilityName, type CatalogEmptyReason } from "../domain/parser/catalog.js";
+import { assertNever } from "../domain/assert.js";
 import { runQualitativePasses } from "../domain/spec-forward/qualitative.js";
 import { formalizeClaims } from "../domain/formal/formalize.js";
 import { runLogicAnalysis } from "../domain/formal/logic-analysis.js";
@@ -28,6 +29,7 @@ import {
   collectParserFindings,
   runClaimGraphPhase,
   runClusteringPhase,
+  runMergePhase,
   groupRepresentativesBySpec,
   runCodeBackwardsWork,
 } from "./pipeline-helpers.js";
@@ -53,20 +55,16 @@ export { formatCatalogEmptyMessage };
  *
  * Failure modes: none — pure computation, cannot throw.
  */
-function formatCatalogEmptyMessage(reason: {
-  readonly kind: "no_recognized_docs" | "all_archived" | "all_filtered";
-  readonly inputCount?: number;
-  readonly archivedCount?: number;
-  readonly filterReason?: string;
-  readonly filteredCount?: number;
-}): string {
+function formatCatalogEmptyMessage(reason: CatalogEmptyReason): string {
   switch (reason.kind) {
     case "no_recognized_docs":
-      return `No OpenSpec documents found in ${String(reason.inputCount ?? 0)} provided input(s). Ensure input paths contain proposal.md, design.md, or spec.md documents.`;
+      return `No OpenSpec documents found in ${String(reason.inputCount)} provided input(s). Ensure input paths contain proposal.md, design.md, or spec.md documents.`;
     case "all_archived":
-      return `All ${String(reason.archivedCount ?? 0)} discovered documents are in archived change directories. Use --allow-archive to treat explicitly provided archived inputs as active.`;
+      return `All ${String(reason.archivedCount)} discovered documents are in archived change directories. Use --allow-archive to treat explicitly provided archived inputs as active.`;
     case "all_filtered":
-      return `All ${String(reason.filteredCount ?? 0)} discovered documents were excluded by policy: ${reason.filterReason ?? "unknown policy reason"}.`;
+      return `All ${String(reason.filteredCount)} discovered documents were excluded by policy: ${reason.filterReason}.`;
+    default:
+      return assertNever(reason);
   }
 }
 
@@ -192,6 +190,7 @@ async function runIngestionPhases(config: RunConfig): Promise<IngestionResult> {
 
   const ctx: PipelineContext = {
     ...parsed.value,
+    mergedSpecs: [],
     coverageFindings: [],
     qualitativeFindings: [],
     representativeClaims: [],
@@ -233,7 +232,20 @@ async function runIngestionPhases(config: RunConfig): Promise<IngestionResult> {
  */
 async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult): Promise<AnalysisResult> {
   let state = ingestion.state;
-  const ctx = ingestion.ctx;
+  let ctx = ingestion.ctx;
+
+  const mergeResult = await runPhaseWithResult("merge", state, async () => {
+    return runMergePhase({
+      catalogDocuments: ingestion.catalogResult.catalog.documents,
+      parsedSpecs: ctx.specs,
+    });
+  });
+  state = mergeResult.state;
+  ctx = {
+    ...ctx,
+    mergedSpecs: mergeResult.value,
+  };
+  state = addFindings(state, ctx.mergedSpecs.flatMap((spec) => spec.findings));
 
   // Phase 4: Build claim graph and analyze coverage.
   const claimGraphResult = await runPhaseWithResult("claim-graph", state, async () => {
@@ -284,7 +296,12 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
 
   // Phase 8: Run formal logic analysis on per-spec combined SMT-LIB.
   const logicResult = await runPhaseWithResult("logic", state, async () => {
-    const groups = groupRepresentativesBySpec(formalResult.value.candidates, clusterResult.value.representatives);
+    const nonEmptyMergedSpecs = ctx.mergedSpecs.filter((spec) => spec.requirements.length > 0);
+    const groups = groupRepresentativesBySpec(
+      formalResult.value.candidates,
+      clusterResult.value.representatives,
+      nonEmptyMergedSpecs,
+    );
     const output = await runLogicAnalysis({
       groups,
       outputDir: config.output,

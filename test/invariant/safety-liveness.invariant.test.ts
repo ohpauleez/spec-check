@@ -47,11 +47,11 @@ describe("safety properties", () => {
     const spec: ParsedSpec = {
       file: "spec.md",
       requirements: [
-        { title: "R1", identifier: "R1", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", references: [], provenance: { file: "spec.md", line: 1 } },
-        { title: "R2", identifier: "R2", body: "THE system SHOULD z.", earsType: "non-ears", references: [], provenance: { file: "spec.md", line: 5 } },
+        { title: "R1", identifier: "R1", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", deltaOperation: "base", references: [], provenance: { file: "spec.md", line: 1 } },
+        { title: "R2", identifier: "R2", body: "THE system SHOULD z.", earsType: "non-ears", deltaOperation: "base", references: [], provenance: { file: "spec.md", line: 5 } },
       ],
       scenarios: [
-        { title: "S1", identifier: "S1", body: "GIVEN a, WHEN b, THEN c.", provenance: { file: "spec.md", line: 10 } },
+        { title: "S1", identifier: "S1", body: "GIVEN a, WHEN b, THEN c.", deltaOperation: "base", provenance: { file: "spec.md", line: 10 } },
       ],
       deltaSections: ["ADDED"],
       structuralFindings: [],
@@ -133,7 +133,7 @@ describe("safety properties", () => {
       file: "spec.md",
       requirements: [
         // Text without SHALL or SHOULD → informational
-        { title: "R1", identifier: "R1", body: "The system processes data.", earsType: "non-ears", references: [], provenance: { file: "spec.md", line: 1 } },
+        { title: "R1", identifier: "R1", body: "The system processes data.", earsType: "non-ears", deltaOperation: "base", references: [], provenance: { file: "spec.md", line: 1 } },
       ],
       scenarios: [],
       deltaSections: ["ADDED"],

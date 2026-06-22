@@ -27,7 +27,7 @@ describe("coverage analysis properties", () => {
         const spec: ParsedSpec = {
           file: "spec.md",
           requirements: [
-            { title: "R1", identifier: "R1", body, earsType: "event-driven", references: [], provenance: { file: "spec.md", line: 1 } },
+            { title: "R1", identifier: "R1", body, earsType: "event-driven", deltaOperation: "base", references: [], provenance: { file: "spec.md", line: 1 } },
           ],
           scenarios: [],
           deltaSections: ["ADDED"],

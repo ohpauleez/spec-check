@@ -134,8 +134,8 @@ describe("end-to-end integration", () => {
       specs: [{
         file: "spec.md",
         requirements: [
-          { title: "Traced", identifier: "INT-TRACED-REQ", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", references: [], provenance: { file: "spec.md", line: 1 } },
-          { title: "Untraced", identifier: "INT-UNTRACED-REQ", body: "WHEN a, THE system SHALL b.", earsType: "event-driven", references: [], provenance: { file: "spec.md", line: 5 } },
+          { title: "Traced", identifier: "INT-TRACED-REQ", body: "WHEN x, THE system SHALL y.", earsType: "event-driven", deltaOperation: "base", references: [], provenance: { file: "spec.md", line: 1 } },
+          { title: "Untraced", identifier: "INT-UNTRACED-REQ", body: "WHEN a, THE system SHALL b.", earsType: "event-driven", deltaOperation: "base", references: [], provenance: { file: "spec.md", line: 5 } },
         ],
         scenarios: [],
         deltaSections: ["ADDED"],
@@ -175,6 +175,7 @@ describe("end-to-end integration", () => {
           identifier: "INT-E2E-REQ",
           body: "WHEN x, THE system SHALL y.",
           earsType: "event-driven",
+          deltaOperation: "base",
           references: [],
           provenance: { file: "spec.md", line: 1 },
         }],

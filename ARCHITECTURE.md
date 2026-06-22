@@ -42,6 +42,9 @@ src/cli/run-cli.ts
     |      src/domain/parser/catalog.ts
     |      src/domain/parser/{proposal,design,spec,task}.ts
     |
+    +--> per-capability merge
+    |      src/domain/parser/merge.ts
+    |
     +--> normalization
     |      src/domain/claim-graph.ts
     |
@@ -135,6 +138,7 @@ This is the orchestration center of the program.
 It defines the actual runtime phase grouping:
 
 - ingestion: dependency check, catalog, parse
+- per-capability merge: merge finalized and delta specs into merged capability views
 - analysis: claim graph, qualitative, formalization, clustering, logic
 - optional source-backed phases when `--src` is set
 - reporting and manifest writing
@@ -170,14 +174,15 @@ These files define the contracts that almost every other module depends on.
 - `model.ts`: parsed document shapes and catalog document types
 - `claim-graph.ts`: normalization from parsed artifacts into typed claims with obligation and provenance
 
-`claim-graph.ts` is the hinge between parsing and analysis. It is where proposal/design/spec/task content turns into the common claim model consumed by later phases.
+`parser/merge.ts` is the hinge between parsing and analysis. It merges finalized and delta specs per capability into a single active view, applying ADDED/MODIFIED/REMOVED operations and emitting merge findings. The claim graph then consumes these merged capability specs rather than raw parsed specs for spec-derived claims.
 
-If you are changing what a “claim” is, what counts as provenance, or how obligation level is derived, start here.
+If you are changing what a “claim” is, what counts as provenance, or how obligation level is derived, start at `claim-graph.ts`. If you are changing how delta specs affect the active capability state, start at `parser/merge.ts`.
 
 #### Parsing and Catalog
 
 - `parser/catalog.ts`: input discovery, OpenSpec document classification, archived-change exclusion, active-delta selection, and delta conflict findings
   - archive admission defaults to excluded; `--allow-archive` only admits explicitly provided archived inputs
+- `parser/merge.ts`: per-capability merge of finalized and delta specs; applies ADDED/MODIFIED/REMOVED block semantics; emits deterministic merge findings
 - `parser/shared.ts`: heading parsing, canonical ID extraction, provenance helpers, and unparsed-line collection
 - `parser/proposal.ts`: line-oriented proposal section extraction
 - `parser/design.ts`: line-oriented design section extraction
@@ -382,17 +387,18 @@ The code is easiest to navigate if you think in terms of runtime phases.
 - dependency checks
 - catalog discovery
 - document parsing
+- per-capability merge (finalized + delta → merged active view)
 
 Primary code:
 
 - `src/cli/run-cli.ts`
 - `src/domain/parser/catalog.ts`
-- `src/domain/parser/*`
+- `src/domain/parser/*` (including `merge.ts`)
 - `src/adapters/process.ts`
 
 ### Specs-Forward Analysis
 
-- claim graph construction
+- claim graph construction (from merged capability views)
 - deterministic coverage analysis
 - qualitative review passes
 - formalization

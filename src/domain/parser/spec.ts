@@ -9,7 +9,7 @@
  */
 import { readFile } from "node:fs/promises";
 
-import type { ParsedRequirement, ParsedScenario, ParsedSpec } from "../model.js";
+import type { DeltaOperation, ParsedRequirement, ParsedScenario, ParsedSpec } from "../model.js";
 import { collectUnparsedLines, parseCanonicalIdentifier, parseHeading, toProvenance } from "./shared.js";
 
 const REQUIREMENT_PREFIX = "### Requirement:";
@@ -40,7 +40,7 @@ const DELTA_HEADINGS = new Set(["ADDED Requirements", "MODIFIED Requirements", "
  *
  * Safety: performs a single filesystem read; no concurrent mutation concerns.
  */
-export async function parseSpec(file: string): Promise<ParsedSpec> {
+export async function parseSpec(file: string, source: "final" | "delta" = "final"): Promise<ParsedSpec> {
   const raw = await readFile(file, "utf8");
   const lines = raw.split(/\r?\n/u);
 
@@ -49,6 +49,8 @@ export async function parseSpec(file: string): Promise<ParsedSpec> {
   const structuralFindings: { message: string; provenance: { file: string; line: number } }[] = [];
   const deltaSections: ("ADDED" | "MODIFIED" | "REMOVED" | "RENAMED")[] = [];
   const matchedLines = new Set<number>();
+  let currentDeltaOperation: DeltaOperation = source === "delta" ? "pre-section" : "base";
+  let currentRequirementIdentifier: string | undefined;
 
   for (let index = 0; index < lines.length; index += 1) {
     const line = lines[index] ?? "";
@@ -58,19 +60,32 @@ export async function parseSpec(file: string): Promise<ParsedSpec> {
       matchedLines.add(lineNo);
       if (heading.text.startsWith("ADDED")) {
         deltaSections.push("ADDED");
+        if (source === "delta") {
+          currentDeltaOperation = "ADDED";
+        }
       } else if (heading.text.startsWith("MODIFIED")) {
         deltaSections.push("MODIFIED");
+        if (source === "delta") {
+          currentDeltaOperation = "MODIFIED";
+        }
       } else if (heading.text.startsWith("REMOVED")) {
         deltaSections.push("REMOVED");
+        if (source === "delta") {
+          currentDeltaOperation = "REMOVED";
+        }
       } else if (heading.text.startsWith("RENAMED")) {
         deltaSections.push("RENAMED");
+        if (source === "delta") {
+          currentDeltaOperation = "RENAMED";
+        }
       }
       continue;
     }
 
     if (line.startsWith(REQUIREMENT_PREFIX)) {
-      const parsed = parseRequirement(file, lines, index);
+      const parsed = parseRequirement(file, lines, index, currentDeltaOperation);
       requirements.push(parsed.requirement);
+      currentRequirementIdentifier = parsed.requirement.identifier;
       for (let consumed = parsed.startLine; consumed <= parsed.endLine; consumed += 1) {
         matchedLines.add(consumed);
       }
@@ -80,7 +95,7 @@ export async function parseSpec(file: string): Promise<ParsedSpec> {
     }
 
     if (line.startsWith(SCENARIO_PREFIX)) {
-      const parsed = parseScenario(file, lines, index);
+      const parsed = parseScenario(file, lines, index, currentDeltaOperation, currentRequirementIdentifier);
       scenarios.push(parsed.scenario);
       for (let consumed = parsed.startLine; consumed <= parsed.endLine; consumed += 1) {
         matchedLines.add(consumed);
@@ -127,6 +142,7 @@ function parseRequirement(
   file: string,
   lines: readonly string[],
   startIndex: number,
+  deltaOperation: DeltaOperation,
 ): {
   readonly requirement: ParsedRequirement;
   readonly startLine: number;
@@ -190,6 +206,7 @@ function parseRequirement(
     ...(identifier === undefined ? {} : { identifier }),
     body,
     earsType,
+    deltaOperation,
     references,
     provenance: { file, line: startLine },
   };
@@ -220,6 +237,8 @@ function parseScenario(
   file: string,
   lines: readonly string[],
   startIndex: number,
+  deltaOperation: DeltaOperation,
+  parentRequirementIdentifier: string | undefined,
 ): {
   readonly scenario: ParsedScenario;
   readonly startLine: number;
@@ -255,6 +274,8 @@ function parseScenario(
       title,
       ...(identifier === undefined ? {} : { identifier }),
       body: bodyLines.join(" "),
+      deltaOperation,
+      ...(parentRequirementIdentifier === undefined ? {} : { parentRequirementIdentifier }),
       provenance: { file, line: startLine },
     },
     startLine,

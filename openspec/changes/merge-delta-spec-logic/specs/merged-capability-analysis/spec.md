@@ -115,10 +115,10 @@ IF duplicate canonical identifiers appear more than once within the same delta o
 
 **Postcondition:** Competing edits in the same delta section do not force arbitrary merge choices.
 
-#### Scenario: Rename Sections Warn Once Per Delta File [MCA-MERGE-RENAME]
-IF a selected delta spec contains one or more `RENAMED` sections, THEN THE spec-check tool SHALL emit exactly one `spec_merge.rename_unsupported` warning for that delta spec file and SHALL leave merged capability content unchanged.
+#### Scenario: Rename Blocks Emit One Finding Per Skipped Operation [MCA-MERGE-RENAME]
+IF a selected delta spec contains a `RENAMED` requirement block, THEN THE spec-check tool SHALL emit exactly one `spec_merge.rename_unsupported` warning for that skipped requirement block and SHALL leave merged capability content unchanged.
 
-**Postcondition:** Deferred rename semantics are visible without pretending renames were applied.
+**Postcondition:** Deferred rename semantics are visible without pretending renames were applied, and no skipped `RENAMED` operation is silently discarded.
 
 #### Scenario: Finalized Delta Headings Warn Once And Are Ignored [MCA-MERGE-FINAL-DELTA]
 IF a finalized spec contains one or more delta section headings, THEN THE spec-check tool SHALL emit exactly one `spec_merge.finalized_spec_delta_heading_ignored` warning for that finalized spec file, SHALL include guidance that finalized specs should not have Delta Spec Headings, and SHALL treat all parsed items in that file as base content.

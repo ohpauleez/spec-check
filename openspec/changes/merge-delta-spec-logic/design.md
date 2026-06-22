@@ -291,7 +291,7 @@ The term "surviving merged requirements" used in collision checking refers to th
 #### `RENAMED`
 
 - Full rename application is deferred in the first implementation.
-- Emit one `spec_merge.rename_unsupported` warning per delta spec file when that file contains one or more `RENAMED` sections.
+- Emit one `spec_merge.rename_unsupported` warning per skipped `RENAMED` requirement block.
 - Rename sections do not transform the merged output.
 
 #### Duplicate Handling
@@ -331,7 +331,7 @@ The merge layer introduces findings in the `spec_merge.` namespace:
 | `spec_merge.removed_missing_identifier` | `error` | A `REMOVED` item has no identifier and cannot be matched |
 | `spec_merge.modified_target_not_found` | `error` | A `MODIFIED` item's identifier does not match any surviving base item |
 | `spec_merge.removed_target_not_found` | `error` | A `REMOVED` item's identifier does not match any surviving base item |
-| `spec_merge.rename_unsupported` | `warning` | A delta spec contains `RENAMED` sections that are not yet applied |
+| `spec_merge.rename_unsupported` | `warning` | A skipped `RENAMED` requirement block is not yet applied |
 | `spec_merge.pre_section_content` | `error` | A delta spec contains items before the first delta section heading |
 | `spec_merge.standalone_scenario_unsupported` | `error` | A delta spec contains a scenario item outside a requirement-block merge unit |
 | `spec_merge.duplicate_base_identifier` | `error` | A finalized base spec contains a duplicate canonical identifier after the first occurrence |

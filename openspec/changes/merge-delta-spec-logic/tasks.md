@@ -37,7 +37,7 @@
 - [x] 2.8 Implement `ADDED` requirement-block semantics, including separate requirement/scenario collision namespaces. Finding messages must indicate which namespace the collision occurred in.
 - [x] 2.9 Implement `MODIFIED` requirement-block replacement semantics with exact identifier matching and collision rollback.
 - [x] 2.10 Implement `REMOVED` requirement-block deletion semantics with sparse-entry support.
-- [x] 2.11 Implement deferred `RENAMED` behavior as one warning per delta spec file with no output transformation.
+- [x] 2.11 Implement deferred `RENAMED` behavior as one warning per skipped `RENAMED` requirement block with no output transformation.
 - [x] 2.12 Implement duplicate-base detection where the first occurrence survives and later duplicates are excluded from output and future matching.
 - [x] 2.13 Implement duplicate-delta detection within a single operation section where all conflicting duplicate blocks are excluded.
 - [x] 2.14 Implement `spec_merge.empty_capability_skipped` emission and downstream omission for capabilities with zero surviving merged requirements.
@@ -53,7 +53,7 @@
 - Duplicate handling: duplicate identifiers in the base spec use first-survivor semantics (first occurrence is authoritative, later duplicates excluded with `spec_merge.duplicate_base_identifier`). Duplicate identifiers within a single delta operation section exclude ALL conflicting blocks (not first-wins) with `spec_merge.duplicate_delta_identifier`, preventing arbitrary edit wins.
 - Ordering: capabilities are emitted in catalog insertion order. Within each capability, base requirement blocks retain their document order; ADDED blocks are appended at the end in their delta-document order. `groupBlocks()` sorts by `provenance.line` ascending before grouping to ensure stable ordering.
 - Precondition assertions: (1) at most one delta per capability (fatal assertion protecting against catalog bugs), (2) every catalog document path has a matching parsed spec in the map (protects against pipeline desync).
-- Under-specified decision: `RENAMED` sections emit exactly one `spec_merge.rename_unsupported` warning per delta file regardless of how many items appear in the section. The merge output is unchanged. This was chosen because rename semantics (identifier rewriting across all references) are not defined in v1 and guessing would introduce silent correctness failures.
+- Under-specified decision: each skipped `RENAMED` requirement block emits exactly one `spec_merge.rename_unsupported` warning. The merge output is unchanged. This was chosen because rename semantics (identifier rewriting across all references) are not defined in v1 and guessing would introduce silent correctness failures. Per-block findings preserve the core invariant that every skipped merge operation produces exactly one finding with no silent discard.
 - Under-specified decision: the `logicalFile` format `<merged-spec/{capability}>` uses angle brackets deliberately to make it syntactically distinguishable from real filesystem paths. The sanitization algorithm strips these brackets and replaces `/` with `-` for artifact filenames.
 - Developer handoff notes: all findings produced by the merge are `Finding` values with `spec_merge.*` category prefixes. They are append-only within the merge function -- no finding is ever removed or replaced. The function is stateless between capabilities: a failure in one capability cannot affect another's output.
 

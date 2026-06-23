@@ -143,11 +143,10 @@ This project explicitly uses lightweight formal methods to increase confidence w
 
 In practice that means:
 - identifying critical properties and invariants first
-- translating requirement and scenario claims into typed logic IR and SMT-LIB artifacts
-- using solver-backed analysis (Z3) to detect contradictions, completeness gaps, and cross-side implication
-- clustering formalization samples to surface genuine ambiguity
+- modeling key workflows as state machines
 - keeping the core deterministic and pushing nondeterminism to the edges
 - using layered evidence: specs, models, property tests, contract tests, integration tests, and traceability
+- integrating and automating verification technologies throughout the stack
 
 Relevant references:
 - [docs/lfm.md](docs/lfm.md)

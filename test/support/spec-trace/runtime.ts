@@ -201,7 +201,7 @@ export function finalizeTraceCoverage(
  * @returns true when trace coverage should be enforced at run end
  */
 export function isTraceCoverageEnabled(): boolean {
-  const rawValue = process.env.DEVBOX_TRACE_COVERAGE;
+  const rawValue = process.env.SPEC_TRACE_COVERAGE;
   return rawValue === "1" || rawValue === "true";
 }
 

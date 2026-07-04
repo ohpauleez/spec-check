@@ -168,13 +168,13 @@ describe("spec-trace run-time validation", () => {
 describe("spec-trace coverage enforcement", () => {
   it("ordinary test run validates without coverage enforcement", () => {
     traceSpec("TRACE-RUN-COVERAGE", "TRACE-COVERAGE-OFF");
-    // When DEVBOX_TRACE_COVERAGE is not set, coverage is not enforced
+    // When SPEC_TRACE_COVERAGE is not set, coverage is not enforced
     // This test verifies the flag check
-    const originalEnv = process.env.DEVBOX_TRACE_COVERAGE;
-    delete process.env.DEVBOX_TRACE_COVERAGE;
+    const originalEnv = process.env.SPEC_TRACE_COVERAGE;
+    delete process.env.SPEC_TRACE_COVERAGE;
     expect(isTraceCoverageEnabled()).toBe(false);
     if (originalEnv !== undefined) {
-      process.env.DEVBOX_TRACE_COVERAGE = originalEnv;
+      process.env.SPEC_TRACE_COVERAGE = originalEnv;
     }
   });
 

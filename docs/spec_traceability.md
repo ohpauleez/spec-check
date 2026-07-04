@@ -73,7 +73,7 @@ describe("parseAlias", () => {
 ## Coverage behavior
 
 - Reference validation for traced tests always runs.
-- Coverage enforcement runs only when `DEVBOX_TRACE_COVERAGE=1` or `DEVBOX_TRACE_COVERAGE=true`.
+- Coverage enforcement runs only when `SPEC_TRACE_COVERAGE=1` or `SPEC_TRACE_COVERAGE=true`.
 - `npm run test:trace` enables coverage mode and runs the full Vitest suite.
 - `npm test` leaves coverage disabled for lightweight local runs.
 - When coverage is enabled, every canonical identifier must be declared by at least one traced test in the run.

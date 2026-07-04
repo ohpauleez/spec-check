@@ -22,7 +22,7 @@
     "lint:eslint": "eslint \"src/**/*.ts\" \"test/**/*.ts\" \"build/**/*.ts\" --max-warnings=0",
     "lint:fix": "eslint \"src/**/*.ts\" \"test/**/*.ts\" \"build/**/*.ts\" --fix",
     "test": "vitest run",
-    "test:trace": "DEVBOX_TRACE_COVERAGE=1 vitest run",
+    "test:trace": "SPEC_TRACE_COVERAGE=1 vitest run",
     "test:watch": "vitest",
     "bundle": "node ./build/esbuild.ts"
   },

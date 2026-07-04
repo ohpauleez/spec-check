@@ -1,7 +1,7 @@
 import { defineConfig } from "vitest/config";
 
-const traceCoverageEnabled = process.env.DEVBOX_TRACE_COVERAGE === "1"
-  || process.env.DEVBOX_TRACE_COVERAGE === "true";
+const traceCoverageEnabled = process.env.SPEC_TRACE_COVERAGE === "1"
+  || process.env.SPEC_TRACE_COVERAGE === "true";
 
 export default defineConfig({
   test: {

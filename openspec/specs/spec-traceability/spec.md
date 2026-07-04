@@ -107,7 +107,7 @@ WHEN a developer runs one test file or a filtered subset of traced tests, THE sp
 **Postcondition:** Subset runs still catch malformed and unknown identifiers relative to the full spec set.
 
 ### Requirement: Coverage enforcement is a dedicated full-suite mode [TRACE-RUN-COVERAGE]
-WHEN the dedicated `test:trace` command runs as a full-suite command, THE spec-traceability utility SHALL enforce that every canonical identifier is declared by at least one traced test in the run, while ordinary test runs SHALL validate traced references without requiring full coverage.
+WHEN the dedicated `test:trace` command runs as a full-suite command with `SPEC_TRACE_COVERAGE` enabled, THE spec-traceability utility SHALL enforce that every canonical identifier is declared by at least one traced test in the run, while ordinary test runs SHALL validate traced references without requiring full coverage.
 
 #### Scenario: Ordinary test run validates without coverage enforcement [TRACE-COVERAGE-OFF]
 WHEN the ordinary Vitest test command runs without coverage mode enabled, THE spec-traceability utility SHALL validate traced identifiers but SHALL NOT fail the run for uncovered canonical identifiers.

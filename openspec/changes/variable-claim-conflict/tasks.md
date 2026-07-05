@@ -4,11 +4,12 @@
 - [ ] 1.2 Update `src/domain/formal/validate.ts` to reject duplicate variable declarations whose raw names sanitize to the same variable symbol.
 - [ ] 1.3 Update `src/domain/formal/validate.ts` to reject duplicate function declarations whose raw names sanitize to the same function symbol.
 - [ ] 1.4 Preserve sanitizer-induced same-claim variable/function cross-kind collisions as compiler-level `symbol_kind_collision` cases rather than validation failures.
-- [ ] 1.5 Update `src/domain/formal/smtlib.ts` `sanitizeIdentifier()` to be injective: reserve `_` as escape lead, escape literal underscore as `_5F`, use self-delimiting uppercase hexadecimal escapes, and perform no Unicode normalization.
+- [ ] 1.5 Extract `sanitizeIdentifier()` into a new `src/domain/formal/identifiers.ts` module and re-export it from `src/domain/formal/smtlib.ts` as a compatibility shim so existing importers keep working, then make the sanitizer injective: pass through only ASCII letters and digits `[A-Za-z0-9]`, reserve `_` as the escape lead, and escape every other code point — including a literal underscore (`U+005F` becomes `_00005F`) — as `_` followed by exactly six uppercase hexadecimal digits of the Unicode code point. Iterate the raw string by Unicode code point (`for…of`/`codePointAt`), never by UTF-16 code unit (`charCodeAt`), so a supplementary-plane character such as `😀` (`U+1F600`) maps to a single six-digit escape (`_01F600`) and an unpaired surrogate escapes to its own six-digit form. Escape a leading raw digit as its six-digit hex form (a bare `_` prefix would break unique decodability), map the empty string to `_`, and perform no Unicode normalization.
 - [ ] 1.6 Preserve assertion-label invariants for `<sanitizedClaimId>__a<index>`; ensure the new sanitizer cannot place raw `__` inside sanitized IDs and that label mapping remains collision-free.
-- [ ] 1.7 Update underscore-sensitive fixtures, examples, and golden expectations, including inverting any existing raw-dedup characterization test that expected the old many-to-one sanitizer behavior.
+- [ ] 1.7 Update the single escape-output-sensitive golden assertion in `test/contract/smtlib.test.ts` (the `sanitizeIdentifier("REQ(1)|A")` expectation) from `/^REQ_28/` to `/^REQ_000028/` to match fixed-width-6 output. No many-to-one raw-dedup characterization test exists to invert: the old sanitizer's collisions were latent (never asserted), and all other sanitizer tests assert the shape `/^[A-Za-z_][A-Za-z0-9_]*$/` or `sanitizeIdentifier("") === "_"`, which the injective sanitizer still satisfies.
 - [ ] 1.8 Add `validate.test.ts` cases for raw variable/function overlap, duplicate sanitized variables, and duplicate sanitized functions.
 - [ ] 1.9 Add sanitizer contract/property tests proving formerly colliding identifiers such as `REQ(1)` and `REQ_281_29` now produce distinct sanitized symbols and distinct assertion labels.
+- [ ] 1.10 Correct the stale sanitizer documentation that still describes the old two-digit `_XX` escape: update the `SanitizedClaimId` doc comment in `src/domain/branded.ts` and the sanitizer/module JSDoc in `src/domain/formal/smtlib.ts` to describe the injective fixed-width-6 encoding, so no doc comment contradicts the new `identifiers.ts` contract.
 
 ### Validation and Identifier Safety change summary
 <!-- Full audit trail about what changed, **why** it was changed, and evidence that the tasks were successfully completed.
@@ -24,10 +25,10 @@
 
 ## 2. Combined SMT-LIB Conflict Detection
 
-- [ ] 2.1 Extend `SpecMergeConflict` in `src/domain/formal/smtlib.ts` to the three-kind discriminated union: `function_signature_mismatch`, `variable_sort_mismatch`, and `symbol_kind_collision`.
+- [ ] 2.1 Extend `SpecMergeConflict` in `src/domain/formal/smtlib.ts` to the three-kind discriminated union: `function_signature_mismatch`, `variable_sort_mismatch`, and `symbol_kind_collision`. Type each variant's `sanitizedName` as the branded `SanitizedClaimId` from `src/domain/branded.ts` (not raw `string`) so solver-facing symbol identity is compiler-enforced; keep the raw `existing*`/`conflicting*` name and `claimId` evidence fields as `string`.
 - [ ] 2.2 Rename function-conflict evidence from the old `functionName` shape to explicit `existingFunctionName` and `conflictingFunctionName`, preserving `claimIds: [existingClaimId, excludedClaimId]`.
 - [ ] 2.3 Add explicit `existingClaimId` and `excludedClaimId` to all conflict kinds and treat `claimIds` as evidence only, not downstream inclusion state.
-- [ ] 2.4 Add `declaredVariables: Map<string, { variableName: string; sort: LogicSort; claimId: string }>` and extend `declaredFunctions` to retain `{ functionName, fn, claimId }` for evidence.
+- [ ] 2.4 Add `declaredVariables: Map<SanitizedClaimId, { variableName: string; sort: LogicSort; claimId: string }>` and extend `declaredFunctions` to `Map<SanitizedClaimId, { functionName, fn, claimId }>` for evidence, keying both registries on the branded sanitized symbol returned by `sanitizeIdentifier()`.
 - [ ] 2.5 Implement variable-sort mismatch detection first, comparing exact closed `LogicSort` values and recording `expectedSort` and `conflictingSort`.
 - [ ] 2.6 Preserve and update function-signature mismatch detection second, including new evidence fields and first surviving declaration ownership.
 - [ ] 2.7 Implement symbol-kind collision detection third for cross-claim variable/function reuse and same-claim sanitizer-induced cross-kind collisions.
@@ -35,6 +36,8 @@
 - [ ] 2.9 Register only included claims; use first-wins guards for both variable and function registries so compatible redeclarations never re-anchor ownership or overwrite sort/signature.
 - [ ] 2.10 Ensure the second emission pass excludes declarations, assertions, `claimIds`, and `assertionNameMap` entries for every conflicted claim.
 - [ ] 2.11 Add `smtlib.test.ts` coverage for compatible variable deduplication, variable-sort mismatch, multiple later mismatches, excluded assertion absence, excluded unique declaration absence, function-conflict regression, mixed conflict kinds, precedence boundaries, cross-claim symbol-kind collision, same-claim sanitizer collision, raw names colliding after sanitization, empty claim lists, and no-variable compatible-function claims.
+- [ ] 2.12 Encode the merge-core contracts as in-code assertions using `precondition`/`invariant`/`postcondition` from `src/domain/assert.ts`: precondition that the claim list is finite and within the declared bounds; a post-detection invariant that no registry symbol maps to two sorts, two signatures, or two declaration kinds; and postconditions that `compiled.claimIds` is an order-preserving subsequence of the input claim IDs, that no `excludedClaimId` appears in `compiled.claimIds`, and that `assertionNameMap` keys are a subset of `compiled.claimIds`. Keep expected structural outcomes (duplicate IDs, declaration conflicts) as `Result`-style findings, never thrown errors; split assertions into small single-fact checks so a failure names the exact violated contract.
+- [ ] 2.13 Introduce named operational bounds `CLAIMS_PER_GROUP_MAX` (claims per compile group) and `DECLARATIONS_PER_CLAIM_MAX` (variable-plus-function declarations per claim) and fail fast with a `precondition` — a thrown `Error`, not a `Result` finding — when a group or claim exceeds them; iterate both detection passes over these bounded collections with `for…of` and break on the first conflict so control flow stays bounded and visible at the call site.
 
 ### Combined SMT-LIB Conflict Detection change summary
 <!-- Full audit trail about what changed, **why** it was changed, and evidence that the tasks were successfully completed.
@@ -55,12 +58,13 @@
 - [ ] 3.3 Add sanitized-claim-ID uniqueness preflight using `sanitizeIdentifier(claimId)` as a defense-in-depth safety net for VSC-10b.
 - [ ] 3.4 Emit one `logic.invalid_group` finding with severity `error` for sanitized-ID collisions, listing colliding raw IDs and the shared sanitized ID, and skip all compiler/writer/solver work for that group.
 - [ ] 3.5 Keep invalid-group rejection group-scoped: sibling valid groups must still compile, write artifacts, and run solver queries.
-- [ ] 3.6 Convert all `SpecMergeConflict` variants to `logic.merge_conflict` findings using an exhaustive `switch (conflict.kind)`.
+- [ ] 3.6 Convert all `SpecMergeConflict` variants to `logic.merge_conflict` findings using an exhaustive `switch (conflict.kind)` whose `default` branch calls `assertNever(conflict)` (from `src/domain/assert.ts`, matching the existing `src/domain/errors.ts` pattern) so adding a fourth conflict variant becomes a compile-time error.
 - [ ] 3.7 Preserve per-kind finding evidence: sanitized symbol, both raw names, both claim IDs, both sorts for variable conflicts, and both declaration kinds for symbol-kind conflicts.
 - [ ] 3.8 Keep merge-conflict severity hardcoded to `error`, independent of source obligation.
 - [ ] 3.9 Replace downstream pairwise/completeness filters based on conflict evidence tuples with `const includedClaimIds = new Set(compiled.claimIds)` and filter by inclusion.
 - [ ] 3.10 Add `logic-analysis.test.ts` coverage for invalid-group zero compiler/writer/solver work, sibling valid group continuation, per-kind merge-conflict finding shapes, surviving-claim false-negative regression, and downstream filtering by `compiled.claimIds`.
 - [ ] 3.11 Add a constructed sanitized-ID collision preflight test, even though injective sanitization makes it unreachable from distinct raw IDs in normal inputs.
+- [ ] 3.12 Assert in code, co-located with the preflight, that a group rejected as `logic.invalid_group` performs zero `compileSpecSmtlib()`, artifact-write, and `runZ3Query()` calls for that group, complementing the contract/property zero-work tests with a runtime fail-fast guard.
 
 ### Logic Analysis Group Preflight and Inclusion Coherence change summary
 <!-- Full audit trail about what changed, **why** it was changed, and evidence that the tasks were successfully completed.
@@ -95,20 +99,24 @@
      5. "Developer handoff notes:" - important info for other devs
      6. "Validation evidence:" - proof it works -->
 
-## 5. Spec, Alloy, Property, and Regression Coverage
+## 5. Spec, Alloy, Documentation, Property, and Regression Coverage
 
 - [ ] 5.1 Update `openspec/specs/formalization-and-logic-analysis/spec.md` to add `FLA-SPEC-VARSORT-CONFLICT`, `FLA-SPEC-SYMKIND-CONFLICT`, and `FLA-SPEC-DUPLICATE-CLAIM-ID`.
 - [ ] 5.2 Narrow `FLA-SPEC-CONFLICT` prose to function-signature conflicts and preserve both raw function names plus the shared sanitized symbol in evidence.
-- [ ] 5.3 Update `FLA-SPEC-COMBINE` and `FLA-SPEC-NAMED` to document `compiled.claimIds`, duplicate raw/sanitized claim-ID rejection, injective sanitization, and assertion-label uniqueness.
-- [ ] 5.4 Update the shared Alloy domain model with `claimId` on `Claim`, `DeclKind`, `declKind` on `Declaration`, and `DeclName` as final sanitized declaration identity.
-- [ ] 5.5 Add Alloy facts `unique_claim_ids_per_spec` and `validated_same_claim_declarations` aligned with validation and preflight boundaries.
-- [ ] 5.6 Extend Alloy `conflict_detected` to cover differing declaration kind or differing declaration signature for the same sanitized name, allowing `c1 = c2` for same-claim sanitizer collisions.
-- [ ] 5.7 Strengthen Alloy `combined_wellformed` so included declarations sharing a name agree on both kind and signature.
-- [ ] 5.8 Keep `conflict_excluded_from_combined` disjunctive and document that positional later-claim exclusion is verified by property tests rather than Alloy.
-- [ ] 5.9 Document VSC-10b, VSC-11, and VSC-12 as encoding/rendering evidence obligations tested by concrete contract, property, and renderer tests rather than Alloy unless they affect merge state.
-- [ ] 5.10 Update `openspec/specs/reporting-and-evidence/spec.md` with `RAE-EVID-RENDER-SAFE` and merge/invalid-group finding evidence details.
-- [ ] 5.11 Update `openspec/specs/merged-capability-analysis/spec.md` with `MCA-MERGE-GROUP-KEY`, synthetic logical-key grouping semantics, and compile-group claim-ID uniqueness boundary.
-- [ ] 5.12 Ensure every new or modified scenario ID has at least one covering trace in contract/property/reporting tests.
+- [ ] 5.3 Update `FLA-SPEC-COMBINE` and `FLA-SPEC-NAMED` to document `compiled.claimIds`, duplicate raw/sanitized claim-ID rejection, injective fixed-width-6 sanitization, and assertion-label uniqueness, and refresh the pre-existing `FLA-SMTLIB-COMPILE` requirement's `FLA-SMTLIB-SANITIZE`/`FLA-SMTLIB-PRESERVE` scenarios and worked examples to the fixed-width-6 encoding (as a `MODIFIED` delta restating the requirement's unchanged scenarios verbatim) so its outputs stay consistent with the new sanitizer.
+- [ ] 5.4 Create the standalone, compilable Alloy 6 file `openspec/changes/variable-claim-conflict/specs/formalization-and-logic-analysis/alloy/merge.als` (module `merge`) as an external documentation-and-verification model for the structural safety properties behind `FLA-SPEC-COMBINE` (not part of the test harness and not a spec condition), modeling claim identity (`claimId` on `Claim`), declaration kind (`DeclKind`, `declKind` on `Declaration`), and `DeclName` as the final sanitized declaration identity.
+- [ ] 5.5 Add `merge.als` facts `unique_claim_ids_per_spec` and `validated_same_claim_declarations` aligned with validation and preflight boundaries.
+- [ ] 5.6 Define `merge.als` `conflict_detected` to cover differing declaration kind or differing declaration signature for the same sanitized name, allowing `c1 = c2` for same-claim sanitizer collisions.
+- [ ] 5.7 Define `merge.als` `combined_wellformed` so included declarations sharing a name agree on both kind and signature, plus `combined_partitions_spec_claims` so included/excluded claims partition the spec's claims disjointly.
+- [ ] 5.8 Keep `merge.als` `conflicts_excluded` disjunctive (`c1 in excludedClaims or c2 in excludedClaims`) and document that positional later-claim exclusion is verified by property tests rather than Alloy.
+- [ ] 5.9 Add `merge.als` safety assertions `exclusion_implies_wellformed` and `same_claim_collision_excluded` and `run` commands `sanity`, `conflict_with_exclusion`, and `same_claim_collision`, each with `expect` annotations, then run the Alloy Analyzer externally (`java -jar tooling/alloy_v6.0.2.jar exec -f …/alloy/merge.als`) to confirm the three runs are SAT and the two checks are UNSAT, and record the resulting transcript in this section's change summary. This is an external verification step, not part of the automated test suite.
+- [ ] 5.10 Document VSC-10b, VSC-11, and VSC-12 as encoding/rendering evidence obligations tested by concrete contract, property, and renderer tests rather than Alloy unless they affect merge state.
+- [ ] 5.11 Update `openspec/specs/reporting-and-evidence/spec.md` with `RAE-EVID-RENDER-SAFE` and merge/invalid-group finding evidence details.
+- [ ] 5.12 Update `openspec/specs/merged-capability-analysis/spec.md` with `MCA-MERGE-GROUP-KEY`, synthetic logical-key grouping semantics, and compile-group claim-ID uniqueness boundary.
+- [ ] 5.13 Ensure every new or modified scenario ID has at least one covering trace in contract/property/reporting tests.
+- [ ] 5.14 Update `ARCHITECTURE.md` for formal-module accuracy: add the `merged-capability-analysis` capability to the Existing Specs list, add `identifiers.ts` (plus `logic-analysis-checks.ts` and `logic-analysis-sexpr.ts`) to the formal module inventory, and correct identifier-sanitization ownership from `smtlib.ts` to the new `identifiers.ts` module (with `smtlib.ts` re-exporting it as a compatibility shim).
+- [ ] 5.15 Update `docs/design.md` for the injective sanitizer and external formal model: describe SMT-LIB identifier sanitization as the injective fixed-width-6 encoding owned by `identifiers.ts`, confirm the `SanitizedClaimId` shape `^[A-Za-z_][A-Za-z0-9_]*$`, update decision D-6 to fixed-width-6 injectivity, reframe the verification-pyramid formal-models tier as the external Alloy model verified by manual analyzer runs, and add the `compiled.claimIds`-authority and duplicate-claim-ID preflight invariants.
+- [ ] 5.16 Add complete TSDoc to every new or changed exported function and type per `docs/typescript_style.md` (Documentation): state preconditions, postconditions, preserved invariants, all expected failure forms with `@throws`, ownership/mutability assumptions, and an `@example` for exported APIs and any subtle behavior — at minimum the injective `sanitizeIdentifier()`, the variable-sort/symbol-kind detection helpers, the group preflight, the conflict→finding conversion, and the renderer neutralization helper; for `Result`-returning functions document the meaning and invariants of both the success and error branches so TSDoc states the same contracts the assertions enforce.
 
 ### Spec, Alloy, Property, and Regression Coverage change summary
 <!-- Full audit trail about what changed, **why** it was changed, and evidence that the tasks were successfully completed.

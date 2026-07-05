@@ -97,94 +97,35 @@ WHEN the spec-check tool generates named assertions in the combined SMT-LIB, THE
 
 **Postcondition:** The assertion-name-to-claim-ID mapping is deterministic and reversible for every included claim.
 
-**Identifier Contract:** The label form SHALL be `<sanitizedClaimId>__a<index>`. `sanitizeIdentifier()` SHALL be injective, SHALL reserve `_` as the escape lead, SHALL escape literal underscores such as `_5F`, SHALL use self-delimiting uppercase hexadecimal escapes, and SHALL perform no Unicode normalization. Under this contract, the `__a<index>` separator remains unambiguous and distinct raw claim IDs cannot produce colliding assertion labels.
+**Identifier Contract:** The label form SHALL be `<sanitizedClaimId>__a<index>`. `sanitizeIdentifier()` SHALL be injective. It SHALL pass through only ASCII letters and digits `[A-Za-z0-9]`, SHALL reserve `_` as the escape lead, and SHALL escape every other code point — including a literal underscore (`U+005F` becomes `_00005F`) — as `_` followed by exactly six uppercase hexadecimal digits of the Unicode code point. It SHALL escape a leading raw digit, SHALL map the empty string to `_`, and SHALL perform no Unicode normalization. Because every escape is a fixed six-digit width, the encoding is uniquely decodable; because `_` occurs only as an escape lead followed by six hex digits, the literal sequence `__` never appears inside a sanitized claim identifier produced from a non-empty raw string, so the `__a<index>` separator remains unambiguous and distinct raw claim IDs cannot produce colliding assertion labels.
 
 **Trace Properties:** VSC-8, VSC-10b.
 
-### Requirement: Formal Merge Model Alignment [FLA-SPEC-MODEL]
-WHEN the spec-check tool maintains or validates the formalization-and-logic-analysis capability model, THE model SHALL represent claim identity, declaration kind, declaration signature, conflict detection, and combined-SMT wellformedness consistently with the compiler merge semantics.
+### Requirement: SMT-LIB Compilation And Identifier Sanitization [FLA-SMTLIB-COMPILE]
+WHEN the spec-check tool compiles logic IR into SMT-LIB artifacts, THE spec-check tool SHALL sanitize user-derived identifiers with an injective encoding to prevent solver syntax collisions and identifier aliasing, SHALL include reversible mapping comments that link sanitized identifiers back to their original claim identifiers, SHALL emit only declarations and assertions without solver commands (`(check-sat)`), and SHALL expose decomposed assertion expressions alongside the compiled text for downstream query construction.
 
 **References:**
-- `openspec/changes/variable-claim-conflict/proposal.md#Safety And Liveness Claims`
-- `openspec/changes/variable-claim-conflict/design.md#OpenSpec And Alloy Model Updates`
-- `openspec/changes/variable-claim-conflict/design.md#Verification Plan`
+- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Constraints`
+- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
+- `openspec/changes/variable-claim-conflict/proposal.md#Inputs, Outputs, And Data Domains`
+- `openspec/changes/variable-claim-conflict/design.md#Identifier Injectivity Design`
 
-#### Scenario: Claim And Declaration Model Includes Identity And Kind [FLA-MODEL-CLAIM-DECL-KIND]
-WHEN the shared Alloy model describes claims and declarations, THE model SHALL include `claimId` on `Claim`, SHALL include `declKind` on `Declaration`, and SHALL keep `DeclName` as the final sanitized declaration identity used by SMT-LIB emission.
+#### Scenario: Unsafe Identifier Sanitized [FLA-SMTLIB-SANITIZE]
+WHEN a claim identifier contains any code point outside the pass-through set of ASCII letters and digits `[A-Za-z0-9]` (for example parentheses, pipe characters, whitespace, a literal underscore, or a supplementary-plane character such as `😀`), THE spec-check tool SHALL iterate the identifier by Unicode code point — not by UTF-16 code unit — and SHALL replace each such code point with a deterministic, injective encoding — `_` followed by exactly six uppercase hexadecimal digits of the Unicode code point — and emit a mapping comment.
 
-**Required Model Shape:**
+**Postcondition:** The SMT-LIB file is syntactically valid, the encoding is uniquely decodable, and the original identifier is recoverable from the mapping comment. A supplementary-plane code point encodes to exactly one six-digit escape rather than a surrogate pair of escapes.
 
-```alloy
-sig Claim {
-  obligation : one Obligation,
-  spec       : one Spec,
-  claimId    : one ClaimId
-}
+#### Scenario: Valid Identifier Preserved [FLA-SMTLIB-PRESERVE]
+WHEN a claim identifier contains only pass-through characters — ASCII letters and digits `[A-Za-z0-9]` — and does not begin with a digit, THE spec-check tool SHALL use the identifier unchanged in the SMT-LIB output.
 
-abstract sig DeclKind {}
-one sig VarDecl, FunDecl extends DeclKind {}
+**Postcondition:** No unnecessary transformation is applied to identifiers already drawn entirely from the pass-through set.
 
-sig Declaration {
-  declName  : one DeclName,
-  declKind  : one DeclKind,
-  declSig   : one DeclSignature,
-  declClaim : one Claim
-}
-```
+#### Scenario: Compiled Output Excludes Solver Commands [FLA-SMTLIB-QUERYSAT]
+WHEN the spec-check tool compiles logic IR into SMT-LIB text, THE compiled output SHALL contain variable declarations (`declare-const`), function declarations (`declare-fun`), and assertions (`assert`) but SHALL NOT include `(check-sat)`. THE spec-check tool SHALL append `(check-sat)` at query execution time when submitting the compiled output to the solver.
 
-#### Scenario: Claim Identity And Same-Claim Declaration Facts [FLA-MODEL-VALIDATION-FACTS]
-WHEN the shared Alloy model captures validation and preflight boundaries, THE model SHALL require unique claim IDs per spec and SHALL distinguish same-kind sanitized duplicates from same-claim cross-kind sanitizer collisions.
+**Postcondition:** Compiled SMT-LIB is a reusable component that can be composed into different query types (satisfiability, implication) without stripping embedded solver commands.
 
-**Required Model Facts:**
+#### Scenario: Assertion Expressions Exposed [FLA-SMTLIB-ASSERTEXPRS]
+WHEN the spec-check tool compiles logic IR into SMT-LIB, THE compiled output SHALL include the decomposed inner assertion expressions (without the `(assert ...)` wrapper) for use in downstream implication query construction.
 
-```alloy
-fact unique_claim_ids_per_spec {
-  all disj c1, c2 : Claim |
-    c1.spec = c2.spec implies c1.claimId != c2.claimId
-}
-
-fact validated_same_claim_declarations {
-  all c : Claim, disj d1, d2 : Declaration |
-    (d1.declClaim = c and d2.declClaim = c and d1.declName = d2.declName) implies
-      d1.declKind != d2.declKind
-}
-```
-
-**Clarification:** `validated_same_claim_declarations` mirrors validation: duplicate variables and duplicate functions sharing one sanitized name are invalid, while a same-claim variable/function sanitizer collision remains representable as a compile conflict.
-
-#### Scenario: Conflict Predicate Covers All Declaration Conflicts [FLA-MODEL-CONFLICT-PRED]
-WHEN the shared Alloy model identifies merge conflicts, THE predicate SHALL cover same sanitized name with differing declaration kind or differing declaration signature, and SHALL allow `c1 = c2` so same-claim sanitizer-induced variable/function collisions are representable.
-
-**Required Predicate Shape:**
-
-```alloy
-pred conflict_detected [c1, c2 : Claim, sp : Spec] {
-  c1.spec = sp and c2.spec = sp
-  some disj d1, d2 : Declaration |
-    d1.declClaim = c1 and d2.declClaim = c2 and
-    d1.declName = d2.declName and
-    (d1.declKind != d2.declKind or d1.declSig != d2.declSig)
-}
-```
-
-#### Scenario: Combined Wellformedness Requires Kind And Signature Agreement [FLA-MODEL-COMBINED-WELLFORMED]
-WHEN the shared Alloy model defines combined SMT-LIB wellformedness, THE model SHALL require every pair of included declarations sharing one sanitized name to agree on both declaration kind and declaration signature.
-
-**Required Constraint Shape:**
-
-```alloy
-all disj d1, d2 : Declaration |
-  (d1.declClaim in cs.includedClaims and d2.declClaim in cs.includedClaims and
-   d1.declName = d2.declName) implies
-     (d1.declKind = d2.declKind and d1.declSig = d2.declSig)
-```
-
-#### Scenario: Model Keeps Disjunctive Conflict Exclusion [FLA-MODEL-CONFLICT-EXCLUSION]
-WHEN the shared Alloy model states that detected conflicts are excluded from a combined SMT-LIB artifact, THE model SHALL keep the exclusion assertion disjunctive (`c1 in excludedClaims or c2 in excludedClaims`).
-
-**Clarification:** For same-claim conflicts this reduces to `c1 in excludedClaims`, matching `[claimId, claimId]` evidence. The Alloy model has no claim ordering, so the positional guarantee that the later claimant is excluded SHALL be verified by contract and property tests rather than encoded in Alloy.
-
-#### Scenario: Encoding And Security Claims Are Test Evidence Obligations [FLA-MODEL-SECURITY-EVIDENCE]
-WHEN safety claims concern concrete string encodings or report rendering rather than merge-state transitions, THE spec-check tool SHALL verify those claims through contract, property, and renderer tests rather than encoding them directly in Alloy.
-
-**Clarification:** VSC-10b follows from unique raw claim IDs under injective `sanitizeIdentifier()`, with a sanitized-ID preflight as an executable safety net. VSC-11 and VSC-12 concern comment and Markdown encoding boundaries and remain evidence obligations unless future rules change declaration identity, conflict detection, or inclusion/exclusion state.
+**Postcondition:** Downstream consumers can construct negated or combined assertions from the compiled output without re-parsing the SMT-LIB text.

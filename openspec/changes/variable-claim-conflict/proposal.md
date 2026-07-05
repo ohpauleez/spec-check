@@ -18,6 +18,7 @@ This change is needed now because the merge boundary is the last deterministic p
 - Tighten the identifier-sanitization contract so distinct raw identifiers cannot silently collapse to the same solver-facing symbol.
 - Update report-side evidence rendering expectations so raw conflict evidence remains inert data in Markdown output.
 - Capture the requirements deltas in the existing `formalization-and-logic-analysis`, `reporting-and-evidence`, and `merged-capability-analysis` capability specs.
+- Update project documentation (`ARCHITECTURE.md`, `docs/design.md`) to reflect the new `identifiers.ts` sanitization module, the injective fixed-width-6 encoding, and the external Alloy model that documents and verifies the merge phase's structural safety properties.
 
 ### Out of Scope
 - Adding arbitrary user-defined logic sorts.
@@ -25,6 +26,7 @@ This change is needed now because the merge boundary is the last deterministic p
 - Replacing the current first-wins merge policy with a different precedence or arbitration model.
 - Changing merge-layer capability selection or requirement-block delta semantics.
 - Implementing new solver result categories beyond the existing structural-invalid-group, merge-conflict, contradiction, solver-error, and inconclusive flows.
+- Wiring the Alloy model into the automated test suite or CI; it is external documentation and verification only, checked by manual Alloy Analyzer runs whose transcript is recorded in the change summary.
 
 ## Context
 
@@ -49,10 +51,13 @@ The specs-forward pipeline also groups claims under merged capability logical ke
 - This is a delta to existing capabilities, not a new capability introduction.
 - The change must preserve deterministic first-wins merge behavior for compatible inputs.
 - Security-sensitive evidence values remain untrusted across compiler and reporting boundaries.
+- Merge and sanitization work must stay explicitly bounded: per-group claim counts and per-claim declaration counts have named upper limits enforced by fail-fast preconditions, and sanitized identifier length is bounded by construction (at most seven output characters per input code point), so no compile-group input can drive unbounded work.
 - The current change must not broaden into full unresolved-reference analysis; dangling references may continue to surface through the existing solver-error path.
 
 ### References
 - `01_variable_sort_conflict_plan_b.md`
+- `docs/lfm.md`
+- `docs/typescript_style.md`
 - `openspec/specs/formalization-and-logic-analysis/spec.md`
 - `openspec/specs/reporting-and-evidence/spec.md`
 - `openspec/specs/merged-capability-analysis/spec.md`
@@ -108,7 +113,7 @@ The core correctness boundary is the mapping from ordered claims to surviving de
 | Conflict evidence | Existing-side and conflicting-side raw names, shared sanitized symbol, both claim IDs, and per-kind details such as sorts or declaration kinds. Raw names may differ while the sanitized symbol matches. |
 | SMT-LIB comments | Raw `specFile`, `claimId`, assertion IDs, and conflict evidence are untrusted. Comments must escape CR/LF so untrusted content cannot introduce executable SMT-LIB lines. Markdown renderers must separately neutralize evidence for report output. |
 
-`sanitizeIdentifier()` MUST be injective: distinct raw identifiers must never share a sanitized form. `_` is the reserved escape lead rather than a pass-through character; a literal underscore is escaped like any other reserved code point, for example `_5F`. Hex escapes are self-delimiting, either fixed-width per code point or delimited, so variable-width escapes such as `_1F600` remain uniquely decodable. Unsafe code points are emitted as uppercase hexadecimal prefixed with `_`.
+`sanitizeIdentifier()` MUST be injective: distinct raw identifiers never share a sanitized form. The pass-through set is exactly the ASCII letters and digits `[A-Za-z0-9]`; `_` is the reserved escape lead and is never a pass-through character. Every non-pass-through code point, including a literal underscore (`U+005F`), is escaped as `_` followed by exactly six uppercase hexadecimal digits of its Unicode code point, zero-padded — for example `_` becomes `_00005F` and `(` becomes `_000028`. The width is fixed at six digits because the maximum Unicode code point `U+10FFFF` needs six hex digits, so every escape is self-delimiting and the encoding is uniquely decodable. A leading raw digit is escaped rather than passed through so the sanitized output is always a valid SMT-LIB simple symbol; the empty string maps to `_`. No Unicode normalization is performed, and the raw string is iterated by Unicode code point (`for…of`/`codePointAt`), never by UTF-16 code unit, so an astral character is a single six-digit escape and the encoding stays uniquely decodable. Because `_` appears only as an escape lead immediately followed by six hex digits, the literal sequence `__` never occurs inside a sanitized identifier, so the reserved `__a<index>` assertion-label separator stays unambiguous.
 
 ## Preconditions, Postconditions, and Invariants
 
@@ -225,3 +230,7 @@ Same-claim sanitizer collision edge case: when one claim declares two distinct r
 - `formalization-and-logic-analysis`: Expand combined SMT-LIB merge semantics to cover variable-sort conflicts, symbol-kind conflicts, duplicate claim-ID preflight, injective identifier sanitization, and downstream inclusion derived from compiled surviving claims.
 - `reporting-and-evidence`: Strengthen evidence-rendering requirements so merge-conflict evidence and related raw values remain inert data in Markdown reports.
 - `merged-capability-analysis`: Clarify that merged capability logical grouping can place multiple source claims into one downstream compile group, making compile-group claim-identity uniqueness a required downstream safety boundary.
+
+## Summary
+
+This change hardens the combined SMT-LIB merge boundary so that every declaration conflict — variable-sort, function-signature, and symbol-kind — is detected and attributed to a specific claim, duplicate raw and sanitized claim identifiers are rejected before any solver work, `compiled.claimIds` becomes the authoritative record of surviving claims for all downstream checks, and identifier sanitization becomes injective so distinct raw names can never alias to one solver-facing symbol. It preserves deterministic first-wins semantics and original claim provenance while keeping untrusted evidence inert across SMT-LIB comments and Markdown reports. Following the lightweight formal methods workflow in `docs/lfm.md`, the critical properties are captured as explicit `VSC-*` safety, liveness, and determinism claims and justified by a layered verification pyramid — contract tests, property-based tests over generated claim histories, security property tests, and an external Alloy model that mechanically checks the merge invariants — with every counterexample promoted to a permanent regression test. The implementation follows the discipline in `docs/typescript_style.md`: a deterministic, side-effect-free merge core, discriminated-union conflict evidence with exhaustive `switch` handling, `Result`-style rejection of invalid compile groups, injective branded identifier identity, and asserted preconditions, postconditions, and invariants at each boundary.

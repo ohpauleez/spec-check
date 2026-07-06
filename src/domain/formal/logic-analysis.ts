@@ -61,7 +61,35 @@ interface ClaimIdPreflightIssue {
 }
 
 /**
- * Run logic analysis across all claim groups.
+ * Run solver-backed logic analysis across all compile groups.
+ *
+ * @param input - logic-analysis run configuration
+ * @param input.groups - compile groups to analyze; each group is processed independently
+ * @param input.outputDir - confined output directory for SMT-LIB and solver artifacts
+ * @param input.z3Path - optional Z3 binary path override
+ * @param input.concurrency - max concurrent group analyses; defaults to 4
+ * @returns findings and consolidated report markdown
+ *
+ * @throws {Error} Propagates adapter failures from solver execution or artifact writes.
+ *
+ * @remarks
+ * Preconditions:
+ * - each group contains a finite ordered claim list;
+ * - `outputDir` is writable and confinement-validated upstream.
+ *
+ * Postconditions:
+ * - all groups are analyzed independently with bounded concurrency;
+ * - findings preserve per-group provenance;
+ * - output report contains one section line per analyzed group outcome.
+ *
+ * @example
+ * ```ts
+ * const result = await runLogicAnalysis({
+ *   groups,
+ *   outputDir,
+ *   concurrency: 2,
+ * });
+ * ```
  */
 export async function runLogicAnalysis(input: {
   readonly groups: readonly SpecClaimGroup[];
@@ -92,6 +120,7 @@ export async function runLogicAnalysis(input: {
  * Check compile-group claim ID uniqueness before compilation or solver work.
  *
  * @param claims - claims in one compile group
+ * @param sanitizeClaimId - sanitizer used for defense-in-depth sanitized-ID checks
  * @returns one structural issue when the group is invalid; otherwise `null`
  *
  * @remarks
@@ -102,6 +131,11 @@ export async function runLogicAnalysis(input: {
  * - detects duplicate raw claim IDs;
  * - detects duplicate sanitized claim IDs as defense-in-depth;
  * - returns at most one issue per group (first failing check).
+ * - does not mutate `claims`.
+
+ * Failure forms:
+ * - `duplicate_raw_claim_id`: at least one raw ID appears more than once.
+ * - `duplicate_sanitized_claim_id`: two distinct raw IDs map to one sanitized ID.
  *
  * @example
  * ```ts
@@ -156,6 +190,21 @@ export function preflightGroupClaimIds(
  * @param specFile - provenance file for the compile group
  * @param conflict - merge conflict emitted by `compileSpecSmtlib`
  * @returns stable finding shape with severity `error`
+ *
+ * @remarks
+ * Preconditions:
+ * - `conflict` is one of the closed `SpecMergeConflict` variants.
+ *
+ * Postconditions:
+ * - output category is always `logic.merge_conflict`;
+ * - output severity is always `error`;
+ * - per-kind evidence preserves sanitized symbol identity plus both raw sides.
+ *
+ * Safety:
+ * - exhaustive switch uses `assertNever(...)`, so adding a new conflict kind
+ *   requires compile-time handling updates.
+ *
+ * Failure modes: none; pure conversion.
  */
 export function conflictToFinding(specFile: string, conflict: SpecMergeConflict): Finding {
   switch (conflict.kind) {

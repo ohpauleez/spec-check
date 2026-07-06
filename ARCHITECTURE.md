@@ -222,9 +222,12 @@ Prompt text can also be overridden in the config.
 - `logic-ir.ts`: typed logic intermediate representation
 - `formal/validate.ts`: schema validation for formalization samples
 - `formal/formalize.ts`: batch and per-claim formalization sampling through `opencode`
-- `formal/smtlib.ts`: SMT-LIB compilation, identifier sanitization, unsat-core label handling, and parse helpers
+- `formal/identifiers.ts`: canonical injective SMT-LIB identifier sanitization (with compatibility re-export from `smtlib.ts`)
+- `formal/smtlib.ts`: SMT-LIB compilation, merge conflict detection, unsat-core label handling, and parse helpers
 - `formal/clustering.ts`: pairwise implication checks and equivalence clustering for alternate formalizations
 - `formal/logic-analysis.ts`: per-spec combined solver analysis, contradiction detection, conditional contradiction checks, and completeness-gap detection
+- `formal/logic-analysis-checks.ts`: bounded pairwise contradiction and completeness helper checks
+- `formal/logic-analysis-sexpr.ts`: implication parsing and declaration preamble helpers
 
 This area is the formal core of the product.
 
@@ -560,6 +563,7 @@ Specs are traceable through the code and tests using [spec-traceability](docs/sp
 - [catalog-and-parse](/openspec/specs/catalog-and-parse/spec.md) - Define the catalog, input resolution, and structured parsing behavior for the spec-check CLI: discovering relevant OpenSpec artifacts, resolving active capability state, parsing structured content, and producing deterministic structural findings with provenance.
 - [claim-graph-and-coverage](/openspec/specs/claim-graph-and-coverage/spec.md) - Define the claim graph construction and coverage analysis behavior for the spec-check tool: normalizing parsed content into typed claims and analyzing coverage, contradiction, and semantic alignment across proposal, design, and capability specs.
 - [formalization-and-logic-analysis](/openspec/specs/formalization-and-logic-analysis/spec.md) - Define the formalization and solver-backed logic analysis behavior for the spec-check tool: translating claims into formal artifacts, clustering alternate interpretations, and using solver-backed analysis to detect conflicts, gaps, and surprising behaviors.
+- [merged-capability-analysis](/openspec/specs/merged-capability-analysis/spec.md) - Define merged capability routing semantics used to group claims into downstream compile groups and preserve source provenance across merged views.
 - [source-traceability-and-code-backwards](/openspec/specs/source-traceability-and-code-backwards/spec.md) - Define the source traceability and code-backwards comparison behavior for the spec-check tool: relating requirements to source evidence, generating EARS-preferring code-derived specifications from source, formalizing code-derived specifications through the same sampling and clustering pipeline, using solver-backed cross-side implication as the primary strength classifier, and providing blind LLM comparison as the explanatory rationale layer.
 - [reporting-and-evidence](/openspec/specs/reporting-and-evidence/spec.md) - Define the reporting and evidence preservation behavior for the spec-check tool: producing bounded, evidence-preserving output artifacts, final reports, and manifest-based completion records.
 - [spec-traceability](/openspec/specs/spec-traceability/spec.md) - Define the OpenSpec traceability behavior for the repository's TypeScript/Vitest test harness: discovering canonical identifiers from included OpenSpec specs, validating explicit `traceSpec(...)` declarations in tests, reporting provenance-aware diagnostics, and enforcing full-catalog coverage in a dedicated full-suite mode.

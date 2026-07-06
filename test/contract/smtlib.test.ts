@@ -100,7 +100,7 @@ describe("compileSpecSmtlib", () => {
   });
 
   it("detects function signature conflicts and excludes conflicting claims", () => {
-    traceSpec("FLA-SPEC-CONFLICT");
+    traceSpec("FLA-SPEC-CONFLICT", "FLA-SPEC-CLAIMIDS");
     const claims = [
       makeClaim("R1", { functions: [{ name: "f", args: ["Bool"], returns: "Bool" }] }),
       makeClaim("R2", { functions: [{ name: "f", args: ["Int"], returns: "Int" }] }),

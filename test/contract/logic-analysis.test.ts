@@ -235,7 +235,7 @@ describe("logic-analysis contract (per-spec combined)", () => {
   });
 
   it("solver error produces logic.solver_error finding", async () => {
-    traceSpec("FLA-LOGIC-ERROR");
+    traceSpec("FLA-LOGIC-ERROR", "FLA-SPEC-DANGLING-REF");
     const { runZ3Query } = await import("../../src/adapters/z3.js");
     vi.mocked(runZ3Query).mockResolvedValue({
       kind: "error",

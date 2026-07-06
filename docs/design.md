@@ -182,6 +182,7 @@ graph TD
         Formalize["formal/formalize.ts<br/>LLM-backed sampling"]
         Validate["formal/validate.ts<br/>Schema validation"]
         Cluster["formal/clustering.ts<br/>Equivalence clustering"]
+        Identifiers["formal/identifiers.ts<br/>Injective identifier sanitization"]
         SmtLib["formal/smtlib.ts<br/>SMT-LIB compilation"]
         Logic["formal/logic-analysis.ts<br/>Per-spec solver analysis"]
         Trace["code-backwards/trace.ts<br/>Source traceability"]
@@ -224,6 +225,7 @@ graph TD
     Claims --> Qualitative
     Claims --> Formalize
     Formalize --> Validate
+    SmtLib --> Identifiers
     Validate --> Cluster
     Formalize --> SmtLib
     Cluster --> SmtLib
@@ -302,7 +304,8 @@ This split matters for assurance. The more the decision logic is isolated from t
 | **Formalization** ([`src/domain/formal/formalize.ts`](src/domain/formal/formalize.ts)) | Request LLM-backed formalization samples; validate against logic IR schema | Invalid samples rejected, not silently admitted; three-phase strategy (batch, retry, additional) |
 | **Validation** ([`src/domain/formal/validate.ts`](src/domain/formal/validate.ts)) | Structural validation of untrusted LLM-produced formalization samples | Deterministic, side-effect free; validates variables, functions, sorts, and assertion syntax |
 | **Clustering** ([`src/domain/formal/clustering.ts`](src/domain/formal/clustering.ts)) | Solver-backed pairwise implication to group equivalent formalizations | Pair enumeration is deterministic; BFS-based connected components; ambiguity is a finding |
-| **SMT-LIB compilation** ([`src/domain/formal/smtlib.ts`](src/domain/formal/smtlib.ts)) | Compile logic IR into solver-ready SMT-LIB text | Output never includes `(check-sat)` -- caller appends; identifier sanitization ensures valid symbols |
+| **Identifier sanitization** ([`src/domain/formal/identifiers.ts`](src/domain/formal/identifiers.ts)) | Encode untrusted identifiers into injective SMT-LIB-safe symbols | Fixed-width-6 `_HHHHHH` escapes are uniquely decodable and preserve non-collision guarantees |
+| **SMT-LIB compilation** ([`src/domain/formal/smtlib.ts`](src/domain/formal/smtlib.ts)) | Compile logic IR into solver-ready SMT-LIB text | Output never includes `(check-sat)` -- caller appends; merge exclusion authority is `compiled.claimIds` |
 | **Logic analysis** ([`src/domain/formal/logic-analysis.ts`](src/domain/formal/logic-analysis.ts)) | Per-spec combined solver analysis with two-phase approach | Solver inputs and outputs persisted verbatim; default 30s timeout per query |
 | **Source traceability** ([`src/domain/code-backwards/trace.ts`](src/domain/code-backwards/trace.ts)) | Scan source tree for canonical identifiers; relate to claim graph | Scanning confined to declared source directory; 1 MiB per-file limit |
 | **Code-derived generation** ([`src/domain/code-backwards/derive.ts`](src/domain/code-backwards/derive.ts)) | EARS-preferring specs per capability from source evidence, blind to original text | Original requirement text never crosses the generation boundary |
@@ -485,7 +488,7 @@ The domain uses compile-time branded types to prevent accidental interchange of 
 
 Branded values are constructed only through validated construction functions at trust boundaries. Interior code passes branded values through without casting. The `as` casts are confined to `to*()` factory functions.
 
-**Encoding:** Input artifacts are read as UTF-8 text with line ending normalization to LF. Logic artifacts are emitted as ASCII-safe SMT-LIB files with sanitized identifiers and reversible mapping comments. The manifest is UTF-8 JSON.
+**Encoding:** Input artifacts are read as UTF-8 text with line ending normalization to LF. Logic artifacts are emitted as ASCII-safe SMT-LIB files with injective fixed-width-6 sanitized identifiers (implemented in `identifiers.ts`) and reversible mapping comments. The manifest is UTF-8 JSON.
 
 Relevant code: [`src/domain/branded.ts`](src/domain/branded.ts)
 
@@ -516,7 +519,7 @@ Relevant code: [`src/domain/findings.ts`](src/domain/findings.ts)
 | **D-3** | Canonical identifiers follow `[A-Z][A-Z0-9]*(-[A-Z0-9]+)+` format | `parseCanonicalIdentifier()` in shared parser | Structural finding |
 | **D-4** | Findings include severity, category, provenance, description, rationale, and evidence | Finding shape definition; report rendering validation | Malformed findings replaced with `reporting.unsupported_verdict` defects |
 | **D-5** | Findings are never silently removed by later phases | `addFindings()` postcondition in `RunState` | Monotonic accumulation; length postcondition check |
-| **D-6** | SMT-LIB identifiers use only sanitized characters | `sanitizeIdentifier()` with hex escaping | Reversible mapping comments preserved |
+| **D-6** | SMT-LIB identifiers use injective fixed-width-6 sanitization and satisfy `^[A-Za-z_][A-Za-z0-9_]*$` | `sanitizeIdentifier()` in `identifiers.ts` | Distinct raw identifiers cannot alias to one solver symbol |
 | **D-7** | Parser output is deterministic given the same input content | Module-level invariant; no I/O-dependent state | Property tests |
 | **D-8** | The manifest is the last file written | `invalidateStaleManifest()` at run start; `writeManifest()` at run end | Manifest absence signals incomplete run |
 | **D-9** | Compiled SMT-LIB never includes `(check-sat)` | `compileSmtlib()` and `compileSpecSmtlib()` | Caller appends solver commands at query time |
@@ -524,6 +527,8 @@ Relevant code: [`src/domain/findings.ts`](src/domain/findings.ts)
 | **D-11** | Per-capability merge output is deterministic given the same parsed inputs | `mergeSpecsByCapability()` module-level invariant | Property and determinism tests |
 | **D-12** | Merged active view preserves every base requirement unless a matching REMOVED operation or duplicate-base exclusion finding exists | Merge layer postcondition | Contract and property tests |
 | **D-13** | Every skipped merge operation produces exactly one finding; no silent discard | Merge finding completeness invariant | Property tests |
+| **D-14** | `compiled.claimIds` is the authoritative surviving-claim set for downstream checks | `compileSpecSmtlib()` + logic-analysis inclusion filtering | Conflict evidence cannot disagree with emitted inclusion set |
+| **D-15** | Duplicate raw or sanitized claim IDs are rejected before compile, artifact write, or solver work | `preflightGroupClaimIds()` in logic analysis | Invalid compile groups emit `logic.invalid_group` and perform zero solver work |
 
 **Spec references:** [`catalog-and-parse`](openspec/specs/catalog-and-parse/spec.md) -- `[CAT-PARSE-DETERMINISM]`, `[CAT-PRESERVE-LOSS]`; [`claim-graph-and-coverage`](openspec/specs/claim-graph-and-coverage/spec.md); [`reporting-and-evidence`](openspec/specs/reporting-and-evidence/spec.md) -- `[RAE-FINDING-SHAPE]`, `[RAE-FINDINGS-IMMUTABLE]`, `[RAE-ATOMIC-MANIFEST]`.
 
@@ -1305,6 +1310,7 @@ graph BT
 
 | Layer | Coverage Focus |
 |---|---|
+| **External formal model** | Merge-structure safety invariants checked in Alloy (`openspec/changes/variable-claim-conflict/specs/formalization-and-logic-analysis/alloy/merge.als`) via manual Analyzer runs |
 | **Property-based tests** | Parser invariants, claim extraction invariants, clustering determinism, implication classification symmetry, blind boundary enforcement, manifest integrity, run-state monotonicity |
 | **Contract tests** | CLI argument handling, config merge precedence, parser structural checks, EARS classification, LLM schema validation, SMT-LIB sanitization, manifest semantics, boundary violation detection, obligation-aware severity |
 | **Integration tests** | End-to-end analyses with fixture specs plus fake `opencode` and fake `z3` adapters |
@@ -1390,7 +1396,7 @@ The tool has no end-user authentication or authorization model because it is a l
 | subprocess invocation | argv-based execution via `execFile`; no shell interpolation | `shell: false` in [`src/adapters/process.ts`](src/adapters/process.ts) |
 | prompt injection | document content fenced in prompts; analyzed spec text never elevated into system-level instruction position | `sanitizeForCodeFence()` in [`src/domain/fence.ts`](src/domain/fence.ts); fenced prompt construction in qualitative and formalization modules |
 | filesystem overreach | all writes confined to `--output` directory; output paths resolved and validated up front | `resolveConfinedOutputPath()` with `precondition` in [`src/adapters/fs.ts`](src/adapters/fs.ts) |
-| SMT-LIB identifier injection | user-derived identifiers sanitized before writing SMT-LIB artifacts (unsafe characters replaced with `_` + hex escape) | `sanitizeIdentifier()` in [`src/domain/formal/smtlib.ts`](src/domain/formal/smtlib.ts) |
+| SMT-LIB identifier injection | user-derived identifiers sanitized before writing SMT-LIB artifacts with injective fixed-width-6 escapes | `sanitizeIdentifier()` in [`src/domain/formal/identifiers.ts`](src/domain/formal/identifiers.ts) |
 | blind comparison boundary | original requirement text never crosses to the code-derived comparison or generation side | Structural enforcement in [`src/domain/code-backwards/derive.ts`](src/domain/code-backwards/derive.ts) and [`src/domain/code-backwards/blind-compare.ts`](src/domain/code-backwards/blind-compare.ts) |
 | subprocess output | captured via stdout/stderr arrays; no ambient shell risk | Chunked accumulation in [`src/adapters/process.ts`](src/adapters/process.ts) |
 | evidence integrity | solver inputs/outputs persisted verbatim; LLM responses preserved with full content | Adapter-level persistence in analysis modules |

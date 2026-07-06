@@ -54,7 +54,7 @@
 - [x] 2.10 Ensure the second emission pass excludes declarations, assertions, `claimIds`, and `assertionNameMap` entries for every conflicted claim.
 - [x] 2.11 Add `smtlib.test.ts` coverage for compatible variable deduplication, variable-sort mismatch, multiple later mismatches, excluded assertion absence, excluded unique declaration absence, function-conflict regression, mixed conflict kinds, precedence boundaries, cross-claim symbol-kind collision, same-claim sanitizer collision, raw names colliding after sanitization, empty claim lists, and no-variable compatible-function claims.
 - [x] 2.12 Encode the merge-core contracts as in-code assertions using `precondition`/`invariant`/`postcondition` from `src/domain/assert.ts`: precondition that the claim list is finite and within the declared bounds; a post-detection invariant that no registry symbol maps to two sorts, two signatures, or two declaration kinds; and postconditions that `compiled.claimIds` is an order-preserving subsequence of the input claim IDs, that no `excludedClaimId` appears in `compiled.claimIds`, and that `assertionNameMap` keys are a subset of `compiled.claimIds`. Keep expected structural outcomes (duplicate IDs, declaration conflicts) as `Result`-style findings, never thrown errors; split assertions into small single-fact checks so a failure names the exact violated contract.
-- [x] 2.13 Introduce named operational bounds `CLAIMS_PER_GROUP_MAX` (claims per compile group) and `DECLARATIONS_PER_CLAIM_MAX` (variable-plus-function declarations per claim) and fail fast with a `precondition` — a thrown `Error`, not a `Result` finding — when a group or claim exceeds them; iterate both detection passes over these bounded collections with `for…of` and break on the first conflict so control flow stays bounded and visible at the call site.
+- [x] 2.13 Introduce named operational bounds `CLAIMS_PER_GROUP_MAX` (claims per compile group) and `DECLARATIONS_PER_CLAIM_MAX` (variable-plus-function declarations per claim). Guard the compile boundary with a `precondition` when a group or claim exceeds them, iterating the bounded collections with `for…of` and breaking on the first breach. Note (code-review amendment): because compile groups are assembled from an unbounded upstream claim count, an oversized group is an expected input-driven condition, not a broken invariant; the primary size rejection is therefore a graceful `logic.invalid_group` finding produced by `preflightGroupBounds` (task 3.13), and the `compileSpecSmtlib` `precondition` guards are retained as unreachable caller-contract backstops rather than the primary path.
 
 ### Combined SMT-LIB Conflict Detection change summary
 
@@ -64,7 +64,7 @@
 - Added two evidence registries keyed on the branded sanitized symbol (`smtlib.ts:171-172`): `declaredVariables: Map<SanitizedClaimId, {variableName, sort, claimId}>` and `declaredFunctions: Map<SanitizedClaimId, {functionName, fn, claimId}>`.
 - Detection runs in fixed per-claim precedence and stops on the first hit (`conflictForClaim`, `break`): variable-sort mismatch first (`smtlib.ts:188`), function-signature mismatch second (`:208`), then symbol-kind collisions third (`:226`) covering cross-claim variable↔function reuse plus same-claim sanitizer-induced cross-kind collisions.
 - First-wins ownership: registries record a symbol only when absent (`!has` guards, `smtlib.ts:298-318`), and only included claims register, so compatible redeclarations never re-anchor ownership or overwrite sort/signature. A second emission pass (`:330`) skips every excluded claim, so their declarations, assertions, `claimIds`, and `assertionNameMap` entries are all absent.
-- Named operational bounds `CLAIMS_PER_GROUP_MAX` (1024) and `DECLARATIONS_PER_CLAIM_MAX` (2048) fail fast via `precondition` — a thrown `Error`, not a `Result` (`smtlib.ts:17-21`, `:142-155`).
+- Named operational bounds `CLAIMS_PER_GROUP_MAX` (1024) and `DECLARATIONS_PER_CLAIM_MAX` (2048) guard the compile boundary via `precondition` (`smtlib.ts:17-21`, `:142-155`). Following a code review, these guards are retained as unreachable backstops; the primary size rejection is the graceful `logic.invalid_group` finding from `preflightGroupBounds` (see Section 3).
 - Merge-core contracts encoded as small single-fact `precondition`/`invariant`/`postcondition` checks: finite bounded claim list precondition; post-detection invariants that no symbol maps to two sorts or to both a variable and function (`:321-328`); postconditions that `claimIds` is an order-preserving subsequence of the input (`:363-372`), no `excludedClaimId` appears in `claimIds` (`:374`), and `assertionNameMap` values reference only included claims (`:379`).
 
 **Why this was done:**
@@ -81,7 +81,7 @@
 - `signaturesMatch` (`:462`) compares return sort then arity then positional arg sorts for exact compatibility.
 
 **Under-specified decision:**
-- Concrete bound values 1024 / 2048 were not fixed by the spec; chosen as generous ceilings that fail fast on pathological groups but never trip on realistic specs. They are exported constants so callers and tests can reference them.
+- Concrete bound values 1024 / 2048 were not fixed by the spec; chosen as generous ceilings that reject pathological groups but never trip on realistic specs. They are exported constants so callers and tests can reference them.
 - Bound violations throw (broken-invariant class), whereas expected structural outcomes (duplicate IDs, declaration conflicts) remain `Result`-style findings, per the style guide.
 
 **Developer handoff notes:**
@@ -106,6 +106,7 @@
 - [x] 3.10 Add `logic-analysis.test.ts` coverage for invalid-group zero compiler/writer/solver work, sibling valid group continuation, per-kind merge-conflict finding shapes, surviving-claim false-negative regression, and downstream filtering by `compiled.claimIds`.
 - [x] 3.11 Add a constructed sanitized-ID collision preflight test, even though injective sanitization makes it unreachable from distinct raw IDs in normal inputs.
 - [x] 3.12 Assert in code, co-located with the preflight, that a group rejected as `logic.invalid_group` performs zero `compileSpecSmtlib()`, artifact-write, and `runZ3Query()` calls for that group, complementing the contract/property zero-work tests with a runtime fail-fast guard.
+- [x] 3.13 (code-review amendment) Add `preflightGroupBounds(claims)` in `logic-analysis.ts`, composed bounds-first with `preflightGroupClaimIds`, so a group exceeding `CLAIMS_PER_GROUP_MAX` claims or a claim exceeding `DECLARATIONS_PER_CLAIM_MAX` declarations rejects as a graceful `logic.invalid_group` finding (`group_too_large` / `claim_too_many_declarations`) with zero compile/write/solver work, instead of throwing a `precondition` that aborts the whole run. Extend the invalid-group union to four variants and dispatch `buildInvalidGroupFinding` through an exhaustive `switch` + `assertNever`. Retain the `compileSpecSmtlib` size `precondition` guards as unreachable backstops (proven by a direct-call throw test). Cover the group-cardinality bound, the per-claim declaration bound, sibling isolation, boundary behavior, and the retained backstop across `logic-analysis.test.ts`, `logic.property.test.ts`, and `smtlib.test.ts` under scenario `FLA-SPEC-GROUP-BOUNDS`.
 
 ### Logic Analysis Group Preflight and Inclusion Coherence change summary
 
@@ -115,11 +116,13 @@
 - `conflictToFinding` (`:160`) converts every `SpecMergeConflict` to a `logic.merge_conflict` error finding through an exhaustive `switch (conflict.kind)` whose `default` calls `assertNever(conflict)`, matching the `errors.ts` pattern. Per-kind evidence is preserved: sanitized symbol, both raw names, both claim IDs, both sorts for variable conflicts, both declaration kinds for symbol-kind conflicts. Severity is hardcoded `error`, independent of source obligation.
 - Downstream pairwise/completeness now filter by `const includedClaimIds = new Set(compiled.claimIds)` (`:375`) instead of reconstructing exclusion from conflict evidence tuples.
 - A runtime fail-fast zero-work guard co-located with the preflight (`compileInvoked` / `artifactWriteInvoked` / `solverInvoked` booleans asserted `false` via `postcondition`, `:243-245`) complements the contract/property zero-work tests.
+- (Code-review amendment) `preflightGroupBounds(claims)` rejects oversized groups gracefully as `logic.invalid_group` before any compile/write/solver work, composed bounds-first with the claim-ID preflight (`preflightGroupBounds(claims) ?? preflightGroupClaimIds(claims)`). The invalid-group issue type became a four-variant discriminated union (`duplicate_raw_claim_id`, `duplicate_sanitized_claim_id`, `group_too_large`, `claim_too_many_declarations`), and `buildInvalidGroupFinding` dispatches through an exhaustive `switch (issue.kind)` + `assertNever`. This replaces the earlier behavior where the `compileSpecSmtlib` size `precondition` threw and aborted the entire run; those `precondition` guards remain as unreachable caller-contract backstops.
 
 **Why this was done:**
 - VSC-10: never build or consume a solver query for duplicate raw claim IDs → raw preflight rejects before any compile/solver call.
 - VSC-10b: enforce sanitized claim-ID uniqueness even if sanitizer injectivity ever regresses → sanitized preflight, made testable by the injectable `sanitizeClaimId` seam.
 - VSC-4: a single inclusion authority (`compiled.claimIds`) prevents deeper checks from disagreeing with compilation → `Set` filter over `compiled.claimIds`.
+- VSC-10c: an oversized compile group must not abort the run → `preflightGroupBounds` converts it to a group-scoped `logic.invalid_group` finding with zero compile/write/solver work, isolating the failure from valid sibling groups.
 - `assertNever` provides compile-time exhaustiveness so a future fourth conflict kind cannot silently drop a finding.
 
 **Implementation details / evidence:**
@@ -135,8 +138,11 @@
 - Preflight must stay inside the per-group analysis; do not hoist it above the group loop or group-scoping (sibling continuation) breaks.
 
 **Validation evidence:**
-- `test/contract/logic-analysis.test.ts` (19 tests): "rejects duplicate raw claim IDs as invalid group before compile and solver work", "maps each merge conflict kind to merge_conflict finding with stable evidence", "detects constructed sanitized-id collision in preflight", plus sibling-continuation and downstream-filtering coverage.
-- `npm run lint:types` clean (exhaustive switch verified).
+- `test/contract/logic-analysis.test.ts`: "rejects duplicate raw claim IDs as invalid group before compile and solver work", "maps each merge conflict kind to merge_conflict finding with stable evidence", "detects constructed sanitized-id collision in preflight", plus sibling-continuation and downstream-filtering coverage.
+- `test/contract/logic-analysis.test.ts` (`FLA-SPEC-GROUP-BOUNDS`): oversized-group rejection, per-claim over-declaration rejection scoped to the claim, oversized-group sibling isolation, and `preflightGroupBounds` boundary behavior — all asserting zero solver/write work.
+- `test/property/logic.property.test.ts` (`FLA-SPEC-GROUP-BOUNDS`): `preflightGroupBounds` is `null` at each limit and returns the correct issue kind one past it, for both group cardinality and `variables + functions` counts.
+- `test/contract/smtlib.test.ts` (`FLA-SPEC-GROUP-BOUNDS`): `compileSpecSmtlib` still throws its size `precondition` when called directly past a bound, proving the backstop is retained.
+- `npm run lint:types` clean (exhaustive four-variant switch verified).
 
 ## 4. Reporting and Evidence Rendering Safety
 

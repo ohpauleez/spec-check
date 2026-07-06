@@ -15,7 +15,14 @@ import type { Finding } from "../findings.js";
 import type { LogicIrClaim } from "../logic-ir.js";
 import { runCompletenessCheck, runPairwiseContradictionChecks } from "./logic-analysis-checks.js";
 import { deriveSeverityFromClaims } from "./logic-analysis-sexpr.js";
-import { compileSpecSmtlib, parseUnsatCore, sanitizeIdentifier, type SpecMergeConflict } from "./smtlib.js";
+import {
+  CLAIMS_PER_GROUP_MAX,
+  compileSpecSmtlib,
+  DECLARATIONS_PER_CLAIM_MAX,
+  parseUnsatCore,
+  sanitizeIdentifier,
+  type SpecMergeConflict,
+} from "./smtlib.js";
 
 export type { ParsedImplication } from "./logic-analysis-sexpr.js";
 export {
@@ -53,12 +60,49 @@ interface SpecAnalysisResult {
   readonly reportLines: readonly string[];
 }
 
-interface ClaimIdPreflightIssue {
-  readonly kind: "duplicate_raw_claim_id" | "duplicate_sanitized_claim_id";
-  readonly duplicatedRawClaimIds?: readonly string[];
-  readonly collidingRawClaimIds?: readonly string[];
-  readonly sanitizedClaimId?: SanitizedClaimId;
-}
+/**
+ * Claim-identity reasons a compile group is rejected before compile or solver work.
+ *
+ * @remarks
+ * - `duplicate_raw_claim_id`: at least one raw claim ID appears more than once.
+ * - `duplicate_sanitized_claim_id`: two distinct raw IDs map to one sanitized ID.
+ */
+type ClaimIdPreflightIssue =
+  | {
+    readonly kind: "duplicate_raw_claim_id";
+    readonly duplicatedRawClaimIds: readonly string[];
+  }
+  | {
+    readonly kind: "duplicate_sanitized_claim_id";
+    readonly collidingRawClaimIds: readonly [string, string];
+    readonly sanitizedClaimId: SanitizedClaimId;
+  };
+
+/**
+ * Size-bound reasons a compile group is rejected before compile or solver work.
+ *
+ * @remarks
+ * - `group_too_large`: claim count exceeds {@link CLAIMS_PER_GROUP_MAX}.
+ * - `claim_too_many_declarations`: a claim's variable + function count exceeds
+ *   {@link DECLARATIONS_PER_CLAIM_MAX}.
+ */
+type GroupBoundsPreflightIssue =
+  | {
+    readonly kind: "group_too_large";
+    readonly claimCount: number;
+    readonly limit: number;
+  }
+  | {
+    readonly kind: "claim_too_many_declarations";
+    readonly claimId: string;
+    readonly declarationCount: number;
+    readonly limit: number;
+  };
+
+/**
+ * Every structural reason a compile group is rejected as `logic.invalid_group`.
+ */
+type GroupPreflightIssue = ClaimIdPreflightIssue | GroupBoundsPreflightIssue;
 
 /**
  * Run solver-backed logic analysis across all compile groups.
@@ -185,6 +229,60 @@ export function preflightGroupClaimIds(
 }
 
 /**
+ * Check compile-group size bounds before compilation or solver work.
+ *
+ * @param claims - claims in one compile group
+ * @returns one bounds issue when the group is too large; otherwise `null`
+ *
+ * @remarks
+ * Preconditions:
+ * - claims are grouped by one logical compile key.
+ *
+ * Postconditions:
+ * - checks the O(1) group-cardinality bound first, then per-claim declaration counts;
+ * - returns at most one issue per group (first failing check);
+ * - does not mutate `claims`.
+ *
+ * Failure forms:
+ * - `group_too_large`: claim count exceeds {@link CLAIMS_PER_GROUP_MAX}.
+ * - `claim_too_many_declarations`: a claim's variable + function count exceeds
+ *   {@link DECLARATIONS_PER_CLAIM_MAX}.
+ *
+ * @example
+ * ```ts
+ * const issue = preflightGroupBounds(claims);
+ * if (issue !== null) {
+ *   // reject group as logic.invalid_group without invoking the solver
+ * }
+ * ```
+ */
+export function preflightGroupBounds(
+  claims: readonly LogicIrClaim[],
+): GroupBoundsPreflightIssue | null {
+  if (claims.length > CLAIMS_PER_GROUP_MAX) {
+    return {
+      kind: "group_too_large",
+      claimCount: claims.length,
+      limit: CLAIMS_PER_GROUP_MAX,
+    };
+  }
+
+  for (const claim of claims) {
+    const declarationCount = claim.variables.length + claim.functions.length;
+    if (declarationCount > DECLARATIONS_PER_CLAIM_MAX) {
+      return {
+        kind: "claim_too_many_declarations",
+        claimId: claim.claimId,
+        declarationCount,
+        limit: DECLARATIONS_PER_CLAIM_MAX,
+      };
+    }
+  }
+
+  return null;
+}
+
+/**
  * Convert one compile-time merge conflict into a `logic.merge_conflict` finding.
  *
  * @param specFile - provenance file for the compile group
@@ -283,7 +381,7 @@ async function analyzeSpecGroup(
   let artifactWriteInvoked = false;
   let solverInvoked = false;
 
-  const preflightIssue = preflightGroupClaimIds(group.claims);
+  const preflightIssue = preflightGroupBounds(group.claims) ?? preflightGroupClaimIds(group.claims);
   if (preflightIssue !== null) {
     const invalidGroupFinding = buildInvalidGroupFinding(group.specFile, group.claims, preflightIssue);
     findings.push(invalidGroupFinding);
@@ -465,42 +563,100 @@ async function analyzeSpecGroup(
 function buildInvalidGroupFinding(
   specFile: string,
   claims: readonly LogicIrClaim[],
-  issue: ClaimIdPreflightIssue,
+  issue: GroupPreflightIssue,
 ): Finding {
-  if (issue.kind === "duplicate_raw_claim_id") {
-    const duplicatedIds = issue.duplicatedRawClaimIds ?? [];
-    const affected = claims
-      .filter((claim) => duplicatedIds.includes(claim.claimId))
-      .map((claim) => claim.claimId);
-
-    return {
-      severity: "error",
-      category: "logic.invalid_group",
-      provenance: { file: specFile },
-      description: `Compile group has duplicate raw claim IDs: ${duplicatedIds.join(", ")}`,
-      rationale: "Claim IDs must be unique within one compile group so inclusion, assertion labels, and evidence mapping remain unambiguous.",
-      evidence: [
-        { kind: "reason", value: issue.kind },
-        { kind: "duplicated_raw_ids", value: duplicatedIds.join(", ") },
-        { kind: "affected_claims", value: affected.join(", ") },
-      ],
-      relatedClaimIdentifiers: affected,
-    };
+  switch (issue.kind) {
+    case "duplicate_raw_claim_id":
+      return buildDuplicateRawClaimIdFinding(specFile, claims, issue.duplicatedRawClaimIds);
+    case "duplicate_sanitized_claim_id":
+      return buildDuplicateSanitizedClaimIdFinding(specFile, issue.collidingRawClaimIds, issue.sanitizedClaimId);
+    case "group_too_large":
+      return buildGroupTooLargeFinding(specFile, issue.claimCount, issue.limit);
+    case "claim_too_many_declarations":
+      return buildClaimTooManyDeclarationsFinding(specFile, issue.claimId, issue.declarationCount, issue.limit);
+    default:
+      return assertNever(issue);
   }
+}
 
-  const collidingRawIds = issue.collidingRawClaimIds ?? [];
+function buildDuplicateRawClaimIdFinding(
+  specFile: string,
+  claims: readonly LogicIrClaim[],
+  duplicatedRawClaimIds: readonly string[],
+): Finding {
+  const affected = claims
+    .filter((claim) => duplicatedRawClaimIds.includes(claim.claimId))
+    .map((claim) => claim.claimId);
+
   return {
     severity: "error",
     category: "logic.invalid_group",
     provenance: { file: specFile },
-    description: `Compile group has colliding sanitized claim IDs: ${collidingRawIds.join(", ")}`,
+    description: `Compile group has duplicate raw claim IDs: ${duplicatedRawClaimIds.join(", ")}`,
+    rationale: "Claim IDs must be unique within one compile group so inclusion, assertion labels, and evidence mapping remain unambiguous.",
+    evidence: [
+      { kind: "reason", value: "duplicate_raw_claim_id" },
+      { kind: "duplicated_raw_ids", value: duplicatedRawClaimIds.join(", ") },
+      { kind: "affected_claims", value: affected.join(", ") },
+    ],
+    relatedClaimIdentifiers: affected,
+  };
+}
+
+function buildDuplicateSanitizedClaimIdFinding(
+  specFile: string,
+  collidingRawClaimIds: readonly [string, string],
+  sanitizedClaimId: SanitizedClaimId,
+): Finding {
+  return {
+    severity: "error",
+    category: "logic.invalid_group",
+    provenance: { file: specFile },
+    description: `Compile group has colliding sanitized claim IDs: ${collidingRawClaimIds.join(", ")}`,
     rationale: "Even with injective sanitization, compile-group safety enforces sanitized claim-ID uniqueness before any compile or solver work.",
     evidence: [
-      { kind: "reason", value: issue.kind },
-      { kind: "colliding_raw_ids", value: collidingRawIds.join(", ") },
-      { kind: "sanitized_claim_id", value: issue.sanitizedClaimId ?? "" },
+      { kind: "reason", value: "duplicate_sanitized_claim_id" },
+      { kind: "colliding_raw_ids", value: collidingRawClaimIds.join(", ") },
+      { kind: "sanitized_claim_id", value: sanitizedClaimId },
     ],
-    relatedClaimIdentifiers: collidingRawIds,
+    relatedClaimIdentifiers: [...collidingRawClaimIds],
+  };
+}
+
+function buildGroupTooLargeFinding(specFile: string, claimCount: number, limit: number): Finding {
+  return {
+    severity: "error",
+    category: "logic.invalid_group",
+    provenance: { file: specFile },
+    description: `Compile group has ${String(claimCount)} claims; exceeds the per-group maximum of ${String(limit)}`,
+    rationale: "Compile groups are bounded so combined SMT-LIB compilation and solver work stay within predictable resource limits; an oversized group is rejected rather than analyzed.",
+    evidence: [
+      { kind: "reason", value: "group_too_large" },
+      { kind: "claim_count", value: String(claimCount) },
+      { kind: "limit", value: String(limit) },
+    ],
+  };
+}
+
+function buildClaimTooManyDeclarationsFinding(
+  specFile: string,
+  claimId: string,
+  declarationCount: number,
+  limit: number,
+): Finding {
+  return {
+    severity: "error",
+    category: "logic.invalid_group",
+    provenance: { file: specFile },
+    description: `Claim ${claimId} declares ${String(declarationCount)} symbols; exceeds the per-claim maximum of ${String(limit)}`,
+    rationale: "Per-claim declaration counts are bounded so combined SMT-LIB compilation stays within predictable resource limits; a claim that exceeds the cap rejects its whole group rather than being analyzed.",
+    evidence: [
+      { kind: "reason", value: "claim_too_many_declarations" },
+      { kind: "claim_id", value: claimId },
+      { kind: "declaration_count", value: String(declarationCount) },
+      { kind: "limit", value: String(limit) },
+    ],
+    relatedClaimIdentifiers: [claimId],
   };
 }
 

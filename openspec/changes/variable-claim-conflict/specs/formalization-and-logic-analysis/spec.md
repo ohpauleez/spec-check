@@ -71,6 +71,15 @@ IF a compile group contains duplicate raw claim identifiers or duplicate sanitiz
 
 **Trace Properties:** VSC-10, VSC-10b.
 
+#### Scenario: Oversized Compile Group Rejected Before Solver Execution [FLA-SPEC-GROUP-BOUNDS]
+IF a compile group contains more claims than `CLAIMS_PER_GROUP_MAX`, OR any single claim declares more variable-plus-function symbols than `DECLARATIONS_PER_CLAIM_MAX`, THEN THE spec-check tool SHALL emit `logic.invalid_group`, SHALL skip combined SMT-LIB compilation for that group, and SHALL NOT invoke the solver or write solver artifacts for that group.
+
+**Postcondition:** An oversized group is rejected as a graceful finding rather than aborting the run; valid sibling groups in the same analysis still compile and run to completion.
+
+**Finding Evidence:** Group-cardinality rejection SHALL use reason `group_too_large` and list the observed claim count and the limit. Per-claim declaration rejection SHALL use reason `claim_too_many_declarations` and list the offending claim ID, the observed declaration count, the limit, and SHALL relate the finding to that claim ID. Size rejection is structural and SHALL NOT be reported as a merge conflict. The `compileSpecSmtlib()` size `precondition` checks remain as unreachable backstops that defend the caller contract when this preflight is bypassed.
+
+**Trace Properties:** VSC-10c.
+
 #### Scenario: Dangling Assertion Reference Becomes Solver Error [FLA-SPEC-DANGLING-REF]
 IF a claim assertion references a declaration that becomes undefined after another claim is merge-excluded, THEN THE spec-check tool SHALL surface the unresolved reference through the `logic.solver_error` path rather than silently emitting malformed solver input.
 

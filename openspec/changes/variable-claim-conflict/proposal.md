@@ -51,7 +51,7 @@ The specs-forward pipeline also groups claims under merged capability logical ke
 - This is a delta to existing capabilities, not a new capability introduction.
 - The change must preserve deterministic first-wins merge behavior for compatible inputs.
 - Security-sensitive evidence values remain untrusted across compiler and reporting boundaries.
-- Merge and sanitization work must stay explicitly bounded: per-group claim counts and per-claim declaration counts have named upper limits enforced by fail-fast preconditions, and sanitized identifier length is bounded by construction (at most seven output characters per input code point), so no compile-group input can drive unbounded work.
+- Merge and sanitization work must stay explicitly bounded: per-group claim counts and per-claim declaration counts have named upper limits, and sanitized identifier length is bounded by construction (at most seven output characters per input code point), so no compile-group input can drive unbounded work. Because the upstream claim count is unbounded, an oversized group is an expected input-driven condition and is rejected gracefully as a `logic.invalid_group` finding by group preflight; the compile-boundary `precondition` guards on the same limits are retained only as unreachable backstops.
 - The current change must not broaden into full unresolved-reference analysis; dangling references may continue to surface through the existing solver-error path.
 
 ### References
@@ -129,7 +129,7 @@ The core correctness boundary is the mapping from ordered claims to surviving de
 - Assertion expressions may still contain references that become dangling after another claim is excluded; this change deliberately keeps those cases on the existing solver-error path rather than adding assertion-reference resolution.
 - Formalization input, names, claim IDs, paths, assertion IDs, and evidence values are untrusted until validation, sanitization, comment escaping, and report rendering have applied their respective boundaries.
 
-If a precondition other than claim-ID uniqueness is violated, merge behavior remains deterministic but the result is outside this change's soundness guarantee. Duplicate raw or sanitized claim IDs are rejected before compilation or solver execution.
+If a precondition other than claim-ID uniqueness is violated, merge behavior remains deterministic but the result is outside this change's soundness guarantee. Duplicate raw or sanitized claim IDs, and compile groups that exceed the named size bounds, are rejected as `logic.invalid_group` before compilation or solver execution.
 
 ### Postconditions
 - Every surviving claim in the combined SMT-LIB appears in `compiled.claimIds`, in original input order.
@@ -198,6 +198,8 @@ Same-claim sanitizer collision edge case: when one claim declares two distinct r
   - **Rationale**: Users receive an unhelpful solver error instead of a precise claim-attributed merge finding.
 - **Compile-group identity aliasing**: Two claims share one raw or sanitized claim identifier within a compile group.
   - **Rationale**: Assertion labels, exclusion accounting, and related-claim evidence become ambiguous, so solver conclusions can no longer be trusted.
+- **Run-aborting size overflow**: A compile group assembled from unbounded upstream claims exceeds `CLAIMS_PER_GROUP_MAX`, or a claim exceeds `DECLARATIONS_PER_CLAIM_MAX`, and a thrown precondition would abort the entire analysis run and discard all other findings.
+  - **Rationale**: An input-driven size condition must degrade to a group-scoped `logic.invalid_group` finding, not a process-wide abort; group preflight rejects only the oversized group while valid sibling groups still complete.
 - **Downstream inclusion drift**: Deeper checks analyze a different claim set than the one emitted into the combined SMT-LIB.
   - **Rationale**: The tool can report false negatives or omit surviving behavior, undermining the trustworthiness of later findings.
 - **Rendered evidence injection**: Raw conflict evidence changes report structure instead of remaining inert text.

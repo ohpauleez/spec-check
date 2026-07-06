@@ -4,8 +4,8 @@ import { describe, expect, it, vi } from "vitest";
 import { traceSpec } from "../support/spec-trace.js";
 import { neutralizeMarkdownInline } from "../../src/domain/reporting/render.js";
 import { buildEquivalenceClusters } from "../../src/domain/formal/clustering.js";
-import { preflightGroupClaimIds, runLogicAnalysis } from "../../src/domain/formal/logic-analysis.js";
-import { compileSpecSmtlib, compileSmtlib, sanitizeIdentifier } from "../../src/domain/formal/smtlib.js";
+import { preflightGroupBounds, preflightGroupClaimIds, runLogicAnalysis } from "../../src/domain/formal/logic-analysis.js";
+import { CLAIMS_PER_GROUP_MAX, compileSpecSmtlib, compileSmtlib, DECLARATIONS_PER_CLAIM_MAX, sanitizeIdentifier } from "../../src/domain/formal/smtlib.js";
 import { toClaimId, toOutputDirPath } from "../../src/domain/branded.js";
 import type { LogicFunctionSymbol, LogicIrClaim, LogicSort } from "../../src/domain/logic-ir.js";
 
@@ -696,6 +696,46 @@ describe("logic and clustering properties", () => {
         expect(vi.mocked(writeOutputAtomic)).not.toHaveBeenCalled();
       }),
       { numRuns: 24 },
+    );
+  });
+
+  it("preflightGroupBounds accepts group cardinality at the limit and flags it one past the limit", () => {
+    traceSpec("FLA-SPEC-GROUP-BOUNDS");
+    fc.assert(
+      fc.property(fc.integer({ min: -3, max: 3 }), (offset) => {
+        const count = CLAIMS_PER_GROUP_MAX + offset;
+        const claims = Array.from({ length: count }, (_, index) =>
+          buildLogicClaim({ claimId: `R-${String(index)}`, variables: [{ name: "S", sort: "Bool" }], functions: [] }));
+
+        const issue = preflightGroupBounds(claims);
+        if (count <= CLAIMS_PER_GROUP_MAX) {
+          expect(issue).toBeNull();
+        } else {
+          expect(issue?.kind).toBe("group_too_large");
+        }
+      }),
+      { numRuns: 7 },
+    );
+  });
+
+  it("preflightGroupBounds counts variables plus functions against the per-claim limit", () => {
+    traceSpec("FLA-SPEC-GROUP-BOUNDS");
+    fc.assert(
+      fc.property(fc.integer({ min: -3, max: 3 }), (offset) => {
+        const totalDeclarations = DECLARATIONS_PER_CLAIM_MAX + offset;
+        const functionCount = Math.floor(totalDeclarations / 2);
+        const variableCount = totalDeclarations - functionCount;
+        const variables = Array.from({ length: variableCount }, (_, index) => ({ name: `V${String(index)}`, sort: "Bool" as const }));
+        const functions: LogicFunctionSymbol[] = Array.from({ length: functionCount }, (_, index) => ({ name: `F${String(index)}`, args: [], returns: "Bool" }));
+
+        const issue = preflightGroupBounds([buildLogicClaim({ claimId: "R-DECL", variables, functions })]);
+        if (totalDeclarations <= DECLARATIONS_PER_CLAIM_MAX) {
+          expect(issue).toBeNull();
+        } else {
+          expect(issue?.kind).toBe("claim_too_many_declarations");
+        }
+      }),
+      { numRuns: 7 },
     );
   });
 

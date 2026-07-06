@@ -137,6 +137,29 @@ export function compileSmtlib(claim: LogicIrClaim): CompiledSmtlib {
 
 /**
  * Compile all claims from one spec group into one SMT-LIB program.
+ *
+ * @param specFile - provenance file for the compile group
+ * @param claims - claims in one compile group, already grouped by compile key
+ * @returns combined SMT-LIB text, surviving claim IDs, label map, and merge conflicts
+ *
+ * @throws {Error} When a size precondition is violated (see below).
+ *
+ * @remarks
+ * Preconditions (caller contract):
+ * - `claims.length` is a safe integer within {@link CLAIMS_PER_GROUP_MAX};
+ * - every claim's `variables.length + functions.length` is within
+ *   {@link DECLARATIONS_PER_CLAIM_MAX}.
+ *
+ * These bounds are enforced upstream by `preflightGroupBounds` in
+ * `logic-analysis.ts`, which converts oversized groups into graceful
+ * `logic.invalid_group` findings before this function is reached. The
+ * `precondition(...)` checks here are therefore unreachable backstops that
+ * defend the caller contract for any future direct caller; they are not the
+ * primary size-rejection path.
+ *
+ * Postconditions:
+ * - output is a single SMT-LIB program without solver commands (callers append them);
+ * - conflicting claims are excluded and reported in `conflicts`.
  */
 export function compileSpecSmtlib(specFile: string, claims: readonly LogicIrClaim[]): CompiledSpecSmtlib {
   precondition(Number.isSafeInteger(claims.length), "claims length must be a safe integer");

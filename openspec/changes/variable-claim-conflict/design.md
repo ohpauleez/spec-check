@@ -131,6 +131,7 @@ If a precondition other than claim-ID uniqueness is violated, the merge step rem
 | VSC-9 | Safety | Never emit a combined SMT-LIB file where one sanitized symbol is declared as both a variable and a function. |
 | VSC-10 | Safety | Never build or consume a solver query for duplicate raw `claimId` values. |
 | VSC-10b | Safety | Never build a query for two claims whose sanitized claim IDs collide; sanitized-ID uniqueness preflight enforces this even if sanitizer injectivity regresses. |
+| VSC-10c | Safety | Never abort the run for an oversized compile group; a group exceeding `CLAIMS_PER_GROUP_MAX` claims or a claim exceeding `DECLARATIONS_PER_CLAIM_MAX` declarations is rejected as a `logic.invalid_group` finding with zero compile/solver/write work, isolating the failure to that group. |
 | VSC-11 | Safety | Untrusted strings emitted in SMT-LIB comments cannot inject commands by introducing new SMT-LIB lines. |
 | VSC-12 | Safety | Security-sensitive evidence values remain data across compiler output and reports; raw names, claim IDs, assertion IDs, and paths cannot create executable SMT-LIB commands or synthetic rendered findings. |
 
@@ -288,7 +289,7 @@ The merge core is the deterministic, side-effect-free kernel of this change, so 
 
 `compileSpecSmtlib()`:
 
-- Precondition: the claim list is finite and within the declared bounds (see "Bounds And Fail-Fast").
+- Precondition (caller contract): the claim list is finite and within the declared bounds (see "Bounds And Fail-Fast"); enforced upstream by `preflightGroupBounds`, so the in-function `precondition` guards are unreachable backstops.
 - Invariant (after the detection pass): no registry symbol maps to two sorts, two signatures, or two declaration kinds.
 - Postcondition: `compiled.claimIds` is an order-preserving subsequence of the input claim IDs.
 - Postcondition: no `excludedClaimId` appears in `compiled.claimIds`, and `assertionNameMap` keys are a subset of `compiled.claimIds`.
@@ -297,17 +298,20 @@ The merge core is the deterministic, side-effect-free kernel of this change, so 
 Group preflight in `logic-analysis.ts`:
 
 - Postcondition: when a group is rejected as `logic.invalid_group`, zero `compileSpecSmtlib()`, artifact-write, and `runZ3Query()` calls occur for that group (asserted in-code and re-checked by the contract/property zero-work tests).
+- Bounds preflight: `preflightGroupBounds` returns a `group_too_large` or `claim_too_many_declarations` issue (or `null`), composed bounds-first with `preflightGroupClaimIds`, so oversized groups reject gracefully as `logic.invalid_group` rather than throwing.
 
 Assertions are side-effect free and split into small single-fact checks so a failure names the exact violated contract.
 
 ### Bounds And Fail-Fast
 
-`docs/typescript_style.md` rule 4 requires explicit bounds on work; unbounded work is a bug unless proven otherwise. The merge core processes only inputs that have already passed structural validation and merged-capability grouping, so claim count per compile group and declaration/assertion counts per claim are bounded upstream. To keep that bound visible and local rather than assumed, the compile boundary declares named operational limits and fails fast with a `precondition` when they are exceeded:
+`docs/typescript_style.md` rule 4 requires explicit bounds on work; unbounded work is a bug unless proven otherwise. Compile groups are assembled from formalized claims by `groupRepresentativesBySpec` with no cardinality cap, and `formalize.ts` documents an unbounded claim count, so claim count per compile group and declaration count per claim are **not** bounded upstream. These are input-driven quantities: an oversized group is an expected domain condition, not a broken invariant. Following the Result-vs-throw policy, exceeding a size bound is therefore surfaced as a graceful `logic.invalid_group` finding, not a thrown `Error` that would abort the whole run.
+
+The bound is enforced at the group boundary by `preflightGroupBounds` in `logic-analysis.ts`, composed bounds-first with the existing claim-ID preflight (`preflightGroupBounds(claims) ?? preflightGroupClaimIds(claims)`). It declares named operational limits and, when one is exceeded, rejects the group before any compile, solver, or artifact-write work:
 
 - `CLAIMS_PER_GROUP_MAX`: upper bound on claims in one compile group.
 - `DECLARATIONS_PER_CLAIM_MAX`: upper bound on variable-plus-function declarations in one claim.
 
-These are defensive guards against a malformed or adversarial upstream, not new domain limits; exceeding one is a broken-invariant condition (thrown `Error`), not a `Result` finding. Both detection passes iterate these bounded collections with `for…of` and break on the first conflict, so control flow is bounded and visible at the call site.
+The check tests the O(1) group-cardinality bound first, then iterates claims with `for…of` and returns on the first per-claim breach, so control flow stays bounded and visible. Rejection is group-scoped: only the oversized group becomes a finding while valid sibling groups compile and run normally (VSC-10c). The identical `precondition(...)` guards inside `compileSpecSmtlib` are retained as unreachable backstops that defend the caller contract for any future direct caller that bypasses preflight; they are not the primary size-rejection path.
 
 Identifier length is bounded by construction: every input code point contributes at most seven characters to the sanitized output (`_` plus six hex digits), so `sanitizeIdentifier()` output length is at most `7 ×` the input code-point count. No unbounded growth or recursion exists in the sanitizer.
 
@@ -506,6 +510,10 @@ Trace-ID sequencing is a hard gate: new `traceSpec(...)` IDs throw if not presen
 | Duplicate raw `claimId` group alongside valid groups rejects only the offending group; valid sibling groups still compile and run. | VSC-10 |
 | `sanitizeIdentifier()` is injective for formerly colliding `REQ(1)` and `REQ_281_29`, producing distinct sanitized IDs and labels. | VSC-10b, `FLA-SPEC-NAMED` |
 | Sanitized-ID uniqueness preflight rejects a constructed collision with `logic.invalid_group` and zero compile/solver calls. | VSC-10b |
+| A compile group exceeding `CLAIMS_PER_GROUP_MAX`, or a claim exceeding `DECLARATIONS_PER_CLAIM_MAX`, produces `logic.invalid_group` with zero `compileSpecSmtlib()`, `writeOutputAtomic`, and `runZ3Query` calls. | VSC-10c, `FLA-SPEC-GROUP-BOUNDS` |
+| An oversized group alongside a valid group rejects only the oversized group; the valid sibling still compiles and runs. | VSC-10c, `FLA-SPEC-GROUP-BOUNDS` |
+| `preflightGroupBounds` returns `null` at the exact bound and the correct issue kind one past it, for both group cardinality and per-claim declarations. | VSC-10c |
+| `compileSpecSmtlib` still throws its size `precondition` when invoked directly past a bound, proving the backstop is retained. | VSC-10c |
 | Reordering conflicting claims changes the excluded claimant according to first-wins position. | VSC-8 |
 | Raw variable names that sanitize to one symbol with different sorts record `variable_sort_mismatch`. | VSC-1, VSC-3 |
 | Empty claim list emits no `declare-*` and no `assert` lines, aside from header/section comments. | VSC-7 |

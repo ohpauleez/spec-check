@@ -3,11 +3,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import { traceSpec } from "../support/spec-trace.js";
 import {
   conflictToFinding,
+  preflightGroupBounds,
   preflightGroupClaimIds,
   runLogicAnalysis,
   type SpecClaimGroup,
 } from "../../src/domain/formal/logic-analysis.js";
 import type { LogicIrClaim } from "../../src/domain/logic-ir.js";
+import { CLAIMS_PER_GROUP_MAX, DECLARATIONS_PER_CLAIM_MAX } from "../../src/domain/formal/smtlib.js";
 import { toClaimId, toOutputDirPath } from "../../src/domain/branded.js";
 
 vi.mock("../../src/adapters/z3.js", () => ({
@@ -562,5 +564,100 @@ describe("logic-analysis contract (per-spec combined)", () => {
     const issue = preflightGroupClaimIds(claims, () => "SAME" as never);
     expect(issue).not.toBeNull();
     expect(issue?.kind).toBe("duplicate_sanitized_claim_id");
+  });
+
+  it("rejects an oversized compile group as invalid group before compile and solver work", async () => {
+    traceSpec("FLA-SPEC-GROUP-BOUNDS");
+    const { runZ3Query } = await import("../../src/adapters/z3.js");
+    const { writeOutputAtomic } = await import("../../src/adapters/fs.js");
+
+    const claims = Array.from({ length: CLAIMS_PER_GROUP_MAX + 1 }, (_, index) =>
+      makeClaim(`R-${String(index)}`, "mandatory"));
+
+    const output = await runLogicAnalysis({
+      groups: [makeGroup("specs/test/spec.md", claims)],
+      outputDir: toOutputDirPath("/tmp/test-output"),
+    });
+
+    expect(output.findings).toHaveLength(1);
+    expect(output.findings[0]!.category).toBe("logic.invalid_group");
+    expect(output.findings[0]!.evidence.some((item) => item.kind === "reason" && item.value === "group_too_large")).toBe(true);
+    expect(vi.mocked(runZ3Query)).not.toHaveBeenCalled();
+    expect(vi.mocked(writeOutputAtomic)).not.toHaveBeenCalled();
+  });
+
+  it("rejects a claim with too many declarations as invalid group scoped to that claim", async () => {
+    traceSpec("FLA-SPEC-GROUP-BOUNDS");
+    const { runZ3Query } = await import("../../src/adapters/z3.js");
+    const { writeOutputAtomic } = await import("../../src/adapters/fs.js");
+
+    const variables = Array.from({ length: DECLARATIONS_PER_CLAIM_MAX + 1 }, (_, index) => ({
+      name: `V${String(index)}`,
+      sort: "Bool" as const,
+    }));
+    const oversizedClaim: LogicIrClaim = {
+      claimId: toClaimId("R-BIG"),
+      obligation: "mandatory",
+      variables,
+      functions: [],
+      assertions: [{ id: "A1", expr: "true" }],
+    };
+
+    const output = await runLogicAnalysis({
+      groups: [makeGroup("specs/test/spec.md", [oversizedClaim])],
+      outputDir: toOutputDirPath("/tmp/test-output"),
+    });
+
+    expect(output.findings).toHaveLength(1);
+    expect(output.findings[0]!.category).toBe("logic.invalid_group");
+    expect(output.findings[0]!.evidence.some((item) => item.kind === "reason" && item.value === "claim_too_many_declarations")).toBe(true);
+    expect(output.findings[0]!.relatedClaimIdentifiers).toContain("R-BIG");
+    expect(vi.mocked(runZ3Query)).not.toHaveBeenCalled();
+    expect(vi.mocked(writeOutputAtomic)).not.toHaveBeenCalled();
+  });
+
+  it("rejects only the oversized group while a valid sibling group still runs", async () => {
+    traceSpec("FLA-SPEC-GROUP-BOUNDS");
+    const { runZ3Query } = await import("../../src/adapters/z3.js");
+    vi.mocked(runZ3Query).mockResolvedValue({ kind: "sat", stdout: "sat\n", stderr: "", exitCode: 0 });
+
+    const oversizedClaims = Array.from({ length: CLAIMS_PER_GROUP_MAX + 1 }, (_, index) =>
+      makeClaim(`BIG-${String(index)}`, "mandatory"));
+
+    const output = await runLogicAnalysis({
+      groups: [
+        makeGroup("specs/big/spec.md", oversizedClaims),
+        makeGroup("specs/ok/spec.md", [makeClaim("OK-1", "mandatory")]),
+      ],
+      outputDir: toOutputDirPath("/tmp/test-output"),
+    });
+
+    const invalidGroupFindings = output.findings.filter((finding) => finding.category === "logic.invalid_group");
+    expect(invalidGroupFindings).toHaveLength(1);
+    expect(invalidGroupFindings[0]!.provenance.file).toBe("specs/big/spec.md");
+    expect(vi.mocked(runZ3Query)).toHaveBeenCalled();
+  });
+
+  it("preflightGroupBounds accepts groups at the limits and rejects one past each limit", () => {
+    traceSpec("FLA-SPEC-GROUP-BOUNDS");
+    const atGroupLimit = Array.from({ length: CLAIMS_PER_GROUP_MAX }, (_, index) =>
+      makeClaim(`R-${String(index)}`, "mandatory"));
+    expect(preflightGroupBounds(atGroupLimit)).toBeNull();
+    expect(preflightGroupBounds([...atGroupLimit, makeClaim("R-EXTRA", "mandatory")])?.kind).toBe("group_too_large");
+
+    const atDeclLimit: LogicIrClaim = {
+      claimId: toClaimId("R-DECL"),
+      obligation: "mandatory",
+      variables: Array.from({ length: DECLARATIONS_PER_CLAIM_MAX }, (_, index) => ({ name: `V${String(index)}`, sort: "Bool" as const })),
+      functions: [],
+      assertions: [{ id: "A1", expr: "true" }],
+    };
+    expect(preflightGroupBounds([atDeclLimit])).toBeNull();
+
+    const overDeclLimit: LogicIrClaim = {
+      ...atDeclLimit,
+      variables: [...atDeclLimit.variables, { name: "V-EXTRA", sort: "Bool" }],
+    };
+    expect(preflightGroupBounds([overDeclLimit])?.kind).toBe("claim_too_many_declarations");
   });
 });

@@ -2,8 +2,10 @@ import { describe, expect, it } from "vitest";
 
 import { traceSpec } from "../support/spec-trace.js";
 import {
+  CLAIMS_PER_GROUP_MAX,
   compileSmtlib,
   compileSpecSmtlib,
+  DECLARATIONS_PER_CLAIM_MAX,
   parseUnsatCore,
   sanitizeIdentifier,
 } from "../../src/domain/formal/smtlib.js";
@@ -61,6 +63,17 @@ describe("compileSpecSmtlib", () => {
     expect(result.smtlib).not.toContain("(check-sat)");
     expect(result.claimIds).toEqual(["R1", "R2"]);
     expect(result.conflicts).toHaveLength(0);
+  });
+
+  it("throws its size precondition as an unreachable backstop when called directly past a bound", () => {
+    traceSpec("FLA-SPEC-GROUP-BOUNDS");
+    const oversizedGroup = Array.from({ length: CLAIMS_PER_GROUP_MAX + 1 }, (_, index) => makeClaim(`R${String(index)}`));
+    expect(() => compileSpecSmtlib("specs/foo/spec.md", oversizedGroup)).toThrow(/CLAIMS_PER_GROUP_MAX/u);
+
+    const oversizedClaim = makeClaim("R-BIG", {
+      variables: Array.from({ length: DECLARATIONS_PER_CLAIM_MAX + 1 }, (_, index) => ({ name: `V${String(index)}`, sort: "Bool" as const })),
+    });
+    expect(() => compileSpecSmtlib("specs/foo/spec.md", [oversizedClaim])).toThrow(/DECLARATIONS_PER_CLAIM_MAX/u);
   });
 
   it("uses named assertions with :named labels", () => {

@@ -1,13 +1,23 @@
 import { describe, expect, it } from "vitest";
 
 import { traceSpec } from "../support/spec-trace.js";
-import { compileSmtlib, compileSpecSmtlib, parseUnsatCore, sanitizeIdentifier } from "../../src/domain/formal/smtlib.js";
+import {
+  compileSmtlib,
+  compileSpecSmtlib,
+  parseUnsatCore,
+  sanitizeIdentifier,
+} from "../../src/domain/formal/smtlib.js";
 import { toClaimId } from "../../src/domain/branded.js";
 import type { LogicIrClaim } from "../../src/domain/logic-ir.js";
 
 function makeClaim(
   claimId: string,
-  opts?: { obligation?: "mandatory" | "advisory" | "informational"; variables?: LogicIrClaim["variables"]; functions?: LogicIrClaim["functions"]; assertions?: LogicIrClaim["assertions"] },
+  opts?: {
+    obligation?: "mandatory" | "advisory" | "informational";
+    variables?: LogicIrClaim["variables"];
+    functions?: LogicIrClaim["functions"];
+    assertions?: LogicIrClaim["assertions"];
+  },
 ): LogicIrClaim {
   return {
     claimId: toClaimId(claimId),
@@ -21,7 +31,7 @@ function makeClaim(
 describe("smtlib compilation", () => {
   it("sanitizes unsafe identifiers", () => {
     traceSpec("FLA-SMTLIB-COMPILE", "FLA-SMTLIB-SANITIZE");
-    expect(sanitizeIdentifier("REQ(1)|A")).toMatch(/^REQ_28/u);
+    expect(sanitizeIdentifier("REQ(1)|A")).toMatch(/^REQ_000028/u);
   });
 
   it("compiles logic IR with mapping comments", () => {
@@ -72,7 +82,7 @@ describe("compileSpecSmtlib", () => {
     ];
     const result = compileSpecSmtlib("specs/foo/spec.md", claims);
 
-    const constDecls = result.smtlib.split("\n").filter((l: string) => l.startsWith("(declare-const"));
+    const constDecls = result.smtlib.split("\n").filter((line) => line.startsWith("(declare-const"));
     expect(constDecls).toHaveLength(1);
   });
 
@@ -85,7 +95,7 @@ describe("compileSpecSmtlib", () => {
     ];
     const result = compileSpecSmtlib("specs/foo/spec.md", claims);
 
-    const funDecls = result.smtlib.split("\n").filter((l: string) => l.startsWith("(declare-fun"));
+    const funDecls = result.smtlib.split("\n").filter((line) => line.startsWith("(declare-fun"));
     expect(funDecls).toHaveLength(1);
   });
 
@@ -98,10 +108,94 @@ describe("compileSpecSmtlib", () => {
     const result = compileSpecSmtlib("specs/foo/spec.md", claims);
 
     expect(result.conflicts).toHaveLength(1);
-    expect(result.conflicts[0]!.kind).toBe("function_signature_mismatch");
-    expect(result.conflicts[0]!.functionName).toBe("f");
-    // R2 is excluded, R1 remains.
+    const conflict = result.conflicts[0]!;
+    expect(conflict.kind).toBe("function_signature_mismatch");
+    if (conflict.kind === "function_signature_mismatch") {
+      expect(conflict.existingFunctionName).toBe("f");
+      expect(conflict.conflictingFunctionName).toBe("f");
+      expect(conflict.existingClaimId).toBe("R1");
+      expect(conflict.excludedClaimId).toBe("R2");
+    }
     expect(result.claimIds).toEqual(["R1"]);
+  });
+
+  it("detects variable sort mismatch and excludes later claim", () => {
+    traceSpec("FLA-SPEC-VARSORT-CONFLICT");
+    const claims = [
+      makeClaim("R1", { variables: [{ name: "State", sort: "Bool" }] }),
+      makeClaim("R2", { variables: [{ name: "State", sort: "Int" }] }),
+    ];
+    const result = compileSpecSmtlib("specs/foo/spec.md", claims);
+
+    expect(result.conflicts).toHaveLength(1);
+    const conflict = result.conflicts[0]!;
+    expect(conflict.kind).toBe("variable_sort_mismatch");
+    if (conflict.kind === "variable_sort_mismatch") {
+      expect(conflict.expectedSort).toBe("Bool");
+      expect(conflict.conflictingSort).toBe("Int");
+      expect(conflict.existingClaimId).toBe("R1");
+      expect(conflict.excludedClaimId).toBe("R2");
+    }
+    expect(result.claimIds).toEqual(["R1"]);
+  });
+
+  it("detects symbol kind collision across claims", () => {
+    traceSpec("FLA-SPEC-SYMKIND-CONFLICT");
+    const claims = [
+      makeClaim("R1", { variables: [{ name: "sym", sort: "Bool" }] }),
+      makeClaim("R2", { functions: [{ name: "sym", args: ["Bool"], returns: "Bool" }] }),
+    ];
+    const result = compileSpecSmtlib("specs/foo/spec.md", claims);
+
+    expect(result.conflicts).toHaveLength(1);
+    const conflict = result.conflicts[0]!;
+    expect(conflict.kind).toBe("symbol_kind_collision");
+    if (conflict.kind === "symbol_kind_collision") {
+      expect(conflict.existingSymbolKind).toBe("variable");
+      expect(conflict.conflictingSymbolKind).toBe("function");
+      expect(conflict.existingClaimId).toBe("R1");
+      expect(conflict.excludedClaimId).toBe("R2");
+    }
+    expect(result.claimIds).toEqual(["R1"]);
+  });
+
+  it("detects same-claim symbol kind collision", () => {
+    traceSpec("FLA-SPEC-SYMKIND-CONFLICT");
+    const claims = [
+      makeClaim("R1", {
+        variables: [{ name: "shared", sort: "Bool" }],
+        functions: [{ name: "shared", args: ["Bool"], returns: "Bool" }],
+      }),
+    ];
+    const result = compileSpecSmtlib("specs/foo/spec.md", claims);
+
+    expect(result.conflicts).toHaveLength(1);
+    const conflict = result.conflicts[0]!;
+    expect(conflict.kind).toBe("symbol_kind_collision");
+    if (conflict.kind === "symbol_kind_collision") {
+      expect(conflict.existingClaimId).toBe("R1");
+      expect(conflict.excludedClaimId).toBe("R1");
+      expect(conflict.claimIds).toEqual(["R1", "R1"]);
+    }
+    expect(result.claimIds).toEqual([]);
+  });
+
+  it("uses conflict precedence variable before function before symbol-kind", () => {
+    traceSpec("FLA-SPEC-CONFLICT-ORDER");
+    const claims = [
+      makeClaim("R1", {
+        variables: [{ name: "v", sort: "Bool" }],
+        functions: [{ name: "f", args: ["Bool"], returns: "Bool" }],
+      }),
+      makeClaim("R2", {
+        variables: [{ name: "v", sort: "Int" }],
+        functions: [{ name: "f", args: ["Int"], returns: "Int" }],
+      }),
+    ];
+    const result = compileSpecSmtlib("specs/foo/spec.md", claims);
+
+    expect(result.conflicts).toHaveLength(1);
+    expect(result.conflicts[0]!.kind).toBe("variable_sort_mismatch");
   });
 
   it("maps assertion labels back to claim IDs", () => {
@@ -114,6 +208,19 @@ describe("compileSpecSmtlib", () => {
 
     expect(result.assertionNameMap.get("R1__a0")).toBe("R1");
     expect(result.assertionNameMap.get("R2__a0")).toBe("R2");
+  });
+
+  it("keeps assertion labels distinct for formerly colliding identifiers", () => {
+    traceSpec("FLA-SPEC-LABEL-ENCODE", "FLA-SPEC-NAMED");
+    const claims = [
+      makeClaim("REQ(1)", { assertions: [{ id: "A1", expr: "true" }] }),
+      makeClaim("REQ_281_29", { assertions: [{ id: "A1", expr: "true" }] }),
+    ];
+    const result = compileSpecSmtlib("specs/foo/spec.md", claims);
+
+    const labels = [...result.assertionNameMap.keys()];
+    expect(labels).toHaveLength(2);
+    expect(labels[0]).not.toBe(labels[1]);
   });
 });
 

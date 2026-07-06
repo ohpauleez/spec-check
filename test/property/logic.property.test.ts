@@ -17,6 +17,13 @@ describe("logic and clustering properties", () => {
     );
   });
 
+  it("sanitizer distinguishes formerly colliding identifiers", () => {
+    traceSpec("FLA-SPEC-LABEL-ENCODE", "FLA-SPEC-NAMED");
+    const first = sanitizeIdentifier("REQ(1)");
+    const second = sanitizeIdentifier("REQ_281_29");
+    expect(first).not.toBe(second);
+  });
+
   it("cluster construction is deterministic and symmetric for mutual pairs", async () => {
     traceSpec("FLA-CLUSTER-PROPERTIES", "FLA-CLUSTER-SYMM", "FLA-CLUSTER-DETERM");
     await fc.assert(

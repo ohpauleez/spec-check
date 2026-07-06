@@ -1,233 +1,73 @@
 /**
  * Compiles Logic IR claims into SMT-LIB text suitable for Z3 execution.
- * Handles identifier sanitization, sort declarations, and assertion generation.
  *
  * Central compilation layer between the Logic IR and the Z3 solver adapter.
  * Exports: compileSmtlib, compileSpecSmtlib, parseUnsatCore, sanitizeIdentifier.
  */
-import type { LogicIrClaim, LogicFunctionSymbol } from "../logic-ir.js";
-import { toSanitizedClaimId, toSmtlibContent, type SanitizedClaimId, type SmtlibContent } from "../branded.js";
+import { invariant, postcondition, precondition } from "../assert.js";
+import {
+  toSanitizedClaimId,
+  toSmtlibContent,
+  type SanitizedClaimId,
+  type SmtlibContent,
+} from "../branded.js";
+import type { LogicFunctionSymbol, LogicIrClaim, LogicSort } from "../logic-ir.js";
+import { sanitizeIdentifier as sanitizeIdentifierImpl } from "./identifiers.js";
+
+/** Maximum claims accepted per compile group. */
+export const CLAIMS_PER_GROUP_MAX = 1024;
+
+/** Maximum declarations accepted per claim (variables + functions). */
+export const DECLARATIONS_PER_CLAIM_MAX = 2048;
 
 /**
  * Result of compiling a Logic IR claim into SMT-LIB text.
- *
- * @remarks
- * Invariant: `sanitizedClaimId` is a valid SMT-LIB identifier derived from `claimId`.
- * Invariant: `smtlib` contains declarations and assertions but NOT `(check-sat)`.
- * Callers append `(check-sat)` at query execution time.
  */
 export interface CompiledSmtlib {
   readonly claimId: string;
   readonly sanitizedClaimId: SanitizedClaimId;
   readonly smtlib: SmtlibContent;
-  /** Sanitized assertion expressions (inner expr, without the `(assert ...)` wrapper). */
   readonly assertionExprs: readonly string[];
 }
 
 /**
- * Compile logic IR into SMT-LIB with identifier sanitization and mapping comments.
- *
- * @param claim - a validated LogicIrClaim to compile into SMT-LIB text
- * @returns compiled SMT-LIB containing declarations, assertions, and the sanitized claim identifier
- *
- * @remarks
- * Precondition: `claim` is a structurally valid `LogicIrClaim` (passed validation).
- * Postcondition: the output `smtlib` contains declarations and assertions but does NOT include
- * `(check-sat)`. Callers are responsible for appending `(check-sat)` when building
- * a complete query for the solver.
- * Postcondition: `assertionExprs` contains sanitized inner expressions without `(assert ...)` wrapper.
- * Failure modes: none — pure computation.
+ * Merge conflict detected while combining claims into one SMT-LIB program.
  */
-export function compileSmtlib(claim: LogicIrClaim): CompiledSmtlib {
-  const identifierMap = new Map<string, string>();
-  const sanitize = (value: string): string => {
-    const existing = identifierMap.get(value);
-    if (existing !== undefined) {
-      return existing;
-    }
-    const next = sanitizeIdentifier(value);
-    identifierMap.set(value, next);
-    return next;
+export type SpecMergeConflict =
+  | {
+    readonly kind: "function_signature_mismatch";
+    readonly sanitizedName: SanitizedClaimId;
+    readonly existingFunctionName: string;
+    readonly conflictingFunctionName: string;
+    readonly existingClaimId: string;
+    readonly excludedClaimId: string;
+    readonly claimIds: readonly [string, string];
+  }
+  | {
+    readonly kind: "variable_sort_mismatch";
+    readonly sanitizedName: SanitizedClaimId;
+    readonly existingVariableName: string;
+    readonly conflictingVariableName: string;
+    readonly expectedSort: LogicSort;
+    readonly conflictingSort: LogicSort;
+    readonly existingClaimId: string;
+    readonly excludedClaimId: string;
+    readonly claimIds: readonly [string, string];
+  }
+  | {
+    readonly kind: "symbol_kind_collision";
+    readonly sanitizedName: SanitizedClaimId;
+    readonly existingSymbolName: string;
+    readonly existingSymbolKind: "variable" | "function";
+    readonly conflictingSymbolName: string;
+    readonly conflictingSymbolKind: "variable" | "function";
+    readonly existingClaimId: string;
+    readonly excludedClaimId: string;
+    readonly claimIds: readonly [string, string];
   };
-
-  const sanitizedClaimId = sanitize(claim.claimId);
-
-  const lines: string[] = [];
-  lines.push(`; claim ${claim.claimId}`);
-  lines.push(`; obligation ${claim.obligation}`);
-  for (const [original, sanitized] of identifierMap) {
-    lines.push(`; id-map ${original} -> ${sanitized}`);
-  }
-  for (const variable of claim.variables) {
-    lines.push(`(declare-const ${sanitize(variable.name)} ${variable.sort})`);
-  }
-  for (const fn of claim.functions) {
-    lines.push(`(declare-fun ${sanitize(fn.name)} (${fn.args.join(" ")}) ${fn.returns})`);
-  }
-
-  const assertionExprs: string[] = [];
-  for (const assertion of claim.assertions) {
-    const sanitizedExpr = sanitizeAssertion(assertion.expr, sanitize);
-    assertionExprs.push(sanitizedExpr);
-    lines.push(`; assertion ${sanitize(assertion.id)}`);
-    lines.push(`(assert ${sanitizedExpr})`);
-  }
-
-  return {
-    claimId: claim.claimId,
-    sanitizedClaimId: toSanitizedClaimId(sanitizedClaimId),
-    smtlib: toSmtlibContent(`${lines.join("\n")}\n`),
-    assertionExprs,
-  };
-}
-
-/**
- * Check whether a code point is valid in SMT-LIB identifiers without escaping.
- *
- * @param codePoint - numeric Unicode code point to test
- * @returns true when the code point is A-Z (65-90), a-z (97-122), 0-9 (48-57), or _ (95)
- *
- * @remarks
- * Postcondition: returns true only for characters that do not require hex-escaping.
- * Failure modes: none — pure computation.
- */
-function isSmtlibSafeCodePoint(codePoint: number): boolean {
-  return (
-    (codePoint >= 65 && codePoint <= 90) ||
-    (codePoint >= 97 && codePoint <= 122) ||
-    (codePoint >= 48 && codePoint <= 57) ||
-    codePoint === 95
-  );
-}
-
-/**
- * Check whether a code point is valid as the first character of an SMT-LIB identifier.
- *
- * @param codePoint - numeric Unicode code point to test
- * @returns true when the code point is A-Z (65-90), a-z (97-122), or _ (95)
- *
- * @remarks
- * Postcondition: returns true only for characters valid in leading position (digits excluded).
- * Failure modes: none — pure computation.
- */
-function isSmtlibLeadingCodePoint(codePoint: number): boolean {
-  return (
-    (codePoint >= 65 && codePoint <= 90) ||
-    (codePoint >= 97 && codePoint <= 122) ||
-    codePoint === 95
-  );
-}
-
-/**
- * Sanitize an arbitrary string into a valid SMT-LIB simple symbol.
- *
- * @param value - raw identifier string to sanitize
- * @returns branded `SanitizedClaimId` containing only valid SMT-LIB characters
- *
- * @remarks
- * Precondition: `value` may be any string including empty.
- * Postcondition: returned identifier is non-empty, starts with a letter or underscore,
- * and contains only [A-Za-z0-9_]. Illegal characters are hex-escaped as `_XX`.
- * Invariant: the empty string maps to `"_"`.
- * Failure modes: none — pure computation.
- */
-export function sanitizeIdentifier(value: string): SanitizedClaimId {
-  let output = "";
-  for (const character of value) {
-    const codePoint = character.codePointAt(0);
-    if (codePoint !== undefined && isSmtlibSafeCodePoint(codePoint)) {
-      output += character;
-      continue;
-    }
-
-    const suffix = (codePoint ?? 0).toString(16).toUpperCase().padStart(2, "0");
-    output += `_${suffix}`;
-  }
-
-  if (output.length === 0) {
-    return toSanitizedClaimId("_");
-  }
-
-  const firstCodePoint = output.codePointAt(0) ?? 0;
-  return toSanitizedClaimId(isSmtlibLeadingCodePoint(firstCodePoint) ? output : `_${output}`);
-}
-
-/**
- * Sanitize all identifier-like tokens within an SMT-LIB assertion expression.
- *
- * @param expr - raw assertion expression string containing identifiers
- * @param sanitize - sanitization function applied to each matched identifier token
- * @returns expression with all identifier tokens replaced by their sanitized forms
- *
- * @remarks
- * Postcondition: identifiers matching `[A-Za-z_][A-Za-z0-9_\-.:]∗` are sanitized;
- * non-identifier content (parentheses, whitespace, operators) is preserved verbatim.
- * Failure modes: none — pure computation.
- */
-function sanitizeAssertion(expr: string, sanitize: (value: string) => string): string {
-  return expr.replace(/[A-Za-z_][A-Za-z0-9_\-.:]*/gu, (token) => sanitize(token));
-}
-
-/**
- * Parse SMT-LIB content back into declarations and assertion expressions.
- *
- * @param content - SMT-LIB text as written by `compileSmtlib` (or legacy format with `(check-sat)`)
- * @returns separated declarations and assertion expressions extracted from `(assert ...)` lines
- *
- * @remarks
- * Precondition: `content` follows the format produced by `compileSmtlib` (one command per line).
- * Postcondition: `declarations` contains `(declare-const ...)` and `(declare-fun ...)` lines.
- * Postcondition: `assertionExprs` contains the inner expressions from `(assert expr)` lines.
- * Lines that are comments, `(check-sat)`, or empty are ignored.
- * Failure modes: none — pure computation. Malformed lines are silently skipped.
- */
-export function parseSmtlibContent(content: string): {
-  readonly declarations: readonly string[];
-  readonly assertionExprs: readonly string[];
-} {
-  const declarations: string[] = [];
-  const assertionExprs: string[] = [];
-
-  for (const rawLine of content.split("\n")) {
-    const line = rawLine.trim();
-    if (line.startsWith("(declare-const") || line.startsWith("(declare-sort") || line.startsWith("(declare-fun")) {
-      declarations.push(line);
-    } else if (line.startsWith("(assert ")) {
-      // Extract inner expression from (assert expr)
-      const inner = line.slice("(assert ".length, -1);
-      assertionExprs.push(inner);
-    }
-  }
-
-  return { declarations, assertionExprs };
-}
-
-// ---------------------------------------------------------------------------
-// Per-Spec Combined SMT-LIB Compilation
-// ---------------------------------------------------------------------------
-
-/**
- * Conflict detected when merging function declarations from multiple claims.
- *
- * @remarks
- * Invariant: `functionName` is the unsanitized original identifier.
- * Invariant: `claimIds` identifies the two claims with incompatible signatures.
- */
-export interface SpecMergeConflict {
-  readonly kind: "function_signature_mismatch";
-  readonly functionName: string;
-  readonly claimIds: readonly [string, string];
-}
 
 /**
  * Result of compiling all claims from a single spec file into one SMT-LIB text.
- *
- * @remarks
- * Invariant: `smtlib` contains `(set-option :produce-unsat-cores true)`, all deduplicated
- * declarations, and named assertions — but NOT `(check-sat)` or `(get-unsat-core)`.
- * Invariant: `assertionNameMap` maps each named-assertion label back to its source claimId.
- * Invariant: `conflicts` lists function signature mismatches found during merging.
- * Invariant: claims involved in merge conflicts are excluded from the combined output.
  */
 export interface CompiledSpecSmtlib {
   readonly specFile: string;
@@ -239,36 +79,88 @@ export interface CompiledSpecSmtlib {
 }
 
 /**
- * Compile all claims from a single spec file into one combined SMT-LIB text.
- *
- * @param specFile - the source spec file path (used for comments and ID generation)
- * @param claims - all LogicIrClaims belonging to this spec file
- * @returns combined SMT-LIB with deduplicated declarations, named assertions, and any merge conflicts
- *
- * @remarks
- * Precondition: `claims` may be empty (produces output with no assertions).
- * Precondition: each claim in `claims` is a structurally valid `LogicIrClaim`.
- * Postcondition: `smtlib` contains declarations and named assertions but NOT `(check-sat)`.
- * Postcondition: `assertionNameMap` maps every emitted assertion label back to its source claimId.
- * Postcondition: claims involved in merge conflicts are excluded from the combined output.
- * Failure modes: none — pure computation.
- *
- * Strategy:
- * - Variable declarations are deduplicated by name (first-wins; same name + same sort → emit once).
- * - Function declarations are deduplicated by name; if a duplicate name has a different
- *   signature, a SpecMergeConflict is recorded and the conflicting claim is excluded.
- * - Each assertion uses `(assert (! expr :named <label>))` where label encodes
- *   both the claim ID and assertion index for unsat-core traceability.
- * - The output includes `(set-option :produce-unsat-cores true)` as the first command.
- * - Callers append `(check-sat)\n(get-unsat-core)\n` at query time.
+ * Backward-compatible re-export. Identifier sanitization is implemented in
+ * `identifiers.ts`.
+ */
+export const sanitizeIdentifier = sanitizeIdentifierImpl;
+
+/**
+ * Compile one claim to SMT-LIB declarations and assertions.
+ */
+export function compileSmtlib(claim: LogicIrClaim): CompiledSmtlib {
+  const identifierMap = new Map<string, SanitizedClaimId>();
+
+  const sanitize = (value: string): SanitizedClaimId => {
+    const existing = identifierMap.get(value);
+    if (existing !== undefined) {
+      return existing;
+    }
+
+    const next = sanitizeIdentifier(value);
+    identifierMap.set(value, next);
+    return next;
+  };
+
+  const sanitizedClaimId = sanitize(claim.claimId);
+  const lines: string[] = [];
+
+  lines.push(`; claim ${escapeCommentLine(claim.claimId)}`);
+  lines.push(`; obligation ${escapeCommentLine(claim.obligation)}`);
+
+  for (const [original, sanitized] of identifierMap) {
+    lines.push(`; id-map ${escapeCommentLine(original)} -> ${escapeCommentLine(sanitized)}`);
+  }
+
+  for (const variable of claim.variables) {
+    lines.push(`(declare-const ${sanitize(variable.name)} ${variable.sort})`);
+  }
+
+  for (const fn of claim.functions) {
+    lines.push(`(declare-fun ${sanitize(fn.name)} (${fn.args.join(" ")}) ${fn.returns})`);
+  }
+
+  const assertionExprs: string[] = [];
+  for (const assertion of claim.assertions) {
+    const sanitizedExpr = sanitizeAssertion(assertion.expr, sanitize);
+    assertionExprs.push(sanitizedExpr);
+    lines.push(`; assertion ${escapeCommentLine(sanitize(assertion.id))}`);
+    lines.push(`(assert ${sanitizedExpr})`);
+  }
+
+  return {
+    claimId: claim.claimId,
+    sanitizedClaimId,
+    smtlib: toSmtlibContent(`${lines.join("\n")}\n`),
+    assertionExprs,
+  };
+}
+
+/**
+ * Compile all claims from one spec group into one SMT-LIB program.
  */
 export function compileSpecSmtlib(specFile: string, claims: readonly LogicIrClaim[]): CompiledSpecSmtlib {
-  const globalIdentifierMap = new Map<string, string>();
-  const sanitize = (value: string): string => {
+  precondition(Number.isSafeInteger(claims.length), "claims length must be a safe integer");
+  precondition(claims.length <= CLAIMS_PER_GROUP_MAX, `claim count ${String(claims.length)} exceeds CLAIMS_PER_GROUP_MAX ${String(CLAIMS_PER_GROUP_MAX)}`);
+
+  for (const claim of claims) {
+    const declarationCount = claim.variables.length + claim.functions.length;
+    precondition(
+      Number.isSafeInteger(declarationCount),
+      `declaration count must be a safe integer for claim ${claim.claimId}`,
+    );
+    precondition(
+      declarationCount <= DECLARATIONS_PER_CLAIM_MAX,
+      `claim ${claim.claimId} has ${String(declarationCount)} declarations; exceeds DECLARATIONS_PER_CLAIM_MAX ${String(DECLARATIONS_PER_CLAIM_MAX)}`,
+    );
+  }
+
+  const globalIdentifierMap = new Map<string, SanitizedClaimId>();
+  const sanitize = (value: string): SanitizedClaimId => {
     const existing = globalIdentifierMap.get(value);
     if (existing !== undefined) {
       return existing;
     }
+
     const next = sanitizeIdentifier(value);
     globalIdentifierMap.set(value, next);
     return next;
@@ -276,97 +168,222 @@ export function compileSpecSmtlib(specFile: string, claims: readonly LogicIrClai
 
   const sanitizedSpecId = sanitize(specFile);
 
-  // Track declared functions for conflict detection.
-  const declaredFunctions = new Map<string, { fn: LogicFunctionSymbol; claimId: string }>();
+  const declaredVariables = new Map<SanitizedClaimId, { variableName: string; sort: LogicSort; claimId: string }>();
+  const declaredFunctions = new Map<SanitizedClaimId, { functionName: string; fn: LogicFunctionSymbol; claimId: string }>();
 
   const conflicts: SpecMergeConflict[] = [];
   const excludedClaimIds = new Set<string>();
   const includedClaimIds: string[] = [];
-  const assertionNameMap = new Map<string, string>(); // label → claimId
+  const assertionNameMap = new Map<string, string>();
 
   const variableLines: string[] = [];
   const functionLines: string[] = [];
   const assertionLines: string[] = [];
+  const emittedVariableSymbols = new Set<SanitizedClaimId>();
+  const emittedFunctionSymbols = new Set<SanitizedClaimId>();
 
-  // First pass: collect declarations and detect conflicts.
   for (const claim of claims) {
-    let hasConflict = false;
+    let conflictForClaim: SpecMergeConflict | null = null;
 
-    for (const fn of claim.functions) {
-      const sanName = sanitize(fn.name);
-      const existing = declaredFunctions.get(sanName);
-      if (existing !== undefined) {
-        // Check signature compatibility.
-        if (!signaturesMatch(existing.fn, fn)) {
-          conflicts.push({
+    for (const variable of claim.variables) {
+      const sanitizedName = sanitize(variable.name);
+      const existingVariable = declaredVariables.get(sanitizedName);
+      if (existingVariable !== undefined && existingVariable.sort !== variable.sort) {
+        conflictForClaim = {
+          kind: "variable_sort_mismatch",
+          sanitizedName,
+          existingVariableName: existingVariable.variableName,
+          conflictingVariableName: variable.name,
+          expectedSort: existingVariable.sort,
+          conflictingSort: variable.sort,
+          existingClaimId: existingVariable.claimId,
+          excludedClaimId: claim.claimId,
+          claimIds: [existingVariable.claimId, claim.claimId],
+        };
+        break;
+      }
+    }
+
+    if (conflictForClaim === null) {
+      for (const fn of claim.functions) {
+        const sanitizedName = sanitize(fn.name);
+        const existingFunction = declaredFunctions.get(sanitizedName);
+        if (existingFunction !== undefined && !signaturesMatch(existingFunction.fn, fn)) {
+          conflictForClaim = {
             kind: "function_signature_mismatch",
-            functionName: fn.name,
-            claimIds: [existing.claimId, claim.claimId],
-          });
-          hasConflict = true;
+            sanitizedName,
+            existingFunctionName: existingFunction.functionName,
+            conflictingFunctionName: fn.name,
+            existingClaimId: existingFunction.claimId,
+            excludedClaimId: claim.claimId,
+            claimIds: [existingFunction.claimId, claim.claimId],
+          };
           break;
         }
       }
     }
 
-    if (hasConflict) {
-      excludedClaimIds.add(claim.claimId);
-    } else {
-      // Register this claim's functions for future conflict detection.
+    if (conflictForClaim === null) {
+      const claimVariableSymbols = new Map<SanitizedClaimId, string>();
+      const claimFunctionSymbols = new Map<SanitizedClaimId, string>();
+
+      for (const variable of claim.variables) {
+        claimVariableSymbols.set(sanitize(variable.name), variable.name);
+      }
       for (const fn of claim.functions) {
-        const sanName = sanitize(fn.name);
-        if (!declaredFunctions.has(sanName)) {
-          declaredFunctions.set(sanName, { fn, claimId: claim.claimId });
+        claimFunctionSymbols.set(sanitize(fn.name), fn.name);
+      }
+
+      for (const [sanitizedName, variableName] of claimVariableSymbols) {
+        const existingFunction = declaredFunctions.get(sanitizedName);
+        if (existingFunction !== undefined) {
+          conflictForClaim = {
+            kind: "symbol_kind_collision",
+            sanitizedName,
+            existingSymbolName: existingFunction.functionName,
+            existingSymbolKind: "function",
+            conflictingSymbolName: variableName,
+            conflictingSymbolKind: "variable",
+            existingClaimId: existingFunction.claimId,
+            excludedClaimId: claim.claimId,
+            claimIds: [existingFunction.claimId, claim.claimId],
+          };
+          break;
         }
+
+        const sameClaimFunctionName = claimFunctionSymbols.get(sanitizedName);
+        if (sameClaimFunctionName !== undefined) {
+          conflictForClaim = {
+            kind: "symbol_kind_collision",
+            sanitizedName,
+            existingSymbolName: sameClaimFunctionName,
+            existingSymbolKind: "function",
+            conflictingSymbolName: variableName,
+            conflictingSymbolKind: "variable",
+            existingClaimId: claim.claimId,
+            excludedClaimId: claim.claimId,
+            claimIds: [claim.claimId, claim.claimId],
+          };
+          break;
+        }
+      }
+
+      if (conflictForClaim === null) {
+        for (const [sanitizedName, functionName] of claimFunctionSymbols) {
+          const existingVariable = declaredVariables.get(sanitizedName);
+          if (existingVariable !== undefined) {
+            conflictForClaim = {
+              kind: "symbol_kind_collision",
+              sanitizedName,
+              existingSymbolName: existingVariable.variableName,
+              existingSymbolKind: "variable",
+              conflictingSymbolName: functionName,
+              conflictingSymbolKind: "function",
+              existingClaimId: existingVariable.claimId,
+              excludedClaimId: claim.claimId,
+              claimIds: [existingVariable.claimId, claim.claimId],
+            };
+            break;
+          }
+        }
+      }
+    }
+
+    if (conflictForClaim !== null) {
+      conflicts.push(conflictForClaim);
+      excludedClaimIds.add(claim.claimId);
+      continue;
+    }
+
+    for (const variable of claim.variables) {
+      const sanitizedName = sanitize(variable.name);
+      if (!declaredVariables.has(sanitizedName)) {
+        declaredVariables.set(sanitizedName, {
+          variableName: variable.name,
+          sort: variable.sort,
+          claimId: claim.claimId,
+        });
+      }
+    }
+
+    for (const fn of claim.functions) {
+      const sanitizedName = sanitize(fn.name);
+      if (!declaredFunctions.has(sanitizedName)) {
+        declaredFunctions.set(sanitizedName, {
+          functionName: fn.name,
+          fn,
+          claimId: claim.claimId,
+        });
       }
     }
   }
 
-  // Second pass: emit declarations and assertions for non-excluded claims.
-  const emittedVariables = new Set<string>();
-  const emittedFunctions = new Set<string>();
+  invariant(
+    [...declaredVariables.values()].every((entry) => entry.sort === "Bool" || entry.sort === "Int" || entry.sort === "Real" || entry.sort === "String"),
+    "every declared variable sort must remain inside LogicSort",
+  );
+  invariant(
+    [...declaredVariables.keys()].every((symbol) => !declaredFunctions.has(symbol)),
+    "one sanitized symbol must not map to both variable and function declarations",
+  );
+
   for (const claim of claims) {
     if (excludedClaimIds.has(claim.claimId)) {
       continue;
     }
+
     includedClaimIds.push(claim.claimId);
 
-    // Variables (typed constants).
     for (const variable of claim.variables) {
-      const sanName = sanitize(variable.name);
-      if (!emittedVariables.has(sanName)) {
-        emittedVariables.add(sanName);
-        variableLines.push(`(declare-const ${sanName} ${variable.sort})`);
+      const sanitizedName = sanitize(variable.name);
+      if (!emittedVariableSymbols.has(sanitizedName)) {
+        emittedVariableSymbols.add(sanitizedName);
+        variableLines.push(`(declare-const ${sanitizedName} ${variable.sort})`);
       }
     }
 
-    // Functions.
     for (const fn of claim.functions) {
-      const sanName = sanitize(fn.name);
-      if (!emittedFunctions.has(sanName)) {
-        emittedFunctions.add(sanName);
-        functionLines.push(`(declare-fun ${sanName} (${fn.args.join(" ")}) ${fn.returns})`);
+      const sanitizedName = sanitize(fn.name);
+      if (!emittedFunctionSymbols.has(sanitizedName)) {
+        emittedFunctionSymbols.add(sanitizedName);
+        functionLines.push(`(declare-fun ${sanitizedName} (${fn.args.join(" ")}) ${fn.returns})`);
       }
     }
 
-    // Named assertions.
-    const sanClaimId = sanitize(claim.claimId);
-    for (let i = 0; i < claim.assertions.length; i++) {
-      const assertion = claim.assertions[i]!;
-      const label = `${sanClaimId}__a${i}`;
-      const sanitizedExpr = sanitizeAssertion(assertion.expr, sanitize);
+    const sanitizedClaimId = sanitize(claim.claimId);
+    for (let assertionIndex = 0; assertionIndex < claim.assertions.length; assertionIndex += 1) {
+      const assertion = claim.assertions[assertionIndex]!;
+      const label = `${sanitizedClaimId}__a${String(assertionIndex)}`;
       assertionNameMap.set(label, claim.claimId);
-      assertionLines.push(`; claim ${claim.claimId} assertion ${assertion.id}`);
-      assertionLines.push(`(assert (! ${sanitizedExpr} :named ${label}))`);
+      assertionLines.push(`; claim ${escapeCommentLine(claim.claimId)} assertion ${escapeCommentLine(assertion.id)}`);
+      assertionLines.push(`(assert (! ${sanitizeAssertion(assertion.expr, sanitize)} :named ${label}))`);
     }
   }
 
-  // Assemble final SMT-LIB text.
-  // Note: (set-option :produce-unsat-cores true) is NOT included here — callers
-  // prepend it only when they need unsat-core output (two-phase Z3 approach).
+  const includedSet = new Set(includedClaimIds);
+  let nextInputIndex = 0;
+  for (const includedClaimId of includedClaimIds) {
+    while (nextInputIndex < claims.length && claims[nextInputIndex]!.claimId !== includedClaimId) {
+      nextInputIndex += 1;
+    }
+
+    postcondition(nextInputIndex < claims.length, `included claim ${includedClaimId} must appear in input order`);
+    nextInputIndex += 1;
+  }
+
+  postcondition(
+    conflicts.every((conflict) => !includedSet.has(conflict.excludedClaimId)),
+    "excludedClaimId must not appear in compiled.claimIds",
+  );
+
+  postcondition(
+    [...assertionNameMap.values()].every((claimId) => includedSet.has(claimId)),
+    "assertionNameMap values must reference included claims only",
+  );
+
   const lines: string[] = [];
-  lines.push(`; spec ${specFile}`);
-  lines.push(`; claims ${includedClaimIds.length} (${excludedClaimIds.size} excluded due to conflicts)`);
+  lines.push(`; spec ${escapeCommentLine(specFile)}`);
+  lines.push(`; claims ${String(includedClaimIds.length)} (${String(excludedClaimIds.size)} excluded due to conflicts)`);
   lines.push("");
   lines.push("; --- variable declarations ---");
   lines.push(...variableLines);
@@ -388,51 +405,71 @@ export function compileSpecSmtlib(specFile: string, claims: readonly LogicIrClai
 }
 
 /**
- * Parse Z3 unsat-core output into a list of named assertion labels.
- *
- * @param stdout - Z3 stdout content (expected: line 1 = "unsat", line 2 = "(label1 label2 ...)")
- * @returns array of named assertion labels from the unsat core, or empty if parsing fails
- *
- * @remarks
- * Postcondition: returned labels are the raw strings from Z3 output.
- * Callers map these back to claim IDs via `CompiledSpecSmtlib.assertionNameMap`.
- * Failure modes: none — returns empty array for malformed or unparseable input.
+ * Parse SMT-LIB content back into declarations and assertion expressions.
+ */
+export function parseSmtlibContent(content: string): {
+  readonly declarations: readonly string[];
+  readonly assertionExprs: readonly string[];
+} {
+  const declarations: string[] = [];
+  const assertionExprs: string[] = [];
+
+  for (const rawLine of content.split("\n")) {
+    const line = rawLine.trim();
+    if (line.startsWith("(declare-const") || line.startsWith("(declare-sort") || line.startsWith("(declare-fun")) {
+      declarations.push(line);
+    } else if (line.startsWith("(assert ")) {
+      assertionExprs.push(line.slice("(assert ".length, -1));
+    }
+  }
+
+  return { declarations, assertionExprs };
+}
+
+/**
+ * Parse Z3 unsat-core output into assertion labels.
  */
 export function parseUnsatCore(stdout: string): readonly string[] {
   const lines = stdout.trim().split("\n");
-  // Find the line containing the unsat core (parenthesized list after "unsat").
-  for (let i = 0; i < lines.length; i++) {
-    const line = lines[i]!.trim();
+  for (const candidate of lines) {
+    const line = candidate.trim();
     if (line.startsWith("(") && line.endsWith(")")) {
       const inner = line.slice(1, -1).trim();
-      if (inner.length === 0) {
-        return [];
-      }
-      return inner.split(/\s+/);
+      return inner.length === 0 ? [] : inner.split(/\s+/u);
     }
   }
+
   return [];
 }
 
 /**
- * Check whether two function symbols have identical signatures.
- *
- * @param a - first function symbol to compare
- * @param b - second function symbol to compare
- * @returns true when both functions have the same return sort and identical arg sort lists
- *
- * @remarks
- * Postcondition: returns true iff `a.returns === b.returns` and `a.args` and `b.args`
- * are element-wise equal.
- * Failure modes: none — pure computation.
+ * Sanitize identifier-like assertion tokens.
+ */
+function sanitizeAssertion(expr: string, sanitize: (value: string) => SanitizedClaimId): string {
+  return expr.replace(/[A-Za-z_][A-Za-z0-9_\-.:]*/gu, (token) => sanitize(token));
+}
+
+/**
+ * Escape untrusted comment text so line breaks cannot inject SMT-LIB commands.
+ */
+function escapeCommentLine(value: string): string {
+  return value.replace(/[\r\n]+/gu, " ");
+}
+
+/**
+ * Compare function signatures for exact compatibility.
  */
 function signaturesMatch(a: LogicFunctionSymbol, b: LogicFunctionSymbol): boolean {
-  if (a.returns !== b.returns) return false;
-  if (a.args.length !== b.args.length) return false;
-  for (let i = 0; i < a.args.length; i++) {
-    if (a.args[i] !== b.args[i]) return false;
+  if (a.returns !== b.returns) {
+    return false;
+  }
+  if (a.args.length !== b.args.length) {
+    return false;
+  }
+  for (let index = 0; index < a.args.length; index += 1) {
+    if (a.args[index] !== b.args[index]) {
+      return false;
+    }
   }
   return true;
 }
-
-

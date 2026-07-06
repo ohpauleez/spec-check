@@ -1,39 +1,38 @@
 /**
- * Runs Z3-based satisfiability analysis on formalized spec claims to detect
- * contradictions, tautologies, and unsatisfiable constraint sets.
- *
- * Orchestrates the formal verification pipeline's solver stage.
- * Exports: runLogicAnalysis, SpecClaimGroup.
+ * Runs Z3-based satisfiability analysis on formalized spec claims.
  */
+import { mapBounded } from "../../adapters/concurrency.js";
+import { writeOutputAtomic } from "../../adapters/fs.js";
+import { runZ3Query } from "../../adapters/z3.js";
+import { assertNever, postcondition } from "../assert.js";
+import {
+  toRelativePath,
+  toSmtlibContent,
+  type OutputDirPath,
+  type SanitizedClaimId,
+} from "../branded.js";
 import type { Finding } from "../findings.js";
 import type { LogicIrClaim } from "../logic-ir.js";
-import { runZ3Query } from "../../adapters/z3.js";
-import { mapBounded } from "../../adapters/concurrency.js";
-import { compileSpecSmtlib, parseUnsatCore } from "./smtlib.js";
-import { writeOutputAtomic } from "../../adapters/fs.js";
-import { toRelativePath, toSmtlibContent, type OutputDirPath } from "../branded.js";
+import { runCompletenessCheck, runPairwiseContradictionChecks } from "./logic-analysis-checks.js";
 import { deriveSeverityFromClaims } from "./logic-analysis-sexpr.js";
-import { runPairwiseContradictionChecks, runCompletenessCheck } from "./logic-analysis-checks.js";
+import { compileSpecSmtlib, parseUnsatCore, sanitizeIdentifier, type SpecMergeConflict } from "./smtlib.js";
 
 export type { ParsedImplication } from "./logic-analysis-sexpr.js";
 export {
+  buildDeclarationPreamble,
+  collectVariableDeclarations,
   extractImplications,
+  obligationToSeverity,
   parseImplicationExpr,
   splitSExprParts,
-  collectVariableDeclarations,
-  buildDeclarationPreamble,
-  deriveSeverityFromClaims,
-  obligationToSeverity,
 } from "./logic-analysis-sexpr.js";
-export { runPairwiseContradictionChecks, checkPairContradiction, runCompletenessCheck } from "./logic-analysis-checks.js";
+export { checkPairContradiction, runCompletenessCheck, runPairwiseContradictionChecks } from "./logic-analysis-checks.js";
+
+/** Maximum concurrent Z3 solver invocations during logic analysis. */
+const LOGIC_ANALYSIS_CONCURRENCY_DEFAULT = 4;
 
 /**
- * Output from Z3 logic analysis containing findings and a human-readable report.
- *
- * @remarks
- * Invariant: `findings` includes contradiction, conditional contradiction, completeness gap,
- * solver error, inconclusive, and merge-conflict results.
- * Invariant: `reportMarkdown` is a valid markdown document summarizing all solver outcomes.
+ * Output from logic analysis.
  */
 export interface LogicAnalysisOutput {
   readonly findings: readonly Finding[];
@@ -41,11 +40,7 @@ export interface LogicAnalysisOutput {
 }
 
 /**
- * A group of claims originating from a single spec file.
- *
- * @remarks
- * Invariant: `specFile` is the provenance file path shared by all claims in the group.
- * Invariant: `claims` is non-empty.
+ * Claim group analyzed as one combined SMT-LIB unit.
  */
 export interface SpecClaimGroup {
   readonly specFile: string;
@@ -53,42 +48,20 @@ export interface SpecClaimGroup {
   readonly claims: readonly LogicIrClaim[];
 }
 
-/** Maximum concurrent Z3 solver invocations during logic analysis. */
-const LOGIC_ANALYSIS_CONCURRENCY_DEFAULT = 4;
-
 interface SpecAnalysisResult {
   readonly findings: readonly Finding[];
   readonly reportLines: readonly string[];
 }
 
+interface ClaimIdPreflightIssue {
+  readonly kind: "duplicate_raw_claim_id" | "duplicate_sanitized_claim_id";
+  readonly duplicatedRawClaimIds?: readonly string[];
+  readonly collidingRawClaimIds?: readonly string[];
+  readonly sanitizedClaimId?: SanitizedClaimId;
+}
+
 /**
- * Run Z3 satisfiability analysis on per-spec combined SMT-LIB with bounded concurrency.
- *
- * @param input - analysis configuration bundle
- * @param input.groups - claim groups (one per spec file) to analyze
- * @param input.outputDir - directory for writing SMT-LIB artifact files
- * @param input.z3Path - optional path to Z3 binary; uses system PATH if undefined
- * @param input.concurrency - maximum concurrent Z3 solver invocations (default 4)
- * @returns findings and a markdown report summarizing solver results
- *
- * @remarks
- * Precondition: `input.groups` may be empty (produces empty findings and minimal report).
- * Postcondition: `findings` includes contradiction, conditional contradiction, completeness gap,
- * solver error, inconclusive, and merge-conflict results across all groups.
- * Postcondition: `reportMarkdown` is a valid markdown document summarizing all solver outcomes.
- *
- * Failure modes:
- * - Propagates Z3 subprocess errors from `runZ3Query` if the solver binary is missing or crashes.
- * - Propagates filesystem errors from `writeOutputAtomic` if the output directory is not writable.
- *
- * Each spec file's claims are merged into a single .smt2 file with named assertions
- * and unsat-core support. The global satisfiability check invokes Z3 once per spec.
- * When `unsat`, the unsat-core is parsed to identify the specific conflicting claims.
- * When `sat`, deeper analysis follows: pairwise guard-activation contradiction
- * checks detect conflicts hidden by vacuous truth in conditional assertions, and
- * completeness gap detection identifies states where no conditional rule applies.
- * When Z3 reports errors, a `logic.solver_error` finding is emitted.
- * Finding severity is derived from the highest-obligation claim involved.
+ * Run logic analysis across all claim groups.
  */
 export async function runLogicAnalysis(input: {
   readonly groups: readonly SpecClaimGroup[];
@@ -100,7 +73,7 @@ export async function runLogicAnalysis(input: {
   const reportLines = ["# report_1.logic.md", "", "## Solver Findings", ""];
 
   const results = await mapBounded(input.groups, concurrency, async (group) => {
-    return await analyzeSpecGroup(group, input.outputDir, input.z3Path);
+    return analyzeSpecGroup(group, input.outputDir, input.z3Path);
   });
 
   const findings: Finding[] = [];
@@ -109,142 +82,219 @@ export async function runLogicAnalysis(input: {
     reportLines.push(...result.reportLines);
   }
 
-  const reportMarkdown = `${reportLines.join("\n")}\n`;
-  return { findings, reportMarkdown };
+  return {
+    findings,
+    reportMarkdown: `${reportLines.join("\n")}\n`,
+  };
 }
 
 /**
- * Analyze a single spec group: compile combined SMT-LIB, invoke Z3, parse results.
+ * Check compile-group claim ID uniqueness before compilation or solver work.
  *
- * @param group - spec file claim group to analyze
- * @param outputDir - directory for writing SMT-LIB artifact files
- * @param z3Path - optional path to Z3 binary; uses system PATH if undefined
- * @returns findings and report lines for this spec group
+ * @param claims - claims in one compile group
+ * @returns one structural issue when the group is invalid; otherwise `null`
  *
  * @remarks
- * Precondition: `group.claims` is non-empty.
- * Postcondition: artifact files (.smt2, .stdout.txt, .stderr.txt) are written atomically.
- * After the global satisfiability check, SAT results trigger pairwise guard-activation
- * contradiction checks and completeness gap detection. Claims excluded by merge
- * conflicts are filtered out of the deeper analysis.
+ * Preconditions:
+ * - claims are grouped by one logical compile key.
  *
- * Failure modes:
- * - Propagates Z3 subprocess errors from `runZ3Query`.
- * - Propagates filesystem errors from `writeOutputAtomic`.
+ * Postconditions:
+ * - detects duplicate raw claim IDs;
+ * - detects duplicate sanitized claim IDs as defense-in-depth;
+ * - returns at most one issue per group (first failing check).
+ *
+ * @example
+ * ```ts
+ * const issue = preflightGroupClaimIds(claims);
+ * if (issue !== null) {
+ *   // reject group as logic.invalid_group
+ * }
+ * ```
  */
+export function preflightGroupClaimIds(
+  claims: readonly LogicIrClaim[],
+  sanitizeClaimId: (claimId: string) => SanitizedClaimId = sanitizeIdentifier,
+): ClaimIdPreflightIssue | null {
+  const rawCounts = new Map<string, number>();
+  for (const claim of claims) {
+    rawCounts.set(claim.claimId, (rawCounts.get(claim.claimId) ?? 0) + 1);
+  }
+
+  const duplicatedRawClaimIds = [...rawCounts.entries()]
+    .filter(([, count]) => count > 1)
+    .map(([claimId]) => claimId)
+    .sort((left, right) => left.localeCompare(right));
+
+  if (duplicatedRawClaimIds.length > 0) {
+    return {
+      kind: "duplicate_raw_claim_id",
+      duplicatedRawClaimIds,
+    };
+  }
+
+  const sanitizedToRaw = new Map<SanitizedClaimId, string>();
+  for (const claim of claims) {
+    const sanitized = sanitizeClaimId(claim.claimId);
+    const existingRaw = sanitizedToRaw.get(sanitized);
+    if (existingRaw !== undefined && existingRaw !== claim.claimId) {
+      return {
+        kind: "duplicate_sanitized_claim_id",
+        collidingRawClaimIds: [existingRaw, claim.claimId],
+        sanitizedClaimId: sanitized,
+      };
+    }
+
+    sanitizedToRaw.set(sanitized, claim.claimId);
+  }
+
+  return null;
+}
+
+/**
+ * Convert one compile-time merge conflict into a `logic.merge_conflict` finding.
+ *
+ * @param specFile - provenance file for the compile group
+ * @param conflict - merge conflict emitted by `compileSpecSmtlib`
+ * @returns stable finding shape with severity `error`
+ */
+export function conflictToFinding(specFile: string, conflict: SpecMergeConflict): Finding {
+  switch (conflict.kind) {
+    case "function_signature_mismatch":
+      return {
+        severity: "error",
+        category: "logic.merge_conflict",
+        provenance: { file: specFile },
+        description: `Function signature mismatch on sanitized symbol ${conflict.sanitizedName}`,
+        rationale: "Function declarations that share one sanitized symbol must agree on signature to keep merged SMT-LIB well-formed and analyzable.",
+        evidence: [
+          { kind: "kind", value: conflict.kind },
+          { kind: "sanitized_name", value: conflict.sanitizedName },
+          { kind: "existing_function_name", value: conflict.existingFunctionName },
+          { kind: "conflicting_function_name", value: conflict.conflictingFunctionName },
+          { kind: "existing_claim_id", value: conflict.existingClaimId },
+          { kind: "excluded_claim_id", value: conflict.excludedClaimId },
+          { kind: "claim_ids", value: conflict.claimIds.join(", ") },
+        ],
+        relatedClaimIdentifiers: [conflict.existingClaimId, conflict.excludedClaimId],
+      };
+    case "variable_sort_mismatch":
+      return {
+        severity: "error",
+        category: "logic.merge_conflict",
+        provenance: { file: specFile },
+        description: `Variable sort mismatch on sanitized symbol ${conflict.sanitizedName}`,
+        rationale: "Variable declarations that share one sanitized symbol must agree on exact sort to prevent hidden type aliasing in solver input.",
+        evidence: [
+          { kind: "kind", value: conflict.kind },
+          { kind: "sanitized_name", value: conflict.sanitizedName },
+          { kind: "existing_variable_name", value: conflict.existingVariableName },
+          { kind: "conflicting_variable_name", value: conflict.conflictingVariableName },
+          { kind: "expected_sort", value: conflict.expectedSort },
+          { kind: "conflicting_sort", value: conflict.conflictingSort },
+          { kind: "existing_claim_id", value: conflict.existingClaimId },
+          { kind: "excluded_claim_id", value: conflict.excludedClaimId },
+          { kind: "claim_ids", value: conflict.claimIds.join(", ") },
+        ],
+        relatedClaimIdentifiers: [conflict.existingClaimId, conflict.excludedClaimId],
+      };
+    case "symbol_kind_collision":
+      return {
+        severity: "error",
+        category: "logic.merge_conflict",
+        provenance: { file: specFile },
+        description: `Symbol kind collision on sanitized symbol ${conflict.sanitizedName}`,
+        rationale: "A sanitized symbol cannot be declared as both variable and function in the same combined SMT-LIB namespace.",
+        evidence: [
+          { kind: "kind", value: conflict.kind },
+          { kind: "sanitized_name", value: conflict.sanitizedName },
+          { kind: "existing_symbol_name", value: conflict.existingSymbolName },
+          { kind: "existing_symbol_kind", value: conflict.existingSymbolKind },
+          { kind: "conflicting_symbol_name", value: conflict.conflictingSymbolName },
+          { kind: "conflicting_symbol_kind", value: conflict.conflictingSymbolKind },
+          { kind: "existing_claim_id", value: conflict.existingClaimId },
+          { kind: "excluded_claim_id", value: conflict.excludedClaimId },
+          { kind: "claim_ids", value: conflict.claimIds.join(", ") },
+        ],
+        relatedClaimIdentifiers: [conflict.existingClaimId, conflict.excludedClaimId],
+      };
+    default:
+      return assertNever(conflict);
+  }
+}
+
 async function analyzeSpecGroup(
   group: SpecClaimGroup,
   outputDir: OutputDirPath,
   z3Path: string | undefined,
 ): Promise<SpecAnalysisResult> {
-  // --- Decision tree overview ---
-  // This function implements a Z3-based satisfiability decision tree:
-  //   1. Compile all claims from a spec group into a single SMT-LIB query.
-  //   2. Invoke Z3 to check satisfiability of the combined assertion set.
-  //   3. Branch on the solver result:
-  //      - SAT: The spec is internally consistent (a satisfying model exists).
-  //        Proceed to deeper analyses — pairwise contradiction checks on
-  //        conditional guards and completeness gap detection — because global
-  //        SAT can mask conflicts hidden behind vacuously-true conditionals.
-  //      - UNSAT: A contradiction exists among the claims. Re-run with
-  //        unsat-core production to extract the minimal conflicting subset,
-  //        enabling targeted diagnosis of which claims conflict.
-  //      - Error: Z3 rejected the input (malformed SMT-LIB). No logical
-  //        conclusion is possible; report as a solver error.
-  //      - Timeout/Unknown: The solver exhausted resources without a verdict.
-  //        No conclusion is possible; report as inconclusive.
-  //
-  // Pre-step: Claims involved in merge conflicts (incompatible signatures)
-  // are excluded before any solver work — they would make the SMT-LIB
-  // unsound if included.
-
-  const compiled = compileSpecSmtlib(group.specFile, group.claims);
   const findings: Finding[] = [];
   const reportLines: string[] = [];
-  const excludedClaimIdsSet = new Set(
-    compiled.conflicts.flatMap((c) => c.claimIds),
-  );
 
-  // Emit findings for any merge conflicts detected during compilation.
-  for (const conflict of compiled.conflicts) {
-    findings.push({
-      severity: "error",
-      category: "logic.merge_conflict",
-      provenance: { file: group.specFile },
-      description: `Function "${conflict.functionName}" has incompatible signatures across claims`,
-      rationale: "Claims with incompatible function signatures cannot be jointly analyzed — the spec must be consistent in its declarations before logical properties can be checked.",
-      evidence: [
-        { kind: "claim_ids", value: conflict.claimIds.join(", ") },
-      ],
-      relatedClaimIdentifiers: [...conflict.claimIds],
-    });
-    reportLines.push(
-      `- ${group.specFile}: merge conflict on "${conflict.functionName}" between ${conflict.claimIds.join(", ")}`,
-    );
+  let compileInvoked = false;
+  let artifactWriteInvoked = false;
+  let solverInvoked = false;
+
+  const preflightIssue = preflightGroupClaimIds(group.claims);
+  if (preflightIssue !== null) {
+    const invalidGroupFinding = buildInvalidGroupFinding(group.specFile, group.claims, preflightIssue);
+    findings.push(invalidGroupFinding);
+    reportLines.push(`- ${group.specFile}: invalid compile group (${preflightIssue.kind})`);
+
+    postcondition(compileInvoked === false, "invalid group must not invoke compileSpecSmtlib");
+    postcondition(artifactWriteInvoked === false, "invalid group must not write solver artifacts");
+    postcondition(solverInvoked === false, "invalid group must not invoke runZ3Query");
+    return { findings, reportLines };
   }
 
-  // Skip Z3 if no claims survived merging.
+  compileInvoked = true;
+  const compiled = compileSpecSmtlib(group.specFile, group.claims);
+
+  for (const conflict of compiled.conflicts) {
+    const finding = conflictToFinding(group.specFile, conflict);
+    findings.push(finding);
+    reportLines.push(`- ${group.specFile}: merge conflict (${conflict.kind}) between ${conflict.claimIds.join(", ")}`);
+  }
+
   if (compiled.claimIds.length === 0) {
     reportLines.push(`- ${group.specFile}: no claims to analyze (all excluded due to conflicts)`);
     return { findings, reportLines };
   }
 
-  // Goal: Determine global satisfiability of the combined claim set.
-  // Invariant: compiled.smtlib is a well-formed SMT-LIB string with named
-  // assertions (one per surviving claim) but no (check-sat) directive yet.
-  // Two-phase Z3 approach:
-  // Phase 1: check satisfiability without unsat-core overhead.
-  // Phase 2 (only on UNSAT): re-run with (set-option :produce-unsat-cores true)
-  //   and (get-unsat-core) to identify which claims conflict.
-  // This is safe because Phase 1 is lightweight and Phase 2 is conditional.
-  const phase1Query = toSmtlibContent(`${compiled.smtlib}(check-sat)\n`);
-  const result = await runZ3Query({
-    smtlib: phase1Query,
+  const artifactBase = `smt/${group.artifactKey ?? compiled.sanitizedSpecId}`;
+
+  solverInvoked = true;
+  const phase1Result = await runZ3Query({
+    smtlib: toSmtlibContent(`${compiled.smtlib}(check-sat)\n`),
     timeoutMs: 30_000,
     ...(z3Path === undefined ? {} : { z3Path }),
   });
 
-  const artifactBase = `smt/${group.artifactKey ?? compiled.sanitizedSpecId}`;
-
-  if (result.kind === "unsat") {
-    // UNSAT branch — Goal: Extract the minimal conflicting claim subset.
-    // A contradiction exists in the combined assertions; the spec cannot be
-    // simultaneously satisfied. Phase 2 re-runs with unsat-core tracking so
-    // we can pinpoint which specific claims are responsible.
-    // Invariant: The UNSAT result guarantees at least two claims conflict,
-    // so the core extraction in Phase 2 will be non-vacuous.
-    // Phase 2: Re-run with unsat-core tracking to identify conflicting claims.
-    const phase2Query = toSmtlibContent(
-      `(set-option :produce-unsat-cores true)\n${compiled.smtlib}(check-sat)\n(get-unsat-core)\n`,
-    );
+  if (phase1Result.kind === "unsat") {
+    solverInvoked = true;
     const phase2Result = await runZ3Query({
-      smtlib: phase2Query,
+      smtlib: toSmtlibContent(`(set-option :produce-unsat-cores true)\n${compiled.smtlib}(check-sat)\n(get-unsat-core)\n`),
       timeoutMs: 30_000,
       ...(z3Path === undefined ? {} : { z3Path }),
     });
 
-    // Write artifact files (use phase 2 stdout since it contains the unsat core).
+    artifactWriteInvoked = true;
     await Promise.all([
       writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.smt2`), compiled.smtlib),
       writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stdout.txt`), phase2Result.stdout),
       writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stderr.txt`), phase2Result.stderr),
     ]);
 
-    // Parse unsat core to identify conflicting claims.
     const coreLabels = parseUnsatCore(phase2Result.stdout);
     const conflictingClaimIds = resolveCoreToClaims(coreLabels, compiled.assertionNameMap);
     const severity = deriveSeverityFromClaims(conflictingClaimIds, group.claims);
-
-    const claimList = conflictingClaimIds.length > 0
-      ? conflictingClaimIds.join(", ")
-      : "(core not available)";
+    const claimList = conflictingClaimIds.length > 0 ? conflictingClaimIds.join(", ") : "(core not available)";
 
     findings.push({
       severity,
       category: "logic.contradiction",
       provenance: { file: group.specFile },
       description: `Mutual contradiction among claims: ${claimList}`,
-      rationale: "A contradiction means the combined spec is logically impossible to satisfy — no implementation can simultaneously fulfill all claims, indicating a specification error that must be resolved.",
+      rationale: "A contradiction means no model can satisfy the surviving claim set simultaneously.",
       evidence: [
         { kind: "smtlib", value: `${artifactBase}.smt2` },
         { kind: "unsat_core", value: claimList },
@@ -252,34 +302,29 @@ async function analyzeSpecGroup(
       ],
       ...(conflictingClaimIds.length > 0 ? { relatedClaimIdentifiers: conflictingClaimIds } : {}),
     });
-    reportLines.push(
-      `- ${group.specFile}: UNSAT (contradiction) — core: ${claimList}`,
-      `  - evidence: ${artifactBase}.smt2, ${artifactBase}.stdout.txt`,
-    );
-  } else if (result.kind === "error") {
-    // Error branch — Goal: Report that no logical conclusion can be drawn.
-    // Z3 rejected the SMT-LIB input, meaning the formalization is malformed.
-    // No satisfiability verdict is available, so we cannot confirm or deny
-    // consistency. This is a gap in the correctness argument, not a spec defect.
-    // Next step (writing artifacts) is safe because the error is deterministic.
-    // Write artifact files for error case.
+
+    reportLines.push(`- ${group.specFile}: UNSAT (contradiction) — core: ${claimList}`);
+    return { findings, reportLines };
+  }
+
+  if (phase1Result.kind === "error") {
+    artifactWriteInvoked = true;
     await Promise.all([
       writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.smt2`), compiled.smtlib),
-      writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stdout.txt`), result.stdout),
-      writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stderr.txt`), result.stderr),
+      writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stdout.txt`), phase1Result.stdout),
+      writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stderr.txt`), phase1Result.stderr),
     ]);
 
-    // Z3 rejected the input — formalization produced invalid SMT-LIB.
-    const errorDetail = (result.errorCount ?? 0) > 0
-      ? `Z3 emitted ${String(result.errorCount)} error(s) — formalization produced invalid SMT-LIB`
-      : `Z3 rejected the input — formalization may be invalid`;
+    const errorDetail = (phase1Result.errorCount ?? 0) > 0
+      ? `Z3 emitted ${String(phase1Result.errorCount)} error(s)`
+      : "Z3 rejected the input";
 
     findings.push({
       severity: "error",
       category: "logic.solver_error",
       provenance: { file: group.specFile },
-      description: errorDetail,
-      rationale: "If Z3 rejects the input, the formalization is malformed and no logical guarantees can be derived — the correctness case has a gap until the formalization is fixed.",
+      description: `${errorDetail} — formalization produced invalid SMT-LIB`,
+      rationale: "Solver rejection means the formal model is malformed and cannot support a correctness conclusion.",
       evidence: [
         { kind: "smtlib", value: `${artifactBase}.smt2` },
         { kind: "solver_stdout", value: `${artifactBase}.stdout.txt` },
@@ -287,30 +332,25 @@ async function analyzeSpecGroup(
       ],
       relatedClaimIdentifiers: [...compiled.claimIds],
     });
-    reportLines.push(
-      `- ${group.specFile}: ERROR (${errorDetail})`,
-      `  - evidence: ${artifactBase}.smt2, ${artifactBase}.stdout.txt`,
-    );
-  } else if (result.kind === "timeout" || result.kind === "unknown") {
-    // Timeout/Unknown branch — Goal: Report that no conclusion is possible.
-    // The solver could not determine satisfiability within resource limits.
-    // Neither consistency nor contradiction is established — the result is
-    // genuinely inconclusive. The spec may or may not be consistent.
-    // Invariant: We do not promote this to an error; absence of evidence
-    // is not evidence of absence.
-    // Write artifact files for inconclusive case.
+
+    reportLines.push(`- ${group.specFile}: ERROR (${errorDetail})`);
+    return { findings, reportLines };
+  }
+
+  if (phase1Result.kind === "timeout" || phase1Result.kind === "unknown") {
+    artifactWriteInvoked = true;
     await Promise.all([
       writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.smt2`), compiled.smtlib),
-      writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stdout.txt`), result.stdout),
-      writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stderr.txt`), result.stderr),
+      writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stdout.txt`), phase1Result.stdout),
+      writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stderr.txt`), phase1Result.stderr),
     ]);
 
     findings.push({
       severity: "warning",
       category: "logic.inconclusive",
       provenance: { file: group.specFile },
-      description: `Spec analysis inconclusive: ${result.kind}`,
-      rationale: "An inconclusive result means the solver could not determine satisfiability within resource limits — the absence of a contradiction is not confirmed, leaving a gap in the correctness argument.",
+      description: `Spec analysis inconclusive: ${phase1Result.kind}`,
+      rationale: "Solver resource limits prevented a satisfiability verdict.",
       evidence: [
         { kind: "smtlib", value: `${artifactBase}.smt2` },
         { kind: "solver_stdout", value: `${artifactBase}.stdout.txt` },
@@ -318,72 +358,89 @@ async function analyzeSpecGroup(
       ],
       relatedClaimIdentifiers: [...compiled.claimIds],
     });
-    reportLines.push(
-      `- ${group.specFile}: ${result.kind} (inconclusive)`,
-      `  - evidence: ${artifactBase}.smt2, ${artifactBase}.stdout.txt`,
-    );
-  } else {
-    // SAT branch — Goal: The spec is internally consistent; proceed to find
-    // subtle issues that global SAT does not rule out.
-    // Invariant: A satisfying model exists for the combined assertions, so the
-    // claims are jointly realizable. However, conditional assertions may be
-    // vacuously true (their guards never activate together), hiding pairwise
-    // conflicts. Completeness gaps (states where no conditional rule fires)
-    // are also invisible to the global check.
-    // Next steps (pairwise + completeness) are safe because they operate on
-    // the surviving (non-excluded) claims independently of the global model.
-    // SAT — no global contradiction. Write artifacts and proceed with deeper analysis.
-    await Promise.all([
-      writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.smt2`), compiled.smtlib),
-      writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stdout.txt`), result.stdout),
-      writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stderr.txt`), result.stderr),
-    ]);
 
-    reportLines.push(`- ${group.specFile}: SAT (${compiled.claimIds.length} claims globally consistent)`);
+    reportLines.push(`- ${group.specFile}: ${phase1Result.kind} (inconclusive)`);
+    return { findings, reportLines };
+  }
 
-    // Run pairwise guard-activation contradiction checks.
-    const pairwiseFindings = await runPairwiseContradictionChecks({
-      claims: group.claims.filter((c) => !excludedClaimIdsSet.has(c.claimId)),
-      specFile: group.specFile,
-      z3Path,
-    });
-    findings.push(...pairwiseFindings);
-    if (pairwiseFindings.length > 0) {
-      reportLines.push(`  - pairwise contradictions found: ${String(pairwiseFindings.length)}`);
-    }
+  artifactWriteInvoked = true;
+  await Promise.all([
+    writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.smt2`), compiled.smtlib),
+    writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stdout.txt`), phase1Result.stdout),
+    writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stderr.txt`), phase1Result.stderr),
+  ]);
 
-    // Run completeness gap check.
-    const gapFindings = await runCompletenessCheck({
-      claims: group.claims.filter((c) => !excludedClaimIdsSet.has(c.claimId)),
-      specFile: group.specFile,
-      z3Path,
-    });
-    findings.push(...gapFindings);
-    if (gapFindings.length > 0) {
-      reportLines.push(`  - completeness gaps found: ${String(gapFindings.length)}`);
-    }
+  reportLines.push(`- ${group.specFile}: SAT (${String(compiled.claimIds.length)} claims globally consistent)`);
+
+  const includedClaimIds = new Set(compiled.claimIds);
+  const survivingClaims = group.claims.filter((claim) => includedClaimIds.has(claim.claimId));
+
+  const pairwiseFindings = await runPairwiseContradictionChecks({
+    claims: survivingClaims,
+    specFile: group.specFile,
+    z3Path,
+  });
+  findings.push(...pairwiseFindings);
+  if (pairwiseFindings.length > 0) {
+    reportLines.push(`  - pairwise contradictions found: ${String(pairwiseFindings.length)}`);
+  }
+
+  const completenessFindings = await runCompletenessCheck({
+    claims: survivingClaims,
+    specFile: group.specFile,
+    z3Path,
+  });
+  findings.push(...completenessFindings);
+  if (completenessFindings.length > 0) {
+    reportLines.push(`  - completeness gaps found: ${String(completenessFindings.length)}`);
   }
 
   return { findings, reportLines };
 }
 
-/**
- * Map unsat-core assertion labels back to unique claim IDs.
- *
- * @param coreLabels - assertion labels extracted from Z3 unsat-core output
- * @param assertionNameMap - mapping from assertion labels to their source claim IDs
- * @returns deduplicated array of claim IDs referenced by the unsat core
- *
- * @remarks
- * Precondition: `assertionNameMap` contains all labels emitted during compilation.
- * Postcondition: returned array contains only claim IDs present in `assertionNameMap` values.
- * Postcondition: each claim ID appears at most once (deduplicated via Set).
- * Failure modes: none — pure computation. Unknown labels are silently skipped.
- */
-function resolveCoreToClaims(
-  coreLabels: readonly string[],
-  assertionNameMap: ReadonlyMap<string, string>,
-): string[] {
+function buildInvalidGroupFinding(
+  specFile: string,
+  claims: readonly LogicIrClaim[],
+  issue: ClaimIdPreflightIssue,
+): Finding {
+  if (issue.kind === "duplicate_raw_claim_id") {
+    const duplicatedIds = issue.duplicatedRawClaimIds ?? [];
+    const affected = claims
+      .filter((claim) => duplicatedIds.includes(claim.claimId))
+      .map((claim) => claim.claimId);
+
+    return {
+      severity: "error",
+      category: "logic.invalid_group",
+      provenance: { file: specFile },
+      description: `Compile group has duplicate raw claim IDs: ${duplicatedIds.join(", ")}`,
+      rationale: "Claim IDs must be unique within one compile group so inclusion, assertion labels, and evidence mapping remain unambiguous.",
+      evidence: [
+        { kind: "reason", value: issue.kind },
+        { kind: "duplicated_raw_ids", value: duplicatedIds.join(", ") },
+        { kind: "affected_claims", value: affected.join(", ") },
+      ],
+      relatedClaimIdentifiers: affected,
+    };
+  }
+
+  const collidingRawIds = issue.collidingRawClaimIds ?? [];
+  return {
+    severity: "error",
+    category: "logic.invalid_group",
+    provenance: { file: specFile },
+    description: `Compile group has colliding sanitized claim IDs: ${collidingRawIds.join(", ")}`,
+    rationale: "Even with injective sanitization, compile-group safety enforces sanitized claim-ID uniqueness before any compile or solver work.",
+    evidence: [
+      { kind: "reason", value: issue.kind },
+      { kind: "colliding_raw_ids", value: collidingRawIds.join(", ") },
+      { kind: "sanitized_claim_id", value: issue.sanitizedClaimId ?? "" },
+    ],
+    relatedClaimIdentifiers: collidingRawIds,
+  };
+}
+
+function resolveCoreToClaims(coreLabels: readonly string[], assertionNameMap: ReadonlyMap<string, string>): string[] {
   const claimIds = new Set<string>();
   for (const label of coreLabels) {
     const claimId = assertionNameMap.get(label);

@@ -1,7 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { traceSpec } from "../support/spec-trace.js";
-import { runLogicAnalysis, type SpecClaimGroup } from "../../src/domain/formal/logic-analysis.js";
+import {
+  conflictToFinding,
+  preflightGroupClaimIds,
+  runLogicAnalysis,
+  type SpecClaimGroup,
+} from "../../src/domain/formal/logic-analysis.js";
 import type { LogicIrClaim } from "../../src/domain/logic-ir.js";
 import { toClaimId, toOutputDirPath } from "../../src/domain/branded.js";
 
@@ -482,5 +487,80 @@ describe("logic-analysis contract (per-spec combined)", () => {
 
     const gapFindings = output.findings.filter((f) => f.category === "logic.completeness_gap");
     expect(gapFindings.length).toBe(0);
+  });
+
+  it("rejects duplicate raw claim IDs as invalid group before compile and solver work", async () => {
+    traceSpec("FLA-SPEC-DUPLICATE-CLAIM-ID");
+    const { runZ3Query } = await import("../../src/adapters/z3.js");
+    const { writeOutputAtomic } = await import("../../src/adapters/fs.js");
+
+    const output = await runLogicAnalysis({
+      groups: [makeGroup("specs/test/spec.md", [
+        makeClaim("R-DUP", "mandatory"),
+        makeClaim("R-DUP", "advisory"),
+      ])],
+      outputDir: toOutputDirPath("/tmp/test-output"),
+    });
+
+    expect(output.findings).toHaveLength(1);
+    expect(output.findings[0]!.category).toBe("logic.invalid_group");
+    expect(vi.mocked(runZ3Query)).not.toHaveBeenCalled();
+    expect(vi.mocked(writeOutputAtomic)).not.toHaveBeenCalled();
+  });
+
+  it("maps each merge conflict kind to merge_conflict finding with stable evidence", () => {
+    traceSpec("FLA-SPEC-CONFLICT", "FLA-SPEC-VARSORT-CONFLICT", "FLA-SPEC-SYMKIND-CONFLICT");
+
+    const functionConflict = conflictToFinding("specs/test/spec.md", {
+      kind: "function_signature_mismatch",
+      sanitizedName: "f" as never,
+      existingFunctionName: "f",
+      conflictingFunctionName: "f",
+      existingClaimId: "R1",
+      excludedClaimId: "R2",
+      claimIds: ["R1", "R2"],
+    });
+    expect(functionConflict.category).toBe("logic.merge_conflict");
+    expect(functionConflict.severity).toBe("error");
+
+    const variableConflict = conflictToFinding("specs/test/spec.md", {
+      kind: "variable_sort_mismatch",
+      sanitizedName: "v" as never,
+      existingVariableName: "v",
+      conflictingVariableName: "v",
+      expectedSort: "Bool",
+      conflictingSort: "Int",
+      existingClaimId: "R1",
+      excludedClaimId: "R2",
+      claimIds: ["R1", "R2"],
+    });
+    expect(variableConflict.category).toBe("logic.merge_conflict");
+    expect(variableConflict.evidence.some((item) => item.kind === "expected_sort")).toBe(true);
+
+    const symbolKindConflict = conflictToFinding("specs/test/spec.md", {
+      kind: "symbol_kind_collision",
+      sanitizedName: "s" as never,
+      existingSymbolName: "s",
+      existingSymbolKind: "variable",
+      conflictingSymbolName: "s",
+      conflictingSymbolKind: "function",
+      existingClaimId: "R1",
+      excludedClaimId: "R2",
+      claimIds: ["R1", "R2"],
+    });
+    expect(symbolKindConflict.category).toBe("logic.merge_conflict");
+    expect(symbolKindConflict.evidence.some((item) => item.kind === "existing_symbol_kind")).toBe(true);
+  });
+
+  it("detects constructed sanitized-id collision in preflight", () => {
+    traceSpec("FLA-SPEC-DUPLICATE-CLAIM-ID");
+    const claims = [
+      makeClaim("RAW-1", "mandatory"),
+      makeClaim("RAW-2", "mandatory"),
+    ];
+
+    const issue = preflightGroupClaimIds(claims, () => "SAME" as never);
+    expect(issue).not.toBeNull();
+    expect(issue?.kind).toBe("duplicate_sanitized_claim_id");
   });
 });

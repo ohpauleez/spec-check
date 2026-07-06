@@ -93,7 +93,8 @@ export type CapabilityName = string & { readonly __brand: "CapabilityName" };
  *
  * @remarks
  * Invariant: matches `^[A-Za-z_][A-Za-z0-9_]*$` (valid SMT-LIB identifier).
- * Invariant: produced only by the `sanitizeIdentifier()` function.
+ * Invariant: produced only by `sanitizeIdentifier()` using injective fixed-width
+ * six-digit escapes (`_` + `HEX6`) for all non-`[A-Za-z0-9]` code points.
  * Invariant: a reversible mapping comment is emitted alongside for traceability.
  * Used exclusively for SMT-LIB file naming and symbol generation.
  */

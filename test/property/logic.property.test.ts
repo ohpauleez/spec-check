@@ -4,7 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import { traceSpec } from "../support/spec-trace.js";
 import { neutralizeMarkdownInline } from "../../src/domain/reporting/render.js";
 import { buildEquivalenceClusters } from "../../src/domain/formal/clustering.js";
-import { preflightGroupClaimIds, runLogicAnalysis, type SpecClaimGroup } from "../../src/domain/formal/logic-analysis.js";
+import { preflightGroupClaimIds, runLogicAnalysis } from "../../src/domain/formal/logic-analysis.js";
 import { compileSpecSmtlib, compileSmtlib, sanitizeIdentifier } from "../../src/domain/formal/smtlib.js";
 import { toClaimId, toOutputDirPath } from "../../src/domain/branded.js";
 import type { LogicFunctionSymbol, LogicIrClaim, LogicSort } from "../../src/domain/logic-ir.js";
@@ -53,8 +53,6 @@ interface ClaimState {
   readonly nextClaimCounter: number;
   readonly hasReorderedOrRemoved: boolean;
 }
-
-const sortArb = fc.constantFrom<LogicSort>("Bool", "Int", "Real", "String");
 
 const removeClaimArb: fc.Arbitrary<ClaimOperation> = fc
   .record({ indexSeed: fc.integer({ min: 0, max: 1_000_000 }) })

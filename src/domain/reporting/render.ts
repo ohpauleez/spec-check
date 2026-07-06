@@ -37,7 +37,7 @@ import { toRelativePath, type OutputDirPath } from "../branded.js";
 export function neutralizeMarkdownInline(value: string): string {
   const escapedInline = value
     .replace(/\\/gu, "\\\\")
-    .replace(/([\[\]\(\)\*`_\|])/gu, "\\$1");
+    .replace(/([[\]()*`_|])/gu, "\\$1");
 
   const lines = escapedInline.split("\n");
   const neutralizedLines = lines.map((line) => {

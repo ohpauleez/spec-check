@@ -306,6 +306,9 @@ async function analyzeSpecGroup(
 
   if (compiled.claimIds.length === 0) {
     reportLines.push(`- ${group.specFile}: no claims to analyze (all excluded due to conflicts)`);
+    postcondition(compileInvoked === true, "no-claims exit must have invoked compileSpecSmtlib");
+    postcondition(solverInvoked === false, "no-claims exit must not invoke runZ3Query");
+    postcondition(artifactWriteInvoked === false, "no-claims exit must not write solver artifacts");
     return { findings, reportLines };
   }
 
@@ -353,6 +356,9 @@ async function analyzeSpecGroup(
     });
 
     reportLines.push(`- ${group.specFile}: UNSAT (contradiction) — core: ${claimList}`);
+    postcondition(compileInvoked === true, "unsat exit must have invoked compileSpecSmtlib");
+    postcondition(solverInvoked === true, "unsat exit must have invoked runZ3Query");
+    postcondition(artifactWriteInvoked === true, "unsat exit must have written solver artifacts");
     return { findings, reportLines };
   }
 
@@ -383,6 +389,9 @@ async function analyzeSpecGroup(
     });
 
     reportLines.push(`- ${group.specFile}: ERROR (${errorDetail})`);
+    postcondition(compileInvoked === true, "error exit must have invoked compileSpecSmtlib");
+    postcondition(solverInvoked === true, "error exit must have invoked runZ3Query");
+    postcondition(artifactWriteInvoked === true, "error exit must have written solver artifacts");
     return { findings, reportLines };
   }
 
@@ -409,6 +418,9 @@ async function analyzeSpecGroup(
     });
 
     reportLines.push(`- ${group.specFile}: ${phase1Result.kind} (inconclusive)`);
+    postcondition(compileInvoked === true, "inconclusive exit must have invoked compileSpecSmtlib");
+    postcondition(solverInvoked === true, "inconclusive exit must have invoked runZ3Query");
+    postcondition(artifactWriteInvoked === true, "inconclusive exit must have written solver artifacts");
     return { findings, reportLines };
   }
 
@@ -444,6 +456,9 @@ async function analyzeSpecGroup(
     reportLines.push(`  - completeness gaps found: ${String(completenessFindings.length)}`);
   }
 
+  postcondition(compileInvoked === true, "SAT exit must have invoked compileSpecSmtlib");
+  postcondition(solverInvoked === true, "SAT exit must have invoked runZ3Query");
+  postcondition(artifactWriteInvoked === true, "SAT exit must have written solver artifacts");
   return { findings, reportLines };
 }
 

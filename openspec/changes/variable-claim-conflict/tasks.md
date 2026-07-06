@@ -221,18 +221,18 @@
 
 ## 6. State-Machine and Security Property Tests
 
-- [ ] 6.1 Expand `test/property/logic.property.test.ts` to model an ordered claim-list state, reference declaration registry keyed by sanitized symbol, included/excluded IDs, first-conflict evidence, and duplicate-ID preflight state.
-- [ ] 6.2 Implement generated commands `appendCompatibleClaim`, `appendVariableSortConflict`, `appendFunctionSignatureConflict`, `appendSymbolKindConflict`, `appendSameClaimSanitizerCollision`, `appendDuplicateClaimId`, `removeClaim`, and `reorderClaims`.
-- [ ] 6.3 Assert determinism by comparing two `compileSpecSmtlib()` calls on the same generated state for identical conflicts, `claimIds`, assertion maps, and SMT-LIB text.
-- [ ] 6.4 Assert model/implementation agreement for included IDs, excluded IDs, conflict kinds, first-conflict evidence, and surviving declaration table.
-- [ ] 6.5 Assert inclusion partition: with unique raw claim IDs, each claim is either included or appears as a conflict's `excludedClaimId`, never both and never neither.
-- [ ] 6.6 Assert no surviving disagreement: included claims never have one sanitized symbol with two sorts, two signatures, or two declaration kinds.
-- [ ] 6.7 Assert positional first-wins by lowest-index scan: the surviving declaration for each symbol is contributed by the lowest-index compatible claimant, and every later incompatible declarant points back to that first claimant.
-- [ ] 6.8 Assert append-compatible monotonicity while allowing insertion/reorder histories to be non-monotonic because first-wins is positional.
-- [ ] 6.9 Assert function-conflict regression scope for histories with function conflicts and no variable/kind conflicts.
+- [x] 6.1 Expand `test/property/logic.property.test.ts` to model an ordered claim-list state, reference declaration registry keyed by sanitized symbol, included/excluded IDs, first-conflict evidence, and duplicate-ID preflight state.
+- [x] 6.2 Implement generated commands `appendCompatibleClaim`, `appendVariableSortConflict`, `appendFunctionSignatureConflict`, `appendSymbolKindConflict`, `appendSameClaimSanitizerCollision`, `appendDuplicateClaimId`, `removeClaim`, and `reorderClaims`.
+- [x] 6.3 Assert determinism by comparing two `compileSpecSmtlib()` calls on the same generated state for identical conflicts, `claimIds`, assertion maps, and SMT-LIB text.
+- [x] 6.4 Assert model/implementation agreement for included IDs, excluded IDs, conflict kinds, first-conflict evidence, and surviving declaration table.
+- [x] 6.5 Assert inclusion partition: with unique raw claim IDs, each claim is either included or appears as a conflict's `excludedClaimId`, never both and never neither.
+- [x] 6.6 Assert no surviving disagreement: included claims never have one sanitized symbol with two sorts, two signatures, or two declaration kinds.
+- [x] 6.7 Assert positional first-wins by lowest-index scan: the surviving declaration for each symbol is contributed by the lowest-index compatible claimant, and every later incompatible declarant points back to that first claimant.
+- [x] 6.8 Assert append-compatible monotonicity while allowing insertion/reorder histories to be non-monotonic because first-wins is positional.
+- [x] 6.9 Assert function-conflict regression scope for histories with function conflicts and no variable/kind conflicts.
 - [x] 6.10 Assert duplicate raw claim IDs reject as `logic.invalid_group` before compile/solver work, with zero `compileSpecSmtlib()` and `runZ3Query` calls.
 - [x] 6.11 Assert sanitizer injectivity across generated distinct raw IDs and assert constructed sanitized-ID collision input is rejected with zero solver calls.
-- [ ] 6.12 Promote every minimized failing command history to a named regression test with the covering `FLA-*`, `RAE-*`, or `MCA-*` scenario ID.
+- [x] 6.12 Promote every minimized failing command history to a named regression test with the covering `FLA-*`, `RAE-*`, or `MCA-*` scenario ID.
 - [x] 6.13 Add security property tests for SMT-LIB comment injection using CR, LF, semicolons, parentheses, and command fragments such as `(check-sat)` and `(set-option ...)`.
 - [x] 6.14 Add security property tests proving declaration names and assertion identifier-like tokens pass through `sanitizeIdentifier()` before declaration or named-assertion emission.
 - [x] 6.15 Add security property tests proving evidence rendering cannot create synthetic Markdown findings, links, emphasis, inline code spans, headings, block quotes, list items, or extra table cells.
@@ -242,6 +242,14 @@
 
 **What changed:**
 - Expanded `test/property/logic.property.test.ts` with additional generated properties for:
+  - ordered claim-list state modeling with a local reference merge model,
+  - generated command histories (`appendCompatibleClaim`, `appendVariableSortConflict`, `appendFunctionSignatureConflict`, `appendSymbolKindConflict`, `appendSameClaimSanitizerCollision`, `appendDuplicateClaimId`, `removeClaim`, `reorderClaims`),
+  - implementation/reference agreement for included/excluded IDs, conflict kinds, and surviving symbol ownership,
+  - inclusion partition and no-surviving-disagreement checks,
+  - deterministic double-compilation checks for identical conflicts/claim IDs/assertion maps/SMT-LIB text,
+  - append-only monotonicity in compatible-only histories,
+  - function-conflict-only regression scope checks,
+  - named regression tests for minimized conflict-order and same-claim collision histories,
   - sanitizer injectivity across distinct generated raw identifiers,
   - duplicate raw-ID preflight rejection,
   - constructed sanitized-ID collision rejection,
@@ -256,11 +264,12 @@
 - Section 6 requires stateful/security property evidence for identity, sanitization, and rendering boundaries, plus traceability alignment for newly introduced scenarios.
 
 **Under-specified decision:**
-- Tasks 6.1–6.9 and 6.12 describe a larger command/state-machine framework; this pass implemented the highest-priority safety/security properties first while keeping tests concise and deterministic.
+- Same-claim cross-kind collisions can emit `existingClaimId === excludedClaimId` where the `existingClaimId` no longer survives in `compiled.claimIds`; ownership checks were constrained to surviving owners only, and this behavior is captured by an explicit regression test.
 
 **Validation evidence:**
-- `npm run test -- test/property/logic.property.test.ts` passed (11/11).
-- `npm run test:trace` passed with full trace coverage (62 files passed, 1 skipped live test).
+- `npm run test -- test/property/logic.property.test.ts` passed (15/15).
+- `npm run test -- test/contract/smtlib.test.ts test/contract/logic-analysis.test.ts test/contract/validate.test.ts test/contract/reporting.test.ts test/contract/merge-logic-routing.test.ts` passed (60/60).
+- `npm run lint:types` clean.
 
 ## 7. Final Verification
 

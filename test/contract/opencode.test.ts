@@ -599,6 +599,29 @@ describe("opencode adapter contract", () => {
   });
 });
 
+/**
+ * Canonicalize a value through one `JSON.stringify` → `JSON.parse` cycle.
+ *
+ * @remarks
+ * `JSON.stringify` is lossy for values JSON cannot represent — most relevantly
+ * **negative zero**, which serializes to `"0"` (`JSON.stringify(-0) === "0"`) and
+ * thus parses back as `+0`. fast-check's `fc.jsonValue()` can draw `-0`, and
+ * Vitest's `toEqual` compares numbers with `Object.is` semantics, so it treats a
+ * recovered `+0` as **unequal** to a generated `-0`. Asserting a bit-exact
+ * roundtrip against the raw draw is therefore an unsatisfiable property whenever
+ * `-0` (or any other JSON-lossy value) is generated — the source of the historical
+ * flake (seed 313754071 → counterexample `{"":{"":-0}}`).
+ *
+ * `extractJsonPayload` can only ever recover what JSON is able to encode, so the
+ * correct oracle is the generated value **after the same normalization**. Both
+ * sides of the comparison then derive from one canonical JSON string, and the
+ * property asserts the real contract — "the extractor agrees with `JSON.parse` on
+ * the embedded payload" — rather than an unattainable identity.
+ */
+function canonicalJson(value: unknown): unknown {
+  return JSON.parse(JSON.stringify(value)) as unknown;
+}
+
 describe("extractJsonPayload edge cases", () => {
   it("roundtrip property: extractJsonPayload(JSON.stringify(v)) produces v", () => {
     traceSpec("FLA-VALIDATE-SAMPLE", "FLA-JSON-RECOVER");
@@ -610,7 +633,10 @@ describe("extractJsonPayload edge cases", () => {
         ),
         (value) => {
           const result = extractJsonPayload(JSON.stringify(value));
-          expect(result).toEqual(value);
+          // Compare against the JSON-normalized value, not the raw draw: JSON is
+          // lossy for values like `-0` (see `canonicalJson`), so a bit-exact
+          // roundtrip is not an attainable contract for `extractJsonPayload`.
+          expect(result).toEqual(canonicalJson(value));
         },
       ),
       { numRuns: 100 },
@@ -627,7 +653,9 @@ describe("extractJsonPayload edge cases", () => {
           // Prefix that does not contain { or [ to avoid ambiguity.
           const wrapped = `Here is the result:\n${jsonStr}`;
           const result = extractJsonPayload(wrapped);
-          expect(result).toEqual(value);
+          // Normalize the oracle through JSON: `fc.jsonValue()` can draw `-0`,
+          // which serializes to `"0"` and cannot be recovered (see `canonicalJson`).
+          expect(result).toEqual(canonicalJson(value));
         },
       ),
       { numRuns: 50 },

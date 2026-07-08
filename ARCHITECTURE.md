@@ -251,7 +251,7 @@ If you are changing `--src` behavior, capability matching, or the relationship b
 
 #### Reporting
 
-- `reporting/render.ts`: phase report rendering and summary report generation
+- `reporting/render.ts`: phase report rendering and summary report generation; neutralizes untrusted evidence text into inert Markdown at render time (`RAE-EVID-RENDER-SAFE`)
 - `reporting/manifest.ts`: manifest entry construction, manifest-last completion semantics, and stale-manifest invalidation
 
 This is where analysis results turn into repository-facing artifacts.

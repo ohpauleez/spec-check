@@ -86,6 +86,13 @@ export async function mapBounded<T, R>(
             inFlight -= 1;
 
             if (hasError) {
+              // A sibling op already failed and is waiting for the pool to drain
+              // before rejecting. If this success is the last in-flight op, we own
+              // the final settle and must reject here; otherwise the promise would
+              // hang forever (no further callbacks fire once launching is halted).
+              if (inFlight === 0) {
+                reject(firstError);
+              }
               return;
             }
 

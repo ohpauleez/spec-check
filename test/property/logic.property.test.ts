@@ -94,6 +94,17 @@ const markdownPayloadArb = fc.oneof(
 
 const rawIdentifierArb = fc.string({ minLength: 0, maxLength: 20 });
 
+// Exercises every sanitizer branch: ASCII pass-through plus symbols via
+// `fc.string()`, the full Unicode range (astral planes and lone surrogates)
+// via random code points fed to `String.fromCodePoint`, and hand-picked
+// boundary cases (empty, bare/adjacent underscores, a leading digit, and the
+// historically-colliding `REQ(1)` / `REQ_281_29` pair).
+const injectiveRoundTripArb: fc.Arbitrary<string> = fc.oneof(
+  fc.string(),
+  fc.array(fc.integer({ min: 0, max: 0x10ffff }), { maxLength: 12 }).map((codePoints) => String.fromCodePoint(...codePoints)),
+  fc.constantFrom("", "_", "__", "REQ(1)", "REQ_281_29", "1leading", "😀", "a.b:c-d", "\uD800", "\uDC00", "\uD800\uDC00"),
+);
+
 const initialState: ClaimState = {
   claims: [],
   nextClaimCounter: 1,
@@ -116,6 +127,32 @@ function buildLogicClaim(stateful: StatefulClaim): LogicIrClaim {
 
 function signatureKey(fn: LogicFunctionSymbol): string {
   return `${fn.args.join(",")}=>${fn.returns}`;
+}
+
+// Reference left-inverse of `sanitizeIdentifier` per FLA-SPEC-LABEL-ENCODE's
+// fixed-width-6 scheme: a `_` always opens a 7-char escape (`_` + six hex
+// digits) and every other character is a pass-through ASCII alphanumeric, so a
+// single left-to-right scan recovers the original code points. A bare `_` is
+// the sole encoding of the empty string. Because this inverse exists, the
+// encoding is necessarily injective on its entire domain.
+function decodeSanitizedIdentifier(encoded: string): string {
+  if (encoded === "_") {
+    return "";
+  }
+  let decoded = "";
+  let index = 0;
+  while (index < encoded.length) {
+    const character = encoded[index]!;
+    if (character === "_") {
+      const hex = encoded.slice(index + 1, index + 7);
+      decoded += String.fromCodePoint(Number.parseInt(hex, 16));
+      index += 7;
+    } else {
+      decoded += character;
+      index += 1;
+    }
+  }
+  return decoded;
 }
 
 function firstVariableSymbol(claims: readonly StatefulClaim[]): string | undefined {
@@ -427,6 +464,28 @@ describe("logic and clustering properties", () => {
         expect(sanitizeIdentifier(left)).not.toBe(sanitizeIdentifier(right));
       }),
       { numRuns: 120 },
+    );
+  });
+
+  it("sanitizeIdentifier is uniquely decodable, proving injectivity over full Unicode", async () => {
+    traceSpec("FLA-SPEC-LABEL-ENCODE", "FLA-SPEC-NAMED");
+    await fc.assert(
+      fc.asyncProperty(injectiveRoundTripArb, async (raw) => {
+        const sanitized = sanitizeIdentifier(raw);
+
+        // Recovering the exact raw input through the reference decoder witnesses a
+        // left inverse, a strictly stronger guarantee than the pairwise
+        // non-collision check above: a function with a left inverse is injective
+        // across its whole domain, not merely on the sampled pairs.
+        expect(decodeSanitizedIdentifier(sanitized)).toBe(raw);
+
+        // `_` leads only fixed-width escapes, so `__` never appears in a sanitized
+        // identifier. That keeps the `<sanitizedClaimId>__a<index>` assertion-label
+        // separator unambiguous and makes label collisions between distinct claim
+        // IDs impossible.
+        expect(sanitized.includes("__")).toBe(false);
+      }),
+      { numRuns: 200 },
     );
   });
 

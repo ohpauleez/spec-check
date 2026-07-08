@@ -235,6 +235,37 @@ describe("compileSpecSmtlib", () => {
     expect(labels).toHaveLength(2);
     expect(labels[0]).not.toBe(labels[1]);
   });
+
+  it("emits a byte-for-byte stable encoding (shared-regex extraction regression guard)", () => {
+    traceSpec("FLA-SPEC-COMBINE", "FLA-SMTLIB-SANITIZE", "FLA-SMTLIB-ASSERTEXPRS");
+
+    // Symbols requiring escaping (`_` → `_00005F`, `-` → `_00002D`) exercise the
+    // shared sanitized-token regex on both declarations and the assertion body.
+    // The encoding must be identical to the pre-refactor output, so it is pinned
+    // byte-for-byte here rather than by structural sub-string checks.
+    const claim = makeClaim("R1", {
+      variables: [{ name: "user_id", sort: "Bool" }],
+      functions: [{ name: "is-ready", args: [], returns: "Bool" }],
+      assertions: [{ id: "A1", expr: "(=> is-ready user_id)" }],
+    });
+
+    const result = compileSpecSmtlib("specs/foo/spec.md", [claim]);
+
+    expect(result.smtlib).toBe(
+      "; spec specs/foo/spec.md\n" +
+      "; claims 1 (0 excluded due to conflicts)\n" +
+      "\n" +
+      "; --- variable declarations ---\n" +
+      "(declare-const user_00005Fid Bool)\n" +
+      "\n" +
+      "; --- function declarations ---\n" +
+      "(declare-fun is_00002Dready () Bool)\n" +
+      "\n" +
+      "; --- assertions ---\n" +
+      "; claim R1 assertion A1\n" +
+      "(assert (! (=> is_00002Dready user_00005Fid) :named R1__a0))\n",
+    );
+  });
 });
 
 describe("parseUnsatCore", () => {

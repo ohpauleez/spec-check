@@ -4,7 +4,7 @@
 import { mapBounded } from "../../adapters/concurrency.js";
 import { writeOutputAtomic } from "../../adapters/fs.js";
 import { runZ3Query } from "../../adapters/z3.js";
-import { assertNever, postcondition } from "../assert.js";
+import { assertNever } from "../assert.js";
 import {
   toRelativePath,
   toSmtlibContent,
@@ -13,7 +13,7 @@ import {
 } from "../branded.js";
 import type { Finding } from "../findings.js";
 import type { LogicIrClaim } from "../logic-ir.js";
-import { runCompletenessCheck, runPairwiseContradictionChecks } from "./logic-analysis-checks.js";
+import { buildSharedCheckInputs, runCompletenessCheck, runPairwiseContradictionChecks } from "./logic-analysis-checks.js";
 import { deriveSeverityFromClaims } from "./logic-analysis-sexpr.js";
 import {
   CLAIMS_PER_GROUP_MAX,
@@ -27,13 +27,21 @@ import {
 export type { ParsedImplication } from "./logic-analysis-sexpr.js";
 export {
   buildDeclarationPreamble,
+  collectFunctionDeclarations,
   collectVariableDeclarations,
   extractImplications,
   obligationToSeverity,
   parseImplicationExpr,
   splitSExprParts,
 } from "./logic-analysis-sexpr.js";
-export { checkPairContradiction, runCompletenessCheck, runPairwiseContradictionChecks } from "./logic-analysis-checks.js";
+export type { SharedCheckInputs } from "./logic-analysis-checks.js";
+export {
+  buildSharedCheckInputs,
+  checkPairContradiction,
+  FORMAL_PAIR_BUDGET,
+  runCompletenessCheck,
+  runPairwiseContradictionChecks,
+} from "./logic-analysis-checks.js";
 
 /** Maximum concurrent Z3 solver invocations during logic analysis. */
 const LOGIC_ANALYSIS_CONCURRENCY_DEFAULT = 4;
@@ -377,23 +385,19 @@ async function analyzeSpecGroup(
   const findings: Finding[] = [];
   const reportLines: string[] = [];
 
-  let compileInvoked = false;
-  let artifactWriteInvoked = false;
-  let solverInvoked = false;
-
   const preflightIssue = preflightGroupBounds(group.claims) ?? preflightGroupClaimIds(group.claims);
   if (preflightIssue !== null) {
     const invalidGroupFinding = buildInvalidGroupFinding(group.specFile, group.claims, preflightIssue);
     findings.push(invalidGroupFinding);
     reportLines.push(`- ${group.specFile}: invalid compile group (${preflightIssue.kind})`);
 
-    postcondition(compileInvoked === false, "invalid group must not invoke compileSpecSmtlib");
-    postcondition(artifactWriteInvoked === false, "invalid group must not write solver artifacts");
-    postcondition(solverInvoked === false, "invalid group must not invoke runZ3Query");
+    // Preflight rejection short-circuits before compile/solve, so an invalid
+    // group never invokes compileSpecSmtlib, runZ3Query, or writeOutputAtomic.
+    // That zero-invocation contract is asserted independently in
+    // logic-analysis.test.ts via mock call-count expectations.
     return { findings, reportLines };
   }
 
-  compileInvoked = true;
   const compiled = compileSpecSmtlib(group.specFile, group.claims);
 
   for (const conflict of compiled.conflicts) {
@@ -404,15 +408,11 @@ async function analyzeSpecGroup(
 
   if (compiled.claimIds.length === 0) {
     reportLines.push(`- ${group.specFile}: no claims to analyze (all excluded due to conflicts)`);
-    postcondition(compileInvoked === true, "no-claims exit must have invoked compileSpecSmtlib");
-    postcondition(solverInvoked === false, "no-claims exit must not invoke runZ3Query");
-    postcondition(artifactWriteInvoked === false, "no-claims exit must not write solver artifacts");
     return { findings, reportLines };
   }
 
   const artifactBase = `smt/${group.artifactKey ?? compiled.sanitizedSpecId}`;
 
-  solverInvoked = true;
   const phase1Result = await runZ3Query({
     smtlib: toSmtlibContent(`${compiled.smtlib}(check-sat)\n`),
     timeoutMs: 30_000,
@@ -420,14 +420,12 @@ async function analyzeSpecGroup(
   });
 
   if (phase1Result.kind === "unsat") {
-    solverInvoked = true;
     const phase2Result = await runZ3Query({
       smtlib: toSmtlibContent(`(set-option :produce-unsat-cores true)\n${compiled.smtlib}(check-sat)\n(get-unsat-core)\n`),
       timeoutMs: 30_000,
       ...(z3Path === undefined ? {} : { z3Path }),
     });
 
-    artifactWriteInvoked = true;
     await Promise.all([
       writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.smt2`), compiled.smtlib),
       writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stdout.txt`), phase2Result.stdout),
@@ -454,14 +452,10 @@ async function analyzeSpecGroup(
     });
 
     reportLines.push(`- ${group.specFile}: UNSAT (contradiction) — core: ${claimList}`);
-    postcondition(compileInvoked === true, "unsat exit must have invoked compileSpecSmtlib");
-    postcondition(solverInvoked === true, "unsat exit must have invoked runZ3Query");
-    postcondition(artifactWriteInvoked === true, "unsat exit must have written solver artifacts");
     return { findings, reportLines };
   }
 
   if (phase1Result.kind === "error") {
-    artifactWriteInvoked = true;
     await Promise.all([
       writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.smt2`), compiled.smtlib),
       writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stdout.txt`), phase1Result.stdout),
@@ -487,14 +481,10 @@ async function analyzeSpecGroup(
     });
 
     reportLines.push(`- ${group.specFile}: ERROR (${errorDetail})`);
-    postcondition(compileInvoked === true, "error exit must have invoked compileSpecSmtlib");
-    postcondition(solverInvoked === true, "error exit must have invoked runZ3Query");
-    postcondition(artifactWriteInvoked === true, "error exit must have written solver artifacts");
     return { findings, reportLines };
   }
 
   if (phase1Result.kind === "timeout" || phase1Result.kind === "unknown") {
-    artifactWriteInvoked = true;
     await Promise.all([
       writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.smt2`), compiled.smtlib),
       writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stdout.txt`), phase1Result.stdout),
@@ -516,13 +506,9 @@ async function analyzeSpecGroup(
     });
 
     reportLines.push(`- ${group.specFile}: ${phase1Result.kind} (inconclusive)`);
-    postcondition(compileInvoked === true, "inconclusive exit must have invoked compileSpecSmtlib");
-    postcondition(solverInvoked === true, "inconclusive exit must have invoked runZ3Query");
-    postcondition(artifactWriteInvoked === true, "inconclusive exit must have written solver artifacts");
     return { findings, reportLines };
   }
 
-  artifactWriteInvoked = true;
   await Promise.all([
     writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.smt2`), compiled.smtlib),
     writeOutputAtomic(outputDir, toRelativePath(`${artifactBase}.stdout.txt`), phase1Result.stdout),
@@ -534,29 +520,42 @@ async function analyzeSpecGroup(
   const includedClaimIds = new Set(compiled.claimIds);
   const survivingClaims = group.claims.filter((claim) => includedClaimIds.has(claim.claimId));
 
-  const pairwiseFindings = await runPairwiseContradictionChecks({
-    claims: survivingClaims,
-    specFile: group.specFile,
-    z3Path,
-  });
+  // Compute extraction, the vars+funs preamble, and the declared-symbol index
+  // once, then dispatch the pairwise and completeness checks concurrently.
+  // Findings are appended pairwise-then-completeness so output order stays
+  // deterministic regardless of which solver settles first.
+  //
+  // Concurrency bound: the pairwise pass caps its own Z3 fan-out at
+  // PAIRWISE_SOLVER_CONCURRENCY (3) and completeness adds exactly 1, so this
+  // Promise.all peaks at 4 in-flight solvers per group. Combined with the
+  // group-level `mapBounded(groups, concurrency)` above, total concurrent Z3
+  // processes stay bounded at `concurrency × 4` (16 at the default of 4).
+  const sharedCheckInputs = buildSharedCheckInputs(survivingClaims);
+  const [pairwiseFindings, completenessFindings] = await Promise.all([
+    runPairwiseContradictionChecks({
+      claims: survivingClaims,
+      specFile: group.specFile,
+      z3Path,
+      precomputed: sharedCheckInputs,
+    }),
+    runCompletenessCheck({
+      claims: survivingClaims,
+      specFile: group.specFile,
+      z3Path,
+      precomputed: sharedCheckInputs,
+    }),
+  ]);
+
   findings.push(...pairwiseFindings);
   if (pairwiseFindings.length > 0) {
     reportLines.push(`  - pairwise contradictions found: ${String(pairwiseFindings.length)}`);
   }
 
-  const completenessFindings = await runCompletenessCheck({
-    claims: survivingClaims,
-    specFile: group.specFile,
-    z3Path,
-  });
   findings.push(...completenessFindings);
   if (completenessFindings.length > 0) {
     reportLines.push(`  - completeness gaps found: ${String(completenessFindings.length)}`);
   }
 
-  postcondition(compileInvoked === true, "SAT exit must have invoked compileSpecSmtlib");
-  postcondition(solverInvoked === true, "SAT exit must have invoked runZ3Query");
-  postcondition(artifactWriteInvoked === true, "SAT exit must have written solver artifacts");
   return { findings, reportLines };
 }
 

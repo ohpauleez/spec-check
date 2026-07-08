@@ -2,7 +2,10 @@
  * Compiles Logic IR claims into SMT-LIB text suitable for Z3 execution.
  *
  * Central compilation layer between the Logic IR and the Z3 solver adapter.
- * Exports: compileSmtlib, compileSpecSmtlib, parseUnsatCore, sanitizeIdentifier.
+ * Exports: compileSmtlib, compileSpecSmtlib, sanitizeIdentifier,
+ * sanitizeAssertionExpr, parseSmtlibContent, parseUnsatCore, the size bounds
+ * CLAIMS_PER_GROUP_MAX / DECLARATIONS_PER_CLAIM_MAX, and the result/conflict
+ * types CompiledSmtlib, CompiledSpecSmtlib, and SpecMergeConflict.
  */
 import { invariant, postcondition, precondition } from "../assert.js";
 import {
@@ -21,7 +24,31 @@ export const CLAIMS_PER_GROUP_MAX = 1024;
 export const DECLARATIONS_PER_CLAIM_MAX = 2048;
 
 /**
- * Result of compiling a Logic IR claim into SMT-LIB text.
+ * Identifier-like token pattern shared by every assertion-sanitization path.
+ *
+ * @remarks
+ * A token is a leading `[A-Za-z_]` followed by any run of
+ * `[A-Za-z0-9_\-.:]`. This matches SMT-LIB word keywords (`and`, `or`, `not`,
+ * `ite`) and escaping-requiring identifiers (`user_id`, `a.b`, `is-valid`,
+ * `ns:x`), while non-letter operators (`=>`, `=`, `<`, `+`), whitespace, and
+ * parentheses do not match. The `g` flag drives `String.prototype.replace`,
+ * which resets `lastIndex` to 0 on completion; because every consumer runs the
+ * replacement synchronously, sharing this single constant is safe.
+ */
+const ASSERTION_TOKEN_REGEX = /[A-Za-z_][A-Za-z0-9_\-.:]*/gu;
+
+/**
+ * Result of compiling a single Logic IR claim into SMT-LIB text.
+ *
+ * @remarks
+ * Invariants (established by {@link compileSmtlib}):
+ * - `sanitizedClaimId` is the {@link sanitizeIdentifier} image of `claimId` and
+ *   is therefore a valid, escaping-free SMT-LIB identifier.
+ * - `smtlib` contains only declarations, id-map comments, and `(assert ...)`
+ *   forms — never a `(check-sat)` or other solver command. Callers append those
+ *   when assembling a query.
+ * - `assertionExprs[i]` is the sanitized inner expression of the i-th assertion
+ *   (no `(assert ...)` wrapper), sharing the same identifier map as `smtlib`.
  */
 export interface CompiledSmtlib {
   readonly claimId: string;
@@ -31,7 +58,21 @@ export interface CompiledSmtlib {
 }
 
 /**
- * Merge conflict detected while combining claims into one SMT-LIB program.
+ * A merge conflict detected while combining several claims into one SMT-LIB
+ * program by {@link compileSpecSmtlib}.
+ *
+ * @remarks
+ * Each variant names the same sanitized symbol reached from two directions and
+ * records both the surviving (`existingClaimId`) and the rejected
+ * (`excludedClaimId`) claim. Invariant: `claimIds` lists exactly
+ * `[existingClaimId, excludedClaimId]`, and the excluded claim is omitted from
+ * the compiled output. The `kind` discriminant selects the conflict class:
+ * - `"function_signature_mismatch"` — same sanitized name, incompatible
+ *   argument/return signatures.
+ * - `"variable_sort_mismatch"` — same sanitized name, different sorts
+ *   (`expectedSort` vs `conflictingSort`).
+ * - `"symbol_kind_collision"` — same sanitized name declared once as a variable
+ *   and once as a function (`existingSymbolKind` vs `conflictingSymbolKind`).
  */
 export type SpecMergeConflict =
   | {
@@ -67,7 +108,16 @@ export type SpecMergeConflict =
   };
 
 /**
- * Result of compiling all claims from a single spec file into one SMT-LIB text.
+ * Result of compiling every claim from one spec file into a single SMT-LIB text.
+ *
+ * @remarks
+ * Invariants (established by {@link compileSpecSmtlib}):
+ * - `claimIds` are the claims that survived merge checks, in input order, and
+ *   contain no `excludedClaimId` from any entry in `conflicts`.
+ * - `assertionNameMap` maps each `:named` assertion label to the originating
+ *   claim id, and every value is a member of `claimIds`.
+ * - `smtlib` declares each sanitized symbol at most once and carries no
+ *   `(check-sat)` — callers append solver commands.
  */
 export interface CompiledSpecSmtlib {
   readonly specFile: string;
@@ -79,13 +129,77 @@ export interface CompiledSpecSmtlib {
 }
 
 /**
- * Backward-compatible re-export. Identifier sanitization is implemented in
- * `identifiers.ts`.
+ * Map an arbitrary identifier to a stable, escaping-free SMT-LIB symbol.
+ *
+ * @remarks
+ * Backward-compatible re-export of the canonical implementation in
+ * `identifiers.ts`; see {@link sanitizeIdentifierImpl} for the full contract.
+ * Key property relied on across the compile path: the mapping is injective —
+ * distinct inputs never collide onto the same sanitized symbol — which is what
+ * lets separately-sanitized expressions and declarations reference the same
+ * symbols without accidental aliasing.
  */
 export const sanitizeIdentifier = sanitizeIdentifierImpl;
 
 /**
- * Compile one claim to SMT-LIB declarations and assertions.
+ * Sanitize every identifier-like token in a standalone SMT-LIB expression.
+ *
+ * @param expr - Any SMT-LIB expression string (guard, consequent, etc.).
+ * @returns The expression with each identifier token replaced by its
+ *   {@link sanitizeIdentifier} form; operators, whitespace, and parentheses are
+ *   preserved verbatim.
+ *
+ * @remarks
+ * This is the token-parity counterpart of the global compile path: it applies
+ * the exact same {@link ASSERTION_TOKEN_REGEX} plus {@link sanitizeIdentifier}
+ * mapping used by {@link compileSpecSmtlib}, so an expression sanitized here
+ * references the same symbols that the compiled preamble declares.
+ *
+ * Preconditions: `expr` is any JS string.
+ *
+ * Postconditions:
+ * - Deterministic and pure — equal input yields equal output.
+ * - Pure-ASCII-alphanumeric tokens (including SMT-LIB keywords such as `and`,
+ *   `or`, `not`, `ite`, `true`, `false`) map to themselves.
+ * - Escaping-requiring identifiers (`user_id`, `a.b`, `is-valid`, `ns:x`) map to
+ *   the same fixed-width `_HEX6` encoding the global compile emits.
+ *
+ * Documented limitation: identifier-like tokens inside string literals are also
+ * matched, mirroring the pre-existing global-compile behavior, so parity is
+ * preserved between the two paths.
+ *
+ * Failure modes: none — pure computation.
+ */
+export function sanitizeAssertionExpr(expr: string): string {
+  return expr.replace(ASSERTION_TOKEN_REGEX, (token) => sanitizeIdentifierImpl(token));
+}
+
+/**
+ * Compile one Logic IR claim into standalone SMT-LIB declarations and assertions.
+ *
+ * @param claim - A structurally valid {@link LogicIrClaim} (already validated
+ *   upstream) whose variables, functions, and assertions are emitted in order.
+ * @returns A {@link CompiledSmtlib} carrying the original `claimId`, its
+ *   sanitized form, the SMT-LIB text, and the sanitized inner assertion
+ *   expressions.
+ *
+ * @remarks
+ * Preconditions: `claim` is a validated `LogicIrClaim`.
+ *
+ * Postconditions (see {@link CompiledSmtlib} invariants):
+ * - `smtlib` holds declarations and `(assert ...)` forms but never a
+ *   `(check-sat)` — callers append solver commands when building a query.
+ * - `assertionExprs[i]` is the sanitized inner form of `claim.assertions[i].expr`
+ *   and shares the per-claim identifier map used to emit the declarations, so
+ *   every referenced symbol is also declared.
+ *
+ * Identifier sanitization is memoized per claim, so each raw name maps to one
+ * stable sanitized symbol across declarations, assertions, and id-map comments.
+ * Every value interpolated into a `;`-comment (claim id, obligation, assertion
+ * id, and the id-map pairs) is routed through {@link escapeCommentLine} so an
+ * embedded newline cannot smuggle executable SMT-LIB onto a following line.
+ *
+ * Failure modes: none — pure, deterministic computation over in-memory data.
  */
 export function compileSmtlib(claim: LogicIrClaim): CompiledSmtlib {
   const identifierMap = new Map<string, SanitizedClaimId>();
@@ -342,11 +456,11 @@ export function compileSpecSmtlib(specFile: string, claims: readonly LogicIrClai
   }
 
   invariant(
-    [...declaredVariables.values()].every((entry) => entry.sort === "Bool" || entry.sort === "Int" || entry.sort === "Real" || entry.sort === "String"),
+    everyIn(declaredVariables.values(), (entry) => entry.sort === "Bool" || entry.sort === "Int" || entry.sort === "Real" || entry.sort === "String"),
     "every declared variable sort must remain inside LogicSort",
   );
   invariant(
-    [...declaredVariables.keys()].every((symbol) => !declaredFunctions.has(symbol)),
+    everyIn(declaredVariables.keys(), (symbol) => !declaredFunctions.has(symbol)),
     "one sanitized symbol must not map to both variable and function declarations",
   );
 
@@ -400,7 +514,7 @@ export function compileSpecSmtlib(specFile: string, claims: readonly LogicIrClai
   );
 
   postcondition(
-    [...assertionNameMap.values()].every((claimId) => includedSet.has(claimId)),
+    everyIn(assertionNameMap.values(), (claimId) => includedSet.has(claimId)),
     "assertionNameMap values must reference included claims only",
   );
 
@@ -428,7 +542,31 @@ export function compileSpecSmtlib(specFile: string, claims: readonly LogicIrClai
 }
 
 /**
- * Parse SMT-LIB content back into declarations and assertion expressions.
+ * Parse emitted SMT-LIB text back into its declaration and assertion lines.
+ *
+ * @param content - SMT-LIB text, typically the `smtlib` field produced by
+ *   {@link compileSmtlib} (single-line assertions).
+ * @returns `{ declarations, assertionExprs }` where `declarations` are the raw
+ *   `(declare-const|declare-sort|declare-fun ...)` lines (trimmed, verbatim) and
+ *   `assertionExprs` are the inner bodies of `(assert ...)` lines with the
+ *   leading `(assert ` and trailing `)` removed.
+ *
+ * @remarks
+ * Line-oriented inverse of the compile emitter, used by the code-backwards
+ * cross-implication builder to recover declared symbols and assertion bodies.
+ *
+ * Preconditions: `content` is any string.
+ *
+ * Postconditions:
+ * - Only top-level, single-line forms are recognized; the parser does not
+ *   balance parentheses across newlines, matching the one-line-per-assertion
+ *   shape {@link compileSmtlib} emits. Multi-line or `:named`-wrapped assertions
+ *   are not un-wrapped beyond the outer `(assert ... )` slice.
+ * - Lines that match no recognized prefix (comments, blanks, solver commands)
+ *   are skipped.
+ *
+ * Failure modes: none — pure computation; unexpected lines are ignored rather
+ * than throwing.
  */
 export function parseSmtlibContent(content: string): {
   readonly declarations: readonly string[];
@@ -450,7 +588,26 @@ export function parseSmtlibContent(content: string): {
 }
 
 /**
- * Parse Z3 unsat-core output into assertion labels.
+ * Parse Z3 `(get-unsat-core)` output into the list of assertion labels.
+ *
+ * @param stdout - Raw solver stdout following an `unsat` verdict; the core is
+ *   emitted as a single parenthesized, whitespace-separated list of labels.
+ * @returns The assertion labels naming the unsat core, in solver-reported order;
+ *   an empty array when the core is `()` or no parenthesized line is present.
+ *
+ * @remarks
+ * Consumed by `logic-analysis.ts`, which resolves the returned labels back to
+ * claim ids via `CompiledSpecSmtlib.assertionNameMap`.
+ *
+ * Preconditions: `stdout` is any string.
+ *
+ * Postconditions:
+ * - Scans lines in order and returns the first that both starts with `(` and
+ *   ends with `)`; inner tokens are split on runs of whitespace.
+ * - Returns `[]` (not an error) when the solver produced no core line, so an
+ *   absent or unavailable core degrades gracefully.
+ *
+ * Failure modes: none — pure computation; never throws.
  */
 export function parseUnsatCore(stdout: string): readonly string[] {
   const lines = stdout.trim().split("\n");
@@ -466,21 +623,88 @@ export function parseUnsatCore(stdout: string): readonly string[] {
 }
 
 /**
- * Sanitize identifier-like assertion tokens.
+ * Sanitize identifier-like tokens inside an assertion expression, reusing a
+ * caller-provided memoized sanitizer so symbols match the surrounding
+ * declarations.
+ *
+ * @param expr - An assertion expression body (no `(assert ...)` wrapper).
+ * @param sanitize - The compile scope's memoized identifier mapper; sharing it
+ *   guarantees a token maps to the same sanitized symbol here as where the
+ *   declaration was emitted.
+ * @returns `expr` with every {@link ASSERTION_TOKEN_REGEX} token replaced by its
+ *   sanitized form; operators, parentheses, and whitespace are preserved.
+ *
+ * @remarks
+ * Preconditions: `sanitize` is the same mapper used for the enclosing claim's
+ * declarations. Postconditions: deterministic and pure for a fixed `sanitize`.
+ * Failure modes: none beyond any thrown by `sanitize` (the default mappers do
+ * not throw).
  */
 function sanitizeAssertion(expr: string, sanitize: (value: string) => SanitizedClaimId): string {
-  return expr.replace(/[A-Za-z_][A-Za-z0-9_\-.:]*/gu, (token) => sanitize(token));
+  return expr.replace(ASSERTION_TOKEN_REGEX, (token) => sanitize(token));
 }
 
 /**
- * Escape untrusted comment text so line breaks cannot inject SMT-LIB commands.
+ * Collapse CR/LF runs in untrusted text to single spaces so it stays on one
+ * SMT-LIB comment line.
+ *
+ * @param value - Arbitrary text destined for a `;`-prefixed comment (claim id,
+ *   obligation, assertion id, etc.).
+ * @returns `value` with every run of `\r`/`\n` replaced by a single space.
+ *
+ * @remarks
+ * Security-relevant: comments are emitted as `; <value>`, so an embedded newline
+ * would end the comment and let following text be parsed as executable SMT-LIB.
+ * Flattening line breaks removes that injection vector.
+ *
+ * Preconditions: `value` is any string. Postconditions: the result contains no
+ * `\r` or `\n`. Failure modes: none — pure computation.
  */
 function escapeCommentLine(value: string): string {
   return value.replace(/[\r\n]+/gu, " ");
 }
 
 /**
- * Compare function signatures for exact compatibility.
+ * Test a predicate against every element of an iterable without materializing
+ * an intermediate array.
+ *
+ * @param iterable - The source iterable (e.g. `Map.values()`, `Map.keys()`).
+ * @param predicate - Returns `true` when an element satisfies the check.
+ * @returns `true` when every element satisfies `predicate`; `false` on the first
+ *   failure (short-circuiting).
+ *
+ * @remarks
+ * Allocation-free replacement for `[...iterable].every(...)`. Iteration is
+ * bounded by the caller's collection, which is itself bounded by
+ * {@link CLAIMS_PER_GROUP_MAX} and {@link DECLARATIONS_PER_CLAIM_MAX}.
+ *
+ * Failure modes: none — pure computation.
+ */
+function everyIn<T>(iterable: Iterable<T>, predicate: (item: T) => boolean): boolean {
+  for (const item of iterable) {
+    if (!predicate(item)) {
+      return false;
+    }
+  }
+  return true;
+}
+
+/**
+ * Decide whether two function symbols share an identical SMT-LIB signature.
+ *
+ * @param a - First function symbol.
+ * @param b - Second function symbol.
+ * @returns `true` iff the return sorts are equal and the argument sort lists are
+ *   equal element-for-element (same arity, same order).
+ *
+ * @remarks
+ * Used by {@link compileSpecSmtlib} to detect `function_signature_mismatch`
+ * conflicts when two claims declare the same sanitized function name. Exact
+ * structural equality — no sort widening or coercion.
+ *
+ * Preconditions: both arguments are well-formed `LogicFunctionSymbol`s.
+ * Postconditions: pure and symmetric — `signaturesMatch(a, b) === signaturesMatch(b, a)`.
+ * Failure modes: none — pure computation.
  */
 function signaturesMatch(a: LogicFunctionSymbol, b: LogicFunctionSymbol): boolean {
   if (a.returns !== b.returns) {

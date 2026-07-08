@@ -302,7 +302,7 @@ This split matters for assurance. The more the decision logic is isolated from t
 | **Qualitative analysis** ([`src/domain/spec-forward/qualitative.ts`](src/domain/spec-forward/qualitative.ts)) | Package parsed content for LLM-backed review passes; validate response schemas | `opencode` responses are schema-validated before acceptance; exactly 2 passes on success |
 | **Coverage analysis** ([`src/domain/spec-forward/coverage.ts`](src/domain/spec-forward/coverage.ts)) | Compare proposal/design claims against capability specs | Deterministic given the same claim graph; no LLM or solver dependency |
 | **Formalization** ([`src/domain/formal/formalize.ts`](src/domain/formal/formalize.ts)) | Request LLM-backed formalization samples; validate against logic IR schema | Invalid samples rejected, not silently admitted; three-phase strategy (batch, retry, additional) |
-| **Validation** ([`src/domain/formal/validate.ts`](src/domain/formal/validate.ts)) | Structural validation of untrusted LLM-produced formalization samples | Deterministic, side-effect free; validates variables, functions, sorts, and assertion syntax |
+| **Validation** ([`src/domain/formal/validate.ts`](src/domain/formal/validate.ts)) | Structural validation of untrusted LLM-produced formalization samples | Deterministic, side-effect free; validates variables, functions, sorts, and assertion syntax; rejects same-claim raw variable/function overlap and duplicate same-kind declarations by sanitized symbol |
 | **Clustering** ([`src/domain/formal/clustering.ts`](src/domain/formal/clustering.ts)) | Solver-backed pairwise implication to group equivalent formalizations | Pair enumeration is deterministic; BFS-based connected components; ambiguity is a finding |
 | **Identifier sanitization** ([`src/domain/formal/identifiers.ts`](src/domain/formal/identifiers.ts)) | Encode untrusted identifiers into injective SMT-LIB-safe symbols | Fixed-width-6 `_HHHHHH` escapes are uniquely decodable and preserve non-collision guarantees |
 | **SMT-LIB compilation** ([`src/domain/formal/smtlib.ts`](src/domain/formal/smtlib.ts)) | Compile logic IR into solver-ready SMT-LIB text | Output never includes `(check-sat)` -- caller appends; merge exclusion authority is `compiled.claimIds` |
@@ -312,7 +312,7 @@ This split matters for assurance. The more the decision logic is isolated from t
 | **Code-derived formalization** ([`src/domain/code-backwards/gen-formal.ts`](src/domain/code-backwards/gen-formal.ts)) | Same formalization pipeline applied to code-derived specs | Same schema validation and clustering as specs-forward; artifacts written to `gen_specs_smt/` |
 | **Cross-side implication** ([`src/domain/code-backwards/cross-implication.ts`](src/domain/code-backwards/cross-implication.ts)) | Bidirectional solver-backed implication between original and code-derived formalizations | Primary strength classifier; greedy matching is deterministic; all queries persisted |
 | **Blind comparison** ([`src/domain/code-backwards/blind-compare.ts`](src/domain/code-backwards/blind-compare.ts)) | Explanatory LLM rationale for formal classification | Code-derived side never receives original requirement text |
-| **Report rendering** ([`src/domain/reporting/render.ts`](src/domain/reporting/render.ts)) | Render Markdown reports; replace malformed findings with `reporting.unsupported_verdict` defects | Reports never contain findings without provenance |
+| **Report rendering** ([`src/domain/reporting/render.ts`](src/domain/reporting/render.ts)) | Render Markdown reports; replace malformed findings with `reporting.unsupported_verdict` defects | Reports never contain findings without provenance; untrusted evidence text neutralized into inert Markdown via `neutralizeMarkdownInline()` (`RAE-EVID-RENDER-SAFE`) |
 | **Manifest** ([`src/domain/reporting/manifest.ts`](src/domain/reporting/manifest.ts)) | Build entries with SHA-256 checksums; write atomically; invalidate stale manifests at run start | Manifest is the final file written |
 | **Filesystem adapter** ([`src/adapters/fs.ts`](src/adapters/fs.ts)) | Path confinement, atomic writes (temp + rename), SHA-256 checksums | All writes confined to configured output directory; `precondition` throws on traversal |
 | **Process adapter** ([`src/adapters/process.ts`](src/adapters/process.ts)) | Generic `execFile` wrapper with argv arrays, timeout handling, stdin piping | No shell interpolation; `shell: false`; ENOENT on spawn rejects the promise |
@@ -727,7 +727,10 @@ stateDiagram-v2
 | coverage | always succeeds (deterministic) | -- | -- |
 | formalization | at least one valid candidate per claim | zero valid candidates after batch + retry + additional | `FormalizationError` |
 | clustering | representative selected from largest stable cluster | stability threshold not met | ambiguity finding emitted |
-| logic analysis | solver returns definitive result | timeout or unknown | finding preserved as `logic.inconclusive` |
+| logic: group preflight | claims have unique raw + sanitized IDs and fit size bounds | duplicate IDs, or size beyond `CLAIMS_PER_GROUP_MAX` / `DECLARATIONS_PER_CLAIM_MAX` | `logic.invalid_group`; zero compile/solver/write work (D-15) |
+| logic: spec-combine | claim declarations are mutually compatible | variable-sort, symbol-kind, or function-signature conflict | `logic.merge_conflict`; conflicting claim excluded, survivors are `compiled.claimIds` (D-14) |
+| logic: global check-sat | `sat` — globally consistent | `unsat`, solver error, or `timeout`/`unknown` | `logic.contradiction`, `logic.solver_error`, or `logic.inconclusive` |
+| logic: deeper checks | pairwise and completeness sub-checks definitive | contradiction, gap, or inconclusive sub-check | `logic.conditional_contradiction`, `logic.completeness_gap`, aggregated `logic.inconclusive` |
 
 #### Invariants
 
@@ -738,13 +741,19 @@ stateDiagram-v2
 | SF-3 | Formalization uses a three-phase strategy: batch per file, individual retry, additional samples |
 | SF-4 | Clustering pair enumeration is deterministic (left < right) |
 | SF-5 | Logic analysis two-phase approach: satisfiability first, unsat-core extraction only on contradiction |
+| SF-6 | Deeper pairwise guard-activation and completeness sub-checks aggregate `timeout`/`unknown` verdicts into a single `logic.inconclusive` finding, consistent with the query-level inconclusive flow |
+| SF-7 | Structurally invalid compile groups (duplicate raw or sanitized claim IDs, or size beyond `CLAIMS_PER_GROUP_MAX` / `DECLARATIONS_PER_CLAIM_MAX`) are rejected before any compile, artifact write, or solver query — zero solver work (D-15) |
+| SF-8 | Merge conflicts exclude the conflicting claim rather than aborting the group; the authoritative surviving-claim set for all downstream checks is `compiled.claimIds` (D-14) |
 
 #### Safety and Liveness
 
 - Safety: no invalid formalization sample enters clustering or solver analysis.
 - Safety: inconclusive solver results are preserved as findings, not treated as success.
+- Safety: structurally invalid or oversized compile groups perform zero solver work; they degrade to a `logic.invalid_group` finding instead of aborting the run.
+- Safety: spec-combine merge conflicts surface `logic.merge_conflict` findings while surviving claims continue to analysis; no conflicting declaration silently overwrites another (first-wins).
 - Liveness: each LLM call is bounded by retry count (default 3) and universal per-call timeout from run config (default 300s).
 - Liveness: each solver query is bounded by per-query timeout (default 30s).
+- Liveness: deeper-check solver fan-out is bounded — pairwise checks cap at `PAIRWISE_SOLVER_CONCURRENCY` (3) plus one completeness query (per-group peak 4; global peak `concurrency × 4`).
 
 **Spec references:** [`formalization-and-logic-analysis`](openspec/specs/formalization-and-logic-analysis/spec.md), [`claim-graph-and-coverage`](openspec/specs/claim-graph-and-coverage/spec.md).
 
@@ -1030,6 +1039,7 @@ Protocol rules:
 - compiled SMT-LIB excludes solver commands until query execution time
 - implication queries contain exactly one `(check-sat)`
 - per-spec logic analysis uses a two-phase strategy: satisfiability first, unsat-core extraction only on contradiction
+- deeper checks (guard-activation contradiction and completeness-gap detection) run under bounded solver concurrency, not serially
 - solver stdout/stderr, timeout, unknown, and error diagnostics are persisted verbatim
 
 ### 7.3 Code-Backwards Sequence
@@ -1093,11 +1103,15 @@ Relevant code: [`src/adapters/opencode.ts`](src/adapters/opencode.ts)
 Protocol rules:
 
 - prompts are fenced so analyzed content is not promoted to instruction position
-- the `opencode` adapter builds argv (`opencode run --model <name> --format json <prompt>`) and parses newline-delimited JSON event output
-- `type: "text"` event payloads are concatenated and parsed as the final JSON response
+- the `opencode` adapter builds argv (`opencode run <prompt> --model <name> --format json`) and parses newline-delimited JSON event output; the prompt must be the first positional argument after `run`, because `opencode` interprets trailing positional arguments as file paths
+- source evidence is passed as file attachments via repeated `--file <path>` arguments appended after the prompt; attachments are validated before transport — symlinks are rejected and each path must resolve to a readable regular file, otherwise the call fails with `invalid_files`
+- because the prompt travels as an argv positional, prompts exceeding 32,768 UTF-8 bytes (`PROMPT_ARG_MAX_BYTES`) fail immediately with `prompt_too_large` and are never retried
+- the per-call timeout defaults to 300s and is validated to the range [30s, 15min]; an out-of-range value fails with `invalid_timeout`
+- `type: "text"` event payloads are concatenated and parsed as the final JSON response; payload recovery is a deterministic cascade (direct parse → strip markdown fences → extract first balanced JSON value), and a single non-delimited JSON value is also accepted
 - `type: "error"` events are treated as failures
 - `opencode` responses must be schema-valid before entering the core model
-- invalid responses consume bounded retries (default 3)
+- invalid responses consume bounded retries (default 3); retries are sequential, with no concurrent subprocess overlap within a single call
+- terminal failures are classified into a closed taxonomy: `spawn_error`, `timeout`, `invalid_json`, `invalid_timeout`, `schema_validation_error`, `prompt_too_large`, `invalid_files`
 - all valid and invalid samples are preserved as evidence
 
 ### 7.5 Core to `z3` Boundary
@@ -1109,9 +1123,10 @@ Protocol rules:
 - SMT-LIB content is piped via stdin (`-in` flag), not temp files
 - compiled SMT-LIB excludes solver commands until query execution time
 - the adapter classifies exit into sat/unsat/timeout/unknown/error
-- error lines (`(error ...)`) override any verdict (verdicts after errors are unreliable)
+- the adapter always resolves and never rejects; spawn failures surface as `error` with `exitCode: null`
+- error lines (`(error ...)`) override any verdict (verdicts after errors are unreliable); `errorCount` reports how many `(error ...)` lines were observed
 - solver stdout/stderr, timeout, unknown, and error diagnostics are persisted verbatim
-- per-query timeout default is 30s
+- per-query timeout default is 30s, enforced by killing the child process with SIGKILL
 
 ---
 
@@ -1171,6 +1186,7 @@ Phase completion events include `duration_ms` and summary counts where applicabl
 | **Invalid LLM response** | Schema validation failure at adapter boundary | Retry consumed | Bounded retries (default 3); fail hard after exhaustion |
 | **Prompt injection** | Analyzed text elevated to system position | Distorted analysis | `sanitizeForCodeFence()` + fenced prompt construction in all LLM-backed phases |
 | **SMT-LIB syntax collision** | User-derived identifiers with reserved chars | Malformed solver inputs | `sanitizeIdentifier()` with hex escaping; reversible mapping comments |
+| **Report Markdown injection** | Untrusted evidence text contains Markdown control syntax | Findings spoof report structure, links, or emphasis | `neutralizeMarkdownInline()` neutralizes links, emphasis, code spans, table pipes, headings, block quotes, list items, and table-cell breakout (`RAE-EVID-RENDER-SAFE`) |
 | **Blind boundary violation** | Original text exposed to code-derived side | Undermines comparison methodology | Structural enforcement; violations surfaced as analysis defects |
 | **Manifest written prematurely** | Manifest before all outputs finalized | Partial output trusted as complete | `invalidateStaleManifest()` at run start; manifest written last |
 | **Output write failure** | Filesystem error during atomic write | Incomplete evidence set | Exit with `OutputError`; no manifest written; temp file cleaned up |
@@ -1261,6 +1277,7 @@ Relevant code: [`src/domain/result.ts`](src/domain/result.ts), [`src/domain/erro
 | **Formalization completes** | If `opencode` responds with valid output within retry bounds | Bounded retries per claim; three-phase strategy |
 | **Solver analysis completes** | If `z3` responds within per-query timeout | Per-query timeout (default 30s) |
 | **Cross-side implication completes** | If `z3` responds within per-query timeout | Per-query timeout; pair budget bounds total work (default 200) |
+| **Pairwise deeper-check completes** | If `z3` sub-check queries respond within per-query timeout; bounded fan-out via `mapBounded` | `PAIRWISE_SOLVER_CONCURRENCY` (3) plus one completeness query per group (per-group solver peak 4; global peak `concurrency × 4`); sub-check `timeout`/`unknown` surfaces one aggregated `logic.inconclusive` warning |
 | **Code-derived generation completes** | If `opencode` responds within timeout | Bounded retries per capability; per-call timeout (default 300s) |
 | **Code-derived formalization completes** | If `opencode` responds within retry bounds | Bounded retries per capability |
 | **Manifest is written** | If all required phases complete without fatal error | Pipeline completion triggers manifest write |
@@ -1397,6 +1414,7 @@ The tool has no end-user authentication or authorization model because it is a l
 | prompt injection | document content fenced in prompts; analyzed spec text never elevated into system-level instruction position | `sanitizeForCodeFence()` in [`src/domain/fence.ts`](src/domain/fence.ts); fenced prompt construction in qualitative and formalization modules |
 | filesystem overreach | all writes confined to `--output` directory; output paths resolved and validated up front | `resolveConfinedOutputPath()` with `precondition` in [`src/adapters/fs.ts`](src/adapters/fs.ts) |
 | SMT-LIB identifier injection | user-derived identifiers sanitized before writing SMT-LIB artifacts with injective fixed-width-6 escapes | `sanitizeIdentifier()` in [`src/domain/formal/identifiers.ts`](src/domain/formal/identifiers.ts) |
+| report rendering injection | untrusted spec-derived finding text (descriptions, provenance, evidence values, related claim IDs) rendered as inert Markdown data; cannot break out of list/table context or inject links, emphasis, code spans, or block structure | `neutralizeMarkdownInline()` in [`src/domain/reporting/render.ts`](src/domain/reporting/render.ts) (`RAE-EVID-RENDER-SAFE`) |
 | blind comparison boundary | original requirement text never crosses to the code-derived comparison or generation side | Structural enforcement in [`src/domain/code-backwards/derive.ts`](src/domain/code-backwards/derive.ts) and [`src/domain/code-backwards/blind-compare.ts`](src/domain/code-backwards/blind-compare.ts) |
 | subprocess output | captured via stdout/stderr arrays; no ambient shell risk | Chunked accumulation in [`src/adapters/process.ts`](src/adapters/process.ts) |
 | evidence integrity | solver inputs/outputs persisted verbatim; LLM responses preserved with full content | Adapter-level persistence in analysis modules |

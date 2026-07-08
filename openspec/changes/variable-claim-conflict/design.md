@@ -297,7 +297,7 @@ The merge core is the deterministic, side-effect-free kernel of this change, so 
 
 Group preflight in `logic-analysis.ts`:
 
-- Postcondition: when a group is rejected as `logic.invalid_group`, zero `compileSpecSmtlib()`, artifact-write, and `runZ3Query()` calls occur for that group (asserted in-code and re-checked by the contract/property zero-work tests).
+- Zero-work property (test-enforced): when a group is rejected as `logic.invalid_group`, zero `compileSpecSmtlib()`, artifact-write, and `runZ3Query()` calls occur for that group. This is a control-flow property verified by the independent mock-call-count oracle tests in `test/contract/logic-analysis.test.ts` and marked at the source short-circuit by a why-comment (`logic-analysis.ts:394-397`). An earlier revision asserted it in-code via a `postcondition` and per-exit `compileInvoked`/`artifactWriteInvoked`/`solverInvoked` booleans; those were removed as tautological self-certification, since a function cannot credibly certify its own zero-work.
 - Bounds preflight: `preflightGroupBounds` returns a `group_too_large` or `claim_too_many_declarations` issue (or `null`), composed bounds-first with `preflightGroupClaimIds`, so oversized groups reject gracefully as `logic.invalid_group` rather than throwing.
 
 Assertions are side-effect free and split into small single-fact checks so a failure names the exact violated contract.
@@ -353,6 +353,15 @@ In `logic-analysis.ts`:
 - Convert all conflict kinds into `logic.merge_conflict` findings with an exhaustive `switch (conflict.kind)` whose `default` branch calls `assertNever(conflict)` (from `src/domain/assert.ts`, matching the existing pattern at `src/domain/errors.ts`), so adding a fourth `SpecMergeConflict` variant becomes a compile-time error.
 - Keep severity hardcoded to `error` for all merge-conflict and invalid-group findings, independent of obligation.
 - Preserve both claim IDs in evidence. Include per-kind sanitized symbol, both raw names, both raw kinds where relevant, and both sorts for variable-sort conflicts.
+
+### Deeper-Check Inconclusive Surfacing And Solver Concurrency
+
+After a group is admitted (no invalid-group rejection) and `compiled.claimIds` fixes downstream inclusion, `analyzeSpecGroup()` runs the pairwise guard-activation sub-checks and the completeness sub-check over the included claims. Two behaviors added by the Section 8 hardening pass are recorded here so the design stays aligned with the implementation:
+
+- Inconclusive surfacing: when any pairwise guard-activation sub-check or the completeness sub-check returns a `timeout`/`unknown` verdict, the deeper-check layer surfaces one aggregated `logic.inconclusive` warning carrying only counts and sampled claim IDs. This extends the existing per-merged-capability inconclusive flow specified by `FLA-LOGIC-TIMEOUT` from the global query down to the deeper sub-checks; it introduces no new solver-result category (see Non-Goals) and never downgrades or suppresses an `error`-severity structural finding.
+- Solver-concurrency bound (`docs/typescript_style.md` rule 4): pairwise Z3 fan-out is capped at `PAIRWISE_SOLVER_CONCURRENCY` (3), and the completeness pass adds exactly one concurrent query, so a single group's deeper-check solver peak is 4. Under the group-level `mapBounded`, the global solver peak stays at `concurrency × 4`. The bounded fan-out uses the `mapBounded` adapter (`src/adapters/concurrency.ts`), which settles deterministically when an in-flight sibling rejects (Section 9, finding A1).
+
+The canonical `FLA-PAIRWISE` and `FLA-COMPLETENESS` requirement restatements that record this sub-check inconclusive behavior and the concurrency bound are deferred to `/opsx-archive` (see the tasks.md deferred list); this design note keeps the change's design record aligned with the implemented Section 8 behavior in the interim.
 
 ### Reporting Design
 
@@ -601,7 +610,7 @@ Cover empty groups; claims with no variables; duplicate variables within one cla
 ### Static And Runtime Validation
 
 - TypeScript strict compilation catches missing `SpecMergeConflict` fields and non-exhaustive `switch` handling; the `assertNever(conflict)` default branch makes a new conflict variant a compile error.
-- In-core `precondition`/`invariant`/`postcondition` assertions (see "Assertion Strategy") enforce the merge and preflight contracts at runtime and fail fast on any broken structural invariant.
+- In-core `precondition`/`invariant`/`postcondition` assertions (see "Assertion Strategy") enforce the merge-core contracts at runtime and fail fast on any broken structural invariant; the invalid-group zero-work property is a control-flow guarantee verified by the mock-call-count oracle tests rather than an in-core assertion.
 - Run `smtlib.test.ts`, `logic-analysis.test.ts`, `validate.test.ts`, reporting tests, and the state-machine/security property suite.
 - Run the full suite to catch consumers of the old conflict shape or old downstream filtering.
 - Run OpenSpec/trace coverage so new scenario IDs and modified model obligations are included in non-archived specs before tests call `traceSpec()`.

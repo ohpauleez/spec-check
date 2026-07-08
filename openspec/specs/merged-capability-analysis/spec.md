@@ -1014,7 +1014,7 @@ run failure_mode_scenario {
 ```
 
 ### Requirement: Preserve Source Provenance In Merged Output [MCA-MERGE-PROVEN]
-WHEN the spec-check tool emits merged requirements, merged scenarios, and derived claims from a merged capability view, THE spec-check tool SHALL preserve the original source-file provenance on each contributing item and SHALL use a separate synthetic merged capability key only for grouping and artifact naming.
+WHEN the spec-check tool emits merged requirements, merged scenarios, and derived claims from a merged capability view, THE spec-check tool SHALL preserve the original source-file provenance on each contributing item, SHALL use a separate synthetic merged capability key only for grouping and artifact naming, and SHALL treat all claims grouped under one synthetic merged capability key as one downstream compile-group identity boundary for specs-forward logic analysis.
 
 **References:**
 - `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Preconditions, Postconditions, and Invariants`
@@ -1040,6 +1040,15 @@ WHEN the spec-check tool persists specs-forward solver artifacts or report headi
 - Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345), [pipeline-helpers.ts:403 sanitizeLogicalFileForArtifacts()](/src/cli/pipeline-helpers.ts#L403)
 - Test: [merge-logic-routing.test.ts:57 writes logic artifacts under synthetic merged logicalFile artifact key](/test/contract/merge-logic-routing.test.ts#L57)
 - Test (integration): [merge-liveness.integration.test.ts:85 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L85)
+
+#### Scenario: Synthetic Logical Key Defines Compile-Group Boundary [MCA-MERGE-GROUP-KEY]
+WHEN the specs-forward pipeline groups derived claims for combined SMT-LIB compilation, THE spec-check tool SHALL group all claims that share one synthetic merged capability key into the same compile group and SHALL preserve claim identifier uniqueness as a downstream precondition for that group.
+
+**Postcondition:** Compile-group identity is consistent from merged-capability routing through logic analysis, and claim-ID safety checks are applied at the same grouping boundary used for solver submission.
+
+**Data Boundary:** The synthetic merged capability key is the `specFile` or logical-file identity for specs-forward compilation and artifact naming. It is not necessarily a raw source path and SHALL be treated as untrusted text when emitted into SMT-LIB comments or reports.
+
+**Identity Boundary:** All claims grouped under one synthetic merged capability key share one declaration namespace, one assertion-label namespace, one conflict-preflight scope, and one solver submission boundary. Raw and sanitized claim-ID uniqueness SHALL be enforced within this grouped boundary before solver work.
 
 #### Scenario: Merged Output Ordering Is Deterministic [MCA-MERGE-ORDER]
 WHEN the same finalized and delta inputs are merged on separate runs, THE spec-check tool SHALL produce the same requirement order, scenario order, capability order, findings, and logical grouping identity on each run.

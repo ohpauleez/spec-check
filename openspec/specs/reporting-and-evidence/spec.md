@@ -324,7 +324,7 @@ assert phases_monotonic {
 ```
 
 ### Requirement: Preserve Evidence For Every Surfaced Conclusion [RAE-PRESERVE-EVID]
-WHEN the spec-check tool emits a finding or final report conclusion, THE spec-check tool SHALL preserve the provenance, rationale, and supporting artifacts needed for a reviewer to inspect the basis of that conclusion.
+WHEN the spec-check tool emits a finding or final report conclusion, THE spec-check tool SHALL preserve the provenance, rationale, and supporting artifacts needed for a reviewer to inspect the basis of that conclusion, and SHALL render evidence-bearing report content so that preserved raw values remain inert data rather than report-structure control.
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Motivation`
@@ -370,6 +370,11 @@ WHEN a finding depends on an LLM-backed analysis response, THE spec-check tool S
 - Test: [qualitative.test.ts:21 runQualitativePasses returns merged findings](/test/contract/qualitative.test.ts#L21)
 - Test (property): [code-derived.property.test.ts:40 qualitative review prompts fence all documents](/test/property/code-derived.property.test.ts#L40)
 - Test (invariant): [global.invariant.test.ts:125 INV-11: prompts fence document content](/test/invariant/global.invariant.test.ts#L125), [safety-liveness.invariant.test.ts:156 LIVE-10: qualitative analysis completes](/test/invariant/safety-liveness.invariant.test.ts#L156)
+
+#### Scenario: Render Evidence Values As Inert Markdown Data [RAE-EVID-RENDER-SAFE]
+WHEN the spec-check tool renders finding descriptions, provenance, related claim identifiers, or evidence values into Markdown reports, THE spec-check tool SHALL neutralize inline Markdown control syntax in those raw values so they cannot render as links, emphasis, inline code spans, headings, list items, block quotes, or extra table cells.
+
+**Postcondition:** Evidence remains inspectable without creating synthetic report structure or misleading reviewer-visible findings.
 
 #### Requirement model
 
@@ -453,6 +458,15 @@ msg2.includes("--allow-archive"); //=> true
 const msg3 = formatCatalogEmptyMessage({ kind: "all_filtered" }); //=> type String
 msg3.includes("unknown policy reason"); //=> true
 ```
+
+#### Scenario: Merge And Invalid-Group Findings Preserve Conflict Evidence [RAE-SHAPE-MERGE-CONFLICT-EVIDENCE]
+WHEN the logic-analysis pipeline emits `logic.merge_conflict` or `logic.invalid_group`, THE finding SHALL use severity `error`, SHALL include the category, provenance, description, rationale, and evidence references, and SHALL preserve claim-attributed details needed to diagnose the structural defect.
+
+**Merge Evidence:** Function-signature conflicts SHALL preserve the shared sanitized symbol, both raw function names, both claim IDs, and the `[existingClaimId, excludedClaimId]` tuple. Variable-sort conflicts SHALL additionally preserve expected and conflicting sorts. Symbol-kind collisions SHALL preserve both raw symbol names and both declaration kinds, including the same-claim `[claimId, claimId]` edge case.
+
+**Invalid-Group Evidence:** Duplicate raw claim-ID findings SHALL list duplicated raw IDs and affected claims. Sanitized-ID collision findings SHALL list colliding raw IDs and the shared sanitized ID. These findings are structural identity errors, not merge conflicts.
+
+**Severity:** Merge conflicts and invalid compile groups SHALL be `error` severity independent of source obligation, because declaration conflicts and identity aliasing are structural defects rather than satisfiability outcomes.
 
 #### Requirement model
 

@@ -352,7 +352,7 @@ assert zero_candidates_implies_abort {
 ```
 
 ### Requirement: Formalization Sample Schema Validation [FLA-VALIDATE-SAMPLE]
-WHEN the spec-check tool receives a formalization sample from `opencode`, THE spec-check tool SHALL validate the sample against the logic IR schema including sort consistency, assertion well-formedness, and identifier format before accepting it into clustering.
+WHEN the spec-check tool receives a formalization sample from `opencode`, THE spec-check tool SHALL validate the sample against the logic IR schema including sort consistency, assertion well-formedness, identifier format, and same-claim declaration uniqueness before accepting it into clustering.
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
@@ -385,6 +385,21 @@ IF a formalization sample violates the logic IR schema, THEN THE spec-check tool
 ```typescript
 const { validateFormalizationSample } = await import("./src/domain/formal/validate.ts");
 const result = validateFormalizationSample({ claimId: "", obligation: "mandatory", variables: [], functions: [], assertions: [] }); //=> type Object
+result.ok; //=> false
+```
+
+#### Scenario: Same-Claim Declaration Collisions Rejected [FLA-SAMPLE-SAMECLAIM]
+IF a single claim declares overlapping raw variable and function names, OR declares duplicate same-kind variables or functions whose raw names sanitize to one symbol, THEN THE spec-check tool SHALL reject that sample during schema validation before it enters clustering.
+
+**Postcondition:** Same-claim structural declaration collisions that do not depend on merge order are rejected at validation; residual same-claim cross-kind sanitizer collisions are deferred to compiler-level `symbol_kind_collision` detection.
+
+##### Evidence
+- Implementation: [validate.ts:133 validateDeclarationCollisions()](/src/domain/formal/validate.ts#L133)
+- Test: [validate.test.ts:71 rejects raw variable/function name overlap within one claim](/test/contract/validate.test.ts#L71), [validate.test.ts:84 rejects duplicate variables that sanitize to the same symbol](/test/contract/validate.test.ts#L84), [validate.test.ts:101 rejects duplicate functions that sanitize to the same symbol](/test/contract/validate.test.ts#L101)
+- Example:
+```typescript
+const { validateFormalizationSample } = await import("./src/domain/formal/validate.ts");
+const result = validateFormalizationSample({ claimId: "REQ-X", obligation: "mandatory", variables: [{ name: "foo", sort: "Bool" }], functions: [{ name: "foo", args: ["Bool"], returns: "Bool" }], assertions: [{ id: "A1", expr: "(foo true)" }] }); //=> type Object
 result.ok; //=> false
 ```
 
@@ -455,16 +470,16 @@ assert invalid_never_in_candidates {
 ```
 
 ### Requirement: SMT-LIB Compilation And Identifier Sanitization [FLA-SMTLIB-COMPILE]
-WHEN the spec-check tool compiles logic IR into SMT-LIB artifacts, THE spec-check tool SHALL sanitize user-derived identifiers to prevent solver syntax collisions, SHALL include reversible mapping comments that link sanitized identifiers back to their original claim identifiers, SHALL emit only declarations and assertions without solver commands (`(check-sat)`), and SHALL expose decomposed assertion expressions alongside the compiled text for downstream query construction.
+WHEN the spec-check tool compiles logic IR into SMT-LIB artifacts, THE spec-check tool SHALL sanitize user-derived identifiers with an injective encoding to prevent solver syntax collisions and identifier aliasing, SHALL include reversible mapping comments that link sanitized identifiers back to their original claim identifiers, SHALL emit only declarations and assertions without solver commands (`(check-sat)`), and SHALL expose decomposed assertion expressions alongside the compiled text for downstream query construction.
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Constraints`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
 
 #### Scenario: Unsafe Identifier Sanitized [FLA-SMTLIB-SANITIZE]
-WHEN a claim identifier contains characters that conflict with SMT-LIB syntax (parentheses, pipe characters, whitespace, or special SMT-LIB reserved characters), THE spec-check tool SHALL replace them with a deterministic encoding (underscore plus hex escape) and emit a mapping comment.
+WHEN a claim identifier contains any code point outside the pass-through set of ASCII letters and digits `[A-Za-z0-9]` (for example parentheses, pipe characters, whitespace, a literal underscore, or a supplementary-plane character), THE spec-check tool SHALL iterate the identifier by Unicode code point, SHALL replace each such code point with `_` followed by exactly six uppercase hexadecimal digits of the Unicode code point, and SHALL emit a mapping comment.
 
-**Postcondition:** The SMT-LIB file is syntactically valid and the original identifier is recoverable from the mapping comment.
+**Postcondition:** The SMT-LIB file is syntactically valid, the encoding is uniquely decodable, and the original identifier is recoverable from the mapping comment.
 
 ##### Evidence
 - Implementation: [smtlib.ts:134 sanitizeIdentifier()](/src/domain/formal/smtlib.ts#L134)
@@ -475,16 +490,16 @@ WHEN a claim identifier contains characters that conflict with SMT-LIB syntax (p
 ```typescript
 const { sanitizeIdentifier } = await import("./src/domain/formal/smtlib.ts");
 const safe = sanitizeIdentifier("REQ_VALID_1"); //=> type String
-safe; //=> REQ_VALID_1
+safe; //=> REQ_00005FVALID_00005F1
 const unsafe = sanitizeIdentifier("REQ(1)|A"); //=> type String
 unsafe.includes("("); //=> false
 unsafe.includes("|"); //=> false
 ```
 
 #### Scenario: Valid Identifier Preserved [FLA-SMTLIB-PRESERVE]
-WHEN a claim identifier contains only SMT-LIB-safe characters, THE spec-check tool SHALL use the identifier unchanged in the SMT-LIB output.
+WHEN a claim identifier contains only pass-through characters `[A-Za-z0-9]` and does not begin with a digit, THE spec-check tool SHALL use the identifier unchanged in the SMT-LIB output.
 
-**Postcondition:** No unnecessary transformation is applied to safe identifiers.
+**Postcondition:** No unnecessary transformation is applied to identifiers already drawn entirely from the pass-through set.
 
 ##### Evidence
 - Implementation: [smtlib.ts:134 sanitizeIdentifier()](/src/domain/formal/smtlib.ts#L134)
@@ -573,7 +588,7 @@ assert safe_ids_preserved {
 ```
 
 ### Requirement: Per-Spec Combined SMT-LIB Compilation [FLA-SPEC-COMBINE]
-WHEN the spec-check tool performs specs-forward logic analysis, THE spec-check tool SHALL combine all formalized claims from a single merged capability analysis unit into exactly one SMT-LIB file, SHALL deduplicate variable and function declarations across claims, and SHALL use named assertions (`(assert (! expr :named label))`) to enable unsat-core identification. The compiled output SHALL NOT include solver commands (`check-sat`, `set-option`, `get-unsat-core`) — the logic analysis orchestrator appends these at query time using a two-phase approach (Phase 1: satisfiability check only; Phase 2: re-run with `(set-option :produce-unsat-cores true)` and `(get-unsat-core)` only when UNSAT is detected).
+WHEN the spec-check tool performs specs-forward logic analysis, THE spec-check tool SHALL combine all formalized claims from a single merged capability analysis unit into exactly one SMT-LIB file, SHALL deduplicate compatible variable and function declarations across claims by final sanitized symbol identity, and SHALL use named assertions (`(assert (! expr :named label))`) to enable unsat-core identification. The compiled output SHALL NOT include solver commands (`check-sat`, `set-option`, `get-unsat-core`) — the logic analysis orchestrator appends these at query time using a two-phase approach (Phase 1: satisfiability check only; Phase 2: re-run with `(set-option :produce-unsat-cores true)` and `(get-unsat-core)` only when UNSAT is detected).
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`
@@ -583,27 +598,149 @@ WHEN the spec-check tool performs specs-forward logic analysis, THE spec-check t
 - `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Interaction Protocols`
 
 #### Scenario: Variable And Function Deduplication [FLA-SPEC-DEDUP]
-WHEN multiple claims from the same merged capability analysis unit declare identical variable or function names with identical sorts or signatures, THE spec-check tool SHALL emit only one declaration in the combined output.
+WHEN multiple claims from the same merged capability analysis unit declare identical variable or function names with identical sorts or signatures after sanitization, THE spec-check tool SHALL emit only one declaration in the combined output and SHALL keep all compatible claims included.
 
-**Postcondition:** The combined SMT-LIB file has no duplicate declarations from compatible claims.
+**Postcondition:** The combined SMT-LIB file has no duplicate declarations from compatible claims, and compatible redeclarations do not re-anchor declaration ownership to a later claim.
 
 ##### Evidence
 - Implementation: [smtlib.ts:265 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L265)
 - Test: [smtlib.test.ts:67 deduplicates identical variable declarations](/test/contract/smtlib.test.ts#L67), [smtlib.test.ts:79 deduplicates identical function declarations](/test/contract/smtlib.test.ts#L79)
 
 #### Scenario: Function Signature Conflict Detection [FLA-SPEC-CONFLICT]
-IF two claims from the same merged capability analysis unit declare the same function name with incompatible signatures, THEN THE spec-check tool SHALL emit a `logic.merge_conflict` finding, SHALL exclude the conflicting claim from the combined file, and SHALL preserve both claim identifiers in the finding evidence.
+IF two claims from the same merged capability analysis unit declare the same sanitized function symbol with incompatible signatures, THEN THE spec-check tool SHALL emit a `logic.merge_conflict` finding, SHALL exclude the later conflicting claim from the combined file, and SHALL preserve both claim identifiers, both raw function names, and the shared sanitized symbol in the finding evidence.
 
-**Postcondition:** Signature conflicts are surfaced as findings rather than producing malformed solver input.
+**Postcondition:** Function-signature conflicts are surfaced as findings rather than producing malformed solver input; no surviving sanitized function symbol has more than one signature, and the excluded claim contributes no assertions or declarations to the combined file.
+
+##### Evidence
+- Implementation: [smtlib.ts:278 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L278), [logic-analysis.ts:315 conflictToFinding()](/src/domain/formal/logic-analysis.ts#L315)
+- Test: [smtlib.test.ts:115 detects function signature conflicts and excludes conflicting claims](/test/contract/smtlib.test.ts#L115), [logic-analysis.test.ts:575 maps each merge conflict kind to merge_conflict finding with stable evidence](/test/contract/logic-analysis.test.ts#L575)
+- Test (property): [logic.property.test.ts:700 function-signature conflict histories keep function-conflict-only scope](/test/property/logic.property.test.ts#L700)
+- Example:
+```typescript
+const { compileSpecSmtlib } = await import("./src/domain/formal/smtlib.ts");
+const { toClaimId } = await import("./src/domain/branded.ts");
+const result = compileSpecSmtlib("spec.md", [{ claimId: toClaimId("R1"), obligation: "mandatory", variables: [], functions: [{ name: "f", args: ["Bool"], returns: "Bool" }], assertions: [{ id: "A1", expr: "(f true)" }] }, { claimId: toClaimId("R2"), obligation: "mandatory", variables: [], functions: [{ name: "f", args: ["Bool", "Bool"], returns: "Bool" }], assertions: [{ id: "A1", expr: "true" }] }]); //*
+result.conflicts[0].kind; //=> function_signature_mismatch
+result.claimIds.includes("R2"); //=> false
+```
+
+#### Scenario: Variable Sort Conflict Detection [FLA-SPEC-VARSORT-CONFLICT]
+IF two claims from the same merged capability analysis unit declare the same sanitized variable symbol with incompatible sorts, THEN THE spec-check tool SHALL emit a `logic.merge_conflict` finding for `variable_sort_mismatch`, SHALL exclude the later conflicting claim from the combined file, and SHALL preserve both claim identifiers, both raw variable names, the shared sanitized symbol, and both sorts in the finding evidence.
+
+**Postcondition:** No surviving combined SMT-LIB artifact contains one sanitized variable symbol with more than one sort.
+
+##### Evidence
+- Implementation: [smtlib.ts:278 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L278), [logic-analysis.ts:315 conflictToFinding()](/src/domain/formal/logic-analysis.ts#L315)
+- Test: [smtlib.test.ts:135 detects variable sort mismatch and excludes later claim](/test/contract/smtlib.test.ts#L135), [logic-analysis.test.ts:575 maps each merge conflict kind to merge_conflict finding with stable evidence](/test/contract/logic-analysis.test.ts#L575)
+- Test (property): [logic.property.test.ts:864 regression FLA-SPEC-CONFLICT-ORDER preserves first claimant after reorder](/test/property/logic.property.test.ts#L864)
+- Example:
+```typescript
+const { compileSpecSmtlib } = await import("./src/domain/formal/smtlib.ts");
+const { toClaimId } = await import("./src/domain/branded.ts");
+const vsc = compileSpecSmtlib("spec.md", [{ claimId: toClaimId("R1"), obligation: "mandatory", variables: [{ name: "S", sort: "Bool" }], functions: [], assertions: [{ id: "A1", expr: "S" }] }, { claimId: toClaimId("R2"), obligation: "mandatory", variables: [{ name: "S", sort: "Int" }], functions: [], assertions: [{ id: "A1", expr: "(> S 0)" }] }]); //*
+vsc.conflicts[0].kind; //=> variable_sort_mismatch
+vsc.claimIds.join(","); //=> R1
+```
+
+#### Scenario: Symbol Kind Collision Detection [FLA-SPEC-SYMKIND-CONFLICT]
+IF one claim declares a sanitized symbol as a variable and another claim declares the same sanitized symbol as a function, OR IF one claim contains distinct raw names that sanitize to the same symbol with opposite declaration kinds, THEN THE spec-check tool SHALL emit a `logic.merge_conflict` finding for `symbol_kind_collision`, SHALL exclude the offending claim from the combined file, and SHALL preserve both claim identifiers, both raw names, both declaration kinds, and the shared sanitized symbol in the finding evidence.
+
+**Postcondition:** No surviving combined SMT-LIB artifact contains one sanitized symbol declared as both `declare-const` and `declare-fun`.
+
+##### Evidence
+- Implementation: [smtlib.ts:278 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L278), [logic-analysis.ts:315 conflictToFinding()](/src/domain/formal/logic-analysis.ts#L315)
+- Test: [smtlib.test.ts:155 detects symbol kind collision across claims](/test/contract/smtlib.test.ts#L155), [smtlib.test.ts:175 detects same-claim symbol kind collision](/test/contract/smtlib.test.ts#L175)
+- Test (property): [logic.property.test.ts:877 regression FLA-SPEC-SYMKIND-CONFLICT same-claim cross-kind collision excludes claim](/test/property/logic.property.test.ts#L877), [logic.property.test.ts:894 regression FLA-SPEC-SYMKIND-CONFLICT same-claim collision can cite excluded existing claim](/test/property/logic.property.test.ts#L894)
+- Example:
+```typescript
+const { compileSpecSmtlib } = await import("./src/domain/formal/smtlib.ts");
+const { toClaimId } = await import("./src/domain/branded.ts");
+const skc = compileSpecSmtlib("spec.md", [{ claimId: toClaimId("R1"), obligation: "mandatory", variables: [{ name: "P", sort: "Bool" }], functions: [], assertions: [{ id: "A1", expr: "P" }] }, { claimId: toClaimId("R2"), obligation: "mandatory", variables: [], functions: [{ name: "P", args: ["Bool"], returns: "Bool" }], assertions: [{ id: "A1", expr: "(P true)" }] }]); //*
+skc.conflicts[0].kind; //=> symbol_kind_collision
+```
+
+#### Scenario: Single Conflict Reason With Fixed Precedence [FLA-SPEC-CONFLICT-ORDER]
+IF a claim introduces more than one kind of incompatible declaration binding relative to already-established sanitized symbols, THEN THE spec-check tool SHALL record exactly one conflict reason for that excluded claim under the fixed precedence `variable_sort_mismatch`, then `function_signature_mismatch`, then `symbol_kind_collision`.
+
+**Postcondition:** Every excluded claim carries exactly one conflict reason, and the highest-precedence conflict is the reason reported.
+
+##### Evidence
+- Implementation: [smtlib.ts:278 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L278)
+- Test: [smtlib.test.ts:196 uses conflict precedence variable before function before symbol-kind](/test/contract/smtlib.test.ts#L196)
+- Test (property): [logic.property.test.ts:864 regression FLA-SPEC-CONFLICT-ORDER preserves first claimant after reorder](/test/property/logic.property.test.ts#L864)
+
+#### Scenario: Surviving Claim Set Is Authoritative [FLA-SPEC-CLAIMIDS]
+WHEN the spec-check tool finishes combining a compile group, THE spec-check tool SHALL expose `compiled.claimIds` as the authoritative surviving-claim set containing exactly the non-excluded claims in original input order, and downstream checks SHALL derive claim inclusion from `compiled.claimIds` rather than from conflict evidence tuples.
+
+**Postcondition:** Excluded claims contribute no assertions and no unique declarations to the emitted SMT-LIB, and `compiled.claimIds` is the single source of truth for inclusion across deeper checks, assertion labels, and unsat-core resolution.
+
+##### Evidence
+- Implementation: [smtlib.ts:278 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L278)
+- Test: [smtlib.test.ts:115 detects function signature conflicts and excludes conflicting claims](/test/contract/smtlib.test.ts#L115)
+- Test (property): [logic.property.test.ts:655 compile is deterministic for the same generated state](/test/property/logic.property.test.ts#L655), [logic.property.test.ts:675 append-compatible histories are monotonic when no reorders/removals occur](/test/property/logic.property.test.ts#L675)
+- Example:
+```typescript
+const { compileSpecSmtlib } = await import("./src/domain/formal/smtlib.ts");
+const { toClaimId } = await import("./src/domain/branded.ts");
+const surv = compileSpecSmtlib("spec.md", [{ claimId: toClaimId("R1"), obligation: "mandatory", variables: [{ name: "S", sort: "Bool" }], functions: [], assertions: [{ id: "A1", expr: "S" }] }, { claimId: toClaimId("R2"), obligation: "mandatory", variables: [{ name: "S", sort: "Int" }], functions: [], assertions: [{ id: "A1", expr: "(> S 0)" }] }]); //*
+surv.claimIds.join(","); //=> R1
+```
+
+#### Scenario: Duplicate Claim Identifier Rejected Before Solver Execution [FLA-SPEC-DUPLICATE-CLAIM-ID]
+IF a compile group contains duplicate raw claim identifiers or duplicate sanitized claim identifiers, THEN THE spec-check tool SHALL emit `logic.invalid_group`, SHALL skip combined SMT-LIB compilation for that group, and SHALL NOT invoke the solver for that group.
+
+**Postcondition:** Claim identity remains one-to-one across included claims, assertion labels, unsat-core resolution, and finding evidence.
+
+##### Evidence
+- Implementation: [logic-analysis.ts:200 preflightGroupClaimIds()](/src/domain/formal/logic-analysis.ts#L200), [logic-analysis.ts:380 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L380)
+- Test: [logic-analysis.test.ts:556 rejects duplicate raw claim IDs as invalid group before compile and solver work](/test/contract/logic-analysis.test.ts#L556), [logic-analysis.test.ts:619 detects constructed sanitized-id collision in preflight](/test/contract/logic-analysis.test.ts#L619)
+- Test (property): [logic.property.test.ts:717 constructed sanitized collisions reject with duplicate_sanitized_claim_id](/test/property/logic.property.test.ts#L717), [logic.property.test.ts:733 logic analysis performs zero solver and write work for invalid groups](/test/property/logic.property.test.ts#L733)
+- Example:
+```typescript
+const { preflightGroupClaimIds } = await import("./src/domain/formal/logic-analysis.ts");
+const { toClaimId } = await import("./src/domain/branded.ts");
+const dup = preflightGroupClaimIds([{ claimId: toClaimId("R1"), obligation: "mandatory", variables: [], functions: [], assertions: [{ id: "A1", expr: "true" }] }, { claimId: toClaimId("R1"), obligation: "mandatory", variables: [], functions: [], assertions: [{ id: "A1", expr: "true" }] }]); //=> type Object
+dup.kind; //=> duplicate_raw_claim_id
+```
+
+#### Scenario: Oversized Compile Group Rejected Before Solver Execution [FLA-SPEC-GROUP-BOUNDS]
+IF a compile group contains more claims than `CLAIMS_PER_GROUP_MAX`, OR any single claim declares more variable-plus-function symbols than `DECLARATIONS_PER_CLAIM_MAX`, THEN THE spec-check tool SHALL emit `logic.invalid_group`, SHALL skip combined SMT-LIB compilation for that group, and SHALL NOT invoke the solver or write solver artifacts for that group.
+
+**Postcondition:** An oversized group is rejected as a graceful finding rather than aborting the run; valid sibling groups in the same analysis still compile and run to completion.
+
+##### Evidence
+- Implementation: [logic-analysis.ts:267 preflightGroupBounds()](/src/domain/formal/logic-analysis.ts#L267), [smtlib.ts:278 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L278)
+- Test: [smtlib.test.ts:68 throws its size precondition as an unreachable backstop when called directly past a bound](/test/contract/smtlib.test.ts#L68), [logic-analysis.test.ts:631 rejects an oversized compile group as invalid group before compile and solver work](/test/contract/logic-analysis.test.ts#L631), [logic-analysis.test.ts:651 rejects a claim with too many declarations as invalid group scoped to that claim](/test/contract/logic-analysis.test.ts#L651), [logic-analysis.test.ts:681 rejects only the oversized group while a valid sibling group still runs](/test/contract/logic-analysis.test.ts#L681)
+- Test (property): [logic.property.test.ts:761 preflightGroupBounds accepts group cardinality at the limit and flags it one past the limit](/test/property/logic.property.test.ts#L761), [logic.property.test.ts:780 preflightGroupBounds counts variables plus functions against the per-claim limit](/test/property/logic.property.test.ts#L780)
+- Example:
+```typescript
+const { preflightGroupBounds } = await import("./src/domain/formal/logic-analysis.ts");
+const { toClaimId } = await import("./src/domain/branded.ts");
+preflightGroupBounds([{ claimId: toClaimId("R1"), obligation: "mandatory", variables: [{ name: "S", sort: "Bool" }], functions: [], assertions: [{ id: "A1", expr: "S" }] }]); //=> null
+```
+
+#### Scenario: Dangling Assertion Reference Becomes Solver Error [FLA-SPEC-DANGLING-REF]
+IF a claim assertion references a declaration that becomes undefined after another claim is merge-excluded, THEN THE spec-check tool SHALL surface the unresolved reference through the `logic.solver_error` path rather than silently emitting malformed solver input.
+
+**Postcondition:** Assertion-reference resolution is out of scope for merge exclusion; any resulting dangling reference is reported as a solver error with preserved solver input and output as evidence.
+
+##### Evidence
+- Implementation: [logic-analysis.ts:380 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L380)
+- Test: [logic-analysis.test.ts:318 solver error produces logic.solver_error finding](/test/contract/logic-analysis.test.ts#L318)
+
+#### Scenario: Untrusted Comment Text Stays Inert [FLA-SPEC-COMMENT-SAFE]
+WHEN the spec-check tool emits SMT-LIB mapping comments generated from untrusted strings such as claim identifiers, raw symbol names, or source paths, THE spec-check tool SHALL escape line-breaking characters so the comment text cannot introduce executable solver commands on following lines.
+
+**Postcondition:** Raw evidence embedded in compiler output remains inert comment data and cannot inject SMT-LIB commands by starting a new line.
 
 ##### Evidence
 - Implementation: [smtlib.ts:265 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L265)
 - Test: [smtlib.test.ts:92 detects function signature conflicts and excludes conflicting claims](/test/contract/smtlib.test.ts#L92)
 
 #### Scenario: Named Assertion Labels Map To Claims [FLA-SPEC-NAMED]
-WHEN the spec-check tool generates named assertions in the combined SMT-LIB, THE label for each assertion SHALL encode the source claim identifier and assertion index so that unsat-core results can be mapped back to specific claims.
+WHEN the spec-check tool generates named assertions in the combined SMT-LIB, THE label for each assertion SHALL encode the source claim identifier and assertion index so that unsat-core results can be mapped back to specific included claims.
 
-**Postcondition:** The assertion-name-to-claim-ID mapping is deterministic and reversible.
+**Postcondition:** The assertion-name-to-claim-ID mapping is deterministic and reversible, and `assertionNameMap` contains labels for included claims only.
 
 ##### Evidence
 - Implementation: [smtlib.ts:265 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L265)
@@ -616,6 +753,11 @@ const result = compileSpecSmtlib("spec.md", [{ claimId: toClaimId("R1"), obligat
 result.smtlib.includes(":named R1__a0"); //=> true
 result.assertionNameMap.get("R1__a0"); //=> R1
 ```
+
+#### Scenario: Assertion Label Encoding Is Injective [FLA-SPEC-LABEL-ENCODE]
+WHEN the spec-check tool encodes a named-assertion label, THE spec-check tool SHALL form the label as `<sanitizedClaimId>__a<index>`, where `sanitizeIdentifier()` is injective: it passes through only ASCII letters and digits `[A-Za-z0-9]`, reserves `_` as the escape lead, and escapes every other code point, including a literal underscore, as `_` followed by exactly six uppercase hexadecimal digits of the Unicode code point. It SHALL escape a leading raw digit, SHALL map the empty string to `_`, and SHALL perform no Unicode normalization.
+
+**Postcondition:** The `__a<index>` separator remains unambiguous and distinct raw claim IDs cannot produce colliding assertion labels.
 
 #### Requirement model
 
@@ -1156,7 +1298,7 @@ assert solver_error_surfaced {
 ```
 
 ### Requirement: Pairwise Guard-Activation Contradiction Checking [FLA-PAIRWISE]
-WHEN the global satisfiability check for a spec group returns sat, THE spec-check tool SHALL extract conditional assertions (implications of the form `(=> guard consequent)`), SHALL identify pairs from different claims, SHALL check each pair by forcing both guards active and asserting both consequents simultaneously, and SHALL emit a `logic.conditional_contradiction` finding when the resulting query is unsatisfiable (indicating the consequents genuinely conflict when both guards hold).
+WHEN the global satisfiability check for a spec group returns sat, THE spec-check tool SHALL extract conditional assertions (implications of the form `(=> guard consequent)`), SHALL identify pairs from different claims, SHALL check each pair by forcing both guards active and asserting both consequents simultaneously, SHALL emit a `logic.conditional_contradiction` finding when the resulting query is unsatisfiable, and SHALL surface any pairwise `timeout` or `unknown` verdicts as one aggregated `logic.inconclusive` warning carrying counts and sampled claim IDs.
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`
@@ -1183,9 +1325,9 @@ WHEN two conditional assertions have guards that can coexist and consequents tha
 - Test: [logic-analysis.test.ts:294 compatible conditional assertions produce no pairwise finding](/test/contract/logic-analysis.test.ts#L294)
 
 #### Scenario: Pairwise Check Bounded By Pair Count [FLA-PAIRWISE-BOUND]
-WHEN the number of candidate pairs exceeds the configured `--pair-budget` (default 200), THE spec-check tool SHALL check only up to the limit and SHALL NOT block indefinitely on quadratic pair explosion. The `--pair-budget` controls pairwise bounds for both specs-forward guard-activation checks and code-backwards cross-side implication checks.
+WHEN the number of candidate pairs exceeds the configured `--pair-budget` (default 200), THE spec-check tool SHALL check only up to the limit, SHALL cap pairwise Z3 fan-out at `PAIRWISE_SOLVER_CONCURRENCY` (`3`), and SHALL NOT block indefinitely on quadratic pair explosion. The `--pair-budget` controls pairwise bounds for both specs-forward guard-activation checks and code-backwards cross-side implication checks.
 
-**Postcondition:** Pairwise analysis completes in bounded time regardless of claim count.
+**Postcondition:** Pairwise analysis completes in bounded time regardless of claim count, and with the one concurrent completeness query the per-group deeper-check solver peak remains `4` and the global peak remains bounded by group concurrency.
 
 ##### Evidence
 - Implementation: [logic-analysis-checks.ts:111 runPairwiseContradictionChecks()](/src/domain/formal/logic-analysis-checks.ts#L111)
@@ -1276,7 +1418,7 @@ assert pairwise_severity_correct {
 ```
 
 ### Requirement: Completeness Gap Detection [FLA-COMPLETENESS]
-WHEN the global satisfiability check for a spec group returns sat AND all assertions in the spec group are conditional (implications), THE spec-check tool SHALL negate all guards simultaneously and check satisfiability. IF the result is sat, THE tool SHALL emit a `logic.completeness_gap` warning finding indicating that there exist reachable states where no conditional rule applies and behavior is unspecified.
+WHEN the global satisfiability check for a spec group returns sat AND all assertions in the spec group are conditional (implications), THE spec-check tool SHALL negate all guards simultaneously and check satisfiability. IF the result is sat, THE tool SHALL emit a `logic.completeness_gap` warning finding indicating that there exist reachable states where no conditional rule applies and behavior is unspecified. IF the completeness query returns `timeout` or `unknown`, THE tool SHALL surface that outcome as one aggregated `logic.inconclusive` warning carrying counts and sampled claim IDs.
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`

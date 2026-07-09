@@ -187,7 +187,7 @@ describe("opencode adapter contract", () => {
   });
 
   it("property: accepts prefix+json wrappers when prefix excludes braces/brackets", async () => {
-    traceSpec("FLA-VALIDATE-SAMPLE");
+    traceSpec("FLA-VALIDATE-SAMPLE", "FLA-JSON-WRAP");
     const { runProcess } = await import("../../src/adapters/process.js");
     const mocked = vi.mocked(runProcess);
 

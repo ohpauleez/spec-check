@@ -1050,6 +1050,18 @@ WHEN the specs-forward pipeline groups derived claims for combined SMT-LIB compi
 
 **Identity Boundary:** All claims grouped under one synthetic merged capability key share one declaration namespace, one assertion-label namespace, one conflict-preflight scope, and one solver submission boundary. Raw and sanitized claim-ID uniqueness SHALL be enforced within this grouped boundary before solver work.
 
+##### Evidence
+- Implementation: [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345), [logic-analysis.ts:146 runLogicAnalysis()](/src/domain/formal/logic-analysis.ts#L146), [logic-analysis.ts:200 preflightGroupClaimIds()](/src/domain/formal/logic-analysis.ts#L200)
+- Test: [merge-logic-routing.test.ts:35 runs one logic group per merged capability and detects contradictions in one run](/test/contract/merge-logic-routing.test.ts#L35)
+- Example:
+```typescript
+const { preflightGroupClaimIds } = await import("./src/domain/formal/logic-analysis.ts");
+const uniqueGroup = [{ claimId: "CAP-A-1" }, { claimId: "CAP-A-2" }];
+preflightGroupClaimIds(uniqueGroup); //=> null
+const duplicateGroup = [{ claimId: "CAP-A-1" }, { claimId: "CAP-A-1" }];
+preflightGroupClaimIds(duplicateGroup).kind; //=> duplicate_raw_claim_id
+```
+
 #### Scenario: Merged Output Ordering Is Deterministic [MCA-MERGE-ORDER]
 WHEN the same finalized and delta inputs are merged on separate runs, THE spec-check tool SHALL produce the same requirement order, scenario order, capability order, findings, and logical grouping identity on each run.
 

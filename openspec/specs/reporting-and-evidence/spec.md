@@ -69,6 +69,24 @@ sig ManifestEntry {
   entryPhase : one Phase
 }
 
+// --- Catalog construction lifecycle (for RAE-CATALOG-ERROR) ---
+
+// The catalog stage gates all downstream analysis. A run may only complete
+// phases once the catalog is Constructed; if no active documents survive,
+// catalog construction Aborts the pipeline.
+abstract sig CatalogStage {}
+one sig CatalogPending, CatalogConstructed, CatalogAborted extends CatalogStage {}
+
+// The three mutually-exclusive empty-catalog reasons classified from input
+// counts (mirrors classifyEmptyCatalogReason).
+abstract sig CatalogEmptyReason {}
+one sig NoRecognizedDocs, AllArchived, AllFiltered extends CatalogEmptyReason {}
+
+// CLI exit codes surfaced by the tool (only the codes named in this spec).
+// Code 0 = success, 1 = findings present, 5 = CatalogError.
+abstract sig ExitCode {}
+one sig ExitSuccess, ExitFindings, ExitCatalogError extends ExitCode {}
+
 // --- Phase-to-report mapping ---
 fun phaseToReport : Phase -> ReportName {
   (QualPass1 -> R_1_1) + (QualPass2 -> R_1_2) + (CoveragePhase -> R_1_3) +
@@ -92,10 +110,13 @@ fun requiredReports : set ReportName {
 // --- Run state (behavioral) ---
 one sig Run {
   mode : one AnalysisMode,
+  var catalog : one CatalogStage,
+  var catalogReason : lone CatalogEmptyReason,
   var completedPhases : set Phase,
   var findings : set Finding,
   var reports : set ReportName,
   var manifestPresent : one Bool,
+  var manifestFiles : set ReportName,
   var failed : one Bool
 }
 
@@ -174,6 +195,141 @@ msg.includes("capability resolution"); //=> true
 msg.includes("2"); //=> true
 ```
 
+#### Requirement model
+
+```alloy
+// ===================================================================
+// RAE-CATALOG-ERROR: catalog-empty classification, exit code, and the
+// suppression of vacuous downstream reports.
+//
+// Two complementary sub-models:
+//   (1) A STATIC classification model that mirrors classifyEmptyCatalogReason
+//       (src/domain/parser/catalog.ts): from the observable input predicates
+//       it computes exactly one of the three empty reasons. This validates
+//       determinism, totality, and precedence of the reason taxonomy.
+//   (2) TEMPORAL ties into the Run state machine: an aborted catalog is a
+//       failure that suppresses all downstream reports and surfaces the
+//       CatalogError exit code.
+// ===================================================================
+
+// --- (1) Static classification sub-model ---
+
+// The classifier branches on three observable predicates, mirroring the
+// integer-count inputs of classifyEmptyCatalogReason:
+//   active   <-> activeCount > 0
+//   recog    <-> recognizedCount > 0
+//   allArch  <-> excludedArchivedCount = recognizedCount > 0
+// Modeled as Bool parameters (no carrier sig) so every existing analysis
+// command keeps its scope list unchanged.
+
+// Well-formedness of the count relationships:
+//  - active documents are recognized survivors, so active implies recognized;
+//  - if every recognized doc is archived then none survive (active is false);
+//  - "all archived" presupposes at least one recognized doc.
+pred catalogCountsWF [active, recog, allArch : Bool] {
+  active = True implies recog = True
+  allArch = True implies recog = True
+  active = True implies allArch = False
+}
+
+// classifyEmptyCatalogReason as a total function of the observable predicates.
+// Precedence exactly matches the implementation:
+//   active            -> no error (empty result)
+//   not recognized    -> NoRecognizedDocs
+//   all archived      -> AllArchived
+//   otherwise         -> AllFiltered
+fun classify [active, recog, allArch : Bool] : lone CatalogEmptyReason {
+  (active = True) implies none
+  else (recog = False) implies NoRecognizedDocs
+  else (allArch = True) implies AllArchived
+  else AllFiltered
+}
+
+// Only AllArchived carries the `--allow-archive` remediation (RAE-CATALOG-ARCHIVE).
+fun remediationAllowArchive : set CatalogEmptyReason { AllArchived }
+
+// Static exit-code numbering: success 0, findings 1, catalog error 5.
+fun exitNum [e : ExitCode] : Int {
+  (e = ExitSuccess) implies 0
+  else (e = ExitFindings) implies 1
+  else 5
+}
+
+// A reason is produced exactly when the catalog is empty (no active docs).
+assert classify_empty_iff_no_active {
+  all active, recog, allArch : Bool | catalogCountsWF[active, recog, allArch] implies
+    (some classify[active, recog, allArch] iff active = False)
+}
+
+// Classification is total on empty catalogs: precisely one reason.
+assert classify_total_when_empty {
+  all active, recog, allArch : Bool |
+    (catalogCountsWF[active, recog, allArch] and active = False) implies
+      one classify[active, recog, allArch]
+}
+
+// The reason taxonomy respects the implementation precedence: each reason is
+// emitted only under its defining condition (mutually exclusive, deterministic).
+assert classify_matches_precedence {
+  all active, recog, allArch : Bool | catalogCountsWF[active, recog, allArch] implies {
+    classify[active, recog, allArch] = NoRecognizedDocs implies recog = False
+    classify[active, recog, allArch] = AllArchived implies
+      (recog = True and allArch = True)
+    classify[active, recog, allArch] = AllFiltered implies
+      (recog = True and allArch = False and active = False)
+  }
+}
+
+// Only the archived-only case recommends --allow-archive.
+assert only_archived_recommends_allow_archive {
+  remediationAllowArchive = AllArchived
+  NoRecognizedDocs not in remediationAllowArchive
+  AllFiltered not in remediationAllowArchive
+}
+
+// Exit-code numbering matches the codes named in the spec (0/1/5).
+assert exit_codes_match_spec {
+  exitNum[ExitSuccess] = 0
+  exitNum[ExitFindings] = 1
+  exitNum[ExitCatalogError] = 5
+}
+
+// --- (2) Temporal ties to the Run state machine ---
+
+// The exit code surfaced for the terminal Run state. Catalog abort dominates
+// (code 5); otherwise findings raise code 1; a clean run is code 0.
+fun runExit : one ExitCode {
+  (Run.catalog = CatalogAborted) implies ExitCatalogError
+  else (some Run.findings) implies ExitFindings
+  else ExitSuccess
+}
+
+// RAE-REPORT-CATALOG: an aborted catalog never emits downstream reports.
+assert catalog_abort_no_reports {
+  always (Run.catalog = CatalogAborted implies no Run.reports)
+}
+
+// An aborted catalog is a failed run (and thus, via no_manifest_on_failure,
+// never produces a completion manifest).
+assert catalog_abort_is_failure {
+  always (Run.catalog = CatalogAborted implies
+    (Run.failed = True and Run.manifestPresent = False))
+}
+
+// Phases run only after the catalog is successfully constructed: any completed
+// phase implies the catalog reached CatalogConstructed.
+assert phases_require_catalog {
+  always (some Run.completedPhases implies Run.catalog = CatalogConstructed)
+}
+
+// RAE-CATALOG-ERROR: an aborted catalog surfaces the CatalogError exit code.
+// Combined with exit_codes_match_spec (ExitCatalogError = 5) this establishes
+// the required "exit code 5" without introducing Int into the temporal search.
+assert catalog_abort_surfaces_error_code {
+  always (Run.catalog = CatalogAborted implies runExit = ExitCatalogError)
+}
+```
+
 ### Requirement: Emit Bounded Analysis Reports [RAE-EMIT-REPORTS]
 WHEN one or more analysis phases complete, THE spec-check tool SHALL write the phase reports and synthesized summary reports defined for the selected analysis mode under the configured output directory. IF the run stops at catalog construction because no active documents survive, THEN THE spec-check tool SHALL report the catalog error instead of emitting vacuous downstream analysis reports.
 
@@ -229,16 +385,21 @@ pred complete_phase [p : Phase] {
   // Guard
   p not in Run.completedPhases
   p in enabledPhases
+  Run.catalog = CatalogConstructed   // phases run only after catalog survives
   Run.failed = False
   Run.manifestPresent = False    // stale manifest must be removed first
   // Effect: phase marked complete, report written
   Run.completedPhases' = Run.completedPhases + p
   Run.reports' = Run.reports + phaseToReport[p]
-  // Findings monotonically increase (new findings added)
-  Run.findings in Run.findings'
+  // Findings change only via dedicated emission events (emit_finding /
+  // suppress_unsupported_verdict / supersede_finding), so a phase step frames them.
+  Run.findings' = Run.findings
   // Frame
   Run.manifestPresent' = Run.manifestPresent
+  Run.manifestFiles' = Run.manifestFiles
   Run.failed' = Run.failed
+  Run.catalog' = Run.catalog
+  Run.catalogReason' = Run.catalogReason
 }
 
 // Base mode produces exactly the base phase reports plus summary
@@ -261,6 +422,55 @@ assert source_mode_reports {
 assert disabled_phases_no_reports {
   always (all p : Phase |
     p not in enabledPhases implies phaseToReport[p] not in Run.reports)
+}
+
+// --- RAE-REPORT-GENSPECS: code-derived evidence directories ---
+
+// The two code-derived output directories produced by code-backwards analysis.
+abstract sig GenArtifact {}
+one sig GenSpecsDir, GenSpecsSmtDir extends GenArtifact {}   // gen_specs/, gen_specs_smt/
+
+// Code-backwards analysis is represented by the code-derived comparison phase
+// (report_2.compare). Directory presence is DERIVED from completedPhases (no
+// redundant state): both directories exist exactly when that phase has
+// completed. runCodeBackwardsWork persists gen_specs/ and gen_specs_smt/.
+fun genArtifactsPresent : set GenArtifact {
+  CodeCompare in Run.completedPhases implies (GenSpecsDir + GenSpecsSmtDir) else none
+}
+
+// Postcondition: completing code-backwards analysis persists BOTH directories.
+assert genspecs_present_when_code_backwards {
+  always (CodeCompare in Run.completedPhases implies
+    genArtifactsPresent = GenSpecsDir + GenSpecsSmtDir)
+}
+
+// The two directories are always produced as a pair, never one without the other.
+assert genspecs_paired {
+  always (GenSpecsDir in genArtifactsPresent iff GenSpecsSmtDir in genArtifactsPresent)
+}
+
+// Base mode never runs code-backwards analysis, so it never emits gen artifacts.
+// (Teeth: relies on enabledPhases mode-gating, not just the derivation.)
+assert genspecs_only_in_source_mode {
+  always (Run.mode = BaseMode implies no genArtifactsPresent)
+}
+
+// --- RAE-REPORT-SKIP: skipped scope is explained, not silently omitted ---
+
+// Phases disabled for the run's mode. This set is explicitly computed so the
+// synthesized summary can explain the skipped scope rather than omit it.
+fun skippedPhases : set Phase { Phase - enabledPhases }
+
+// Enabled and skipped phases partition the pipeline (no phase is both, together
+// they cover every phase — nothing is silently dropped).
+assert enabled_and_skipped_partition {
+  always (no (enabledPhases & skippedPhases))
+  always (enabledPhases + skippedPhases = Phase)
+}
+
+// In base mode the source-backed phases are exactly the skipped-and-explained set.
+assert base_mode_skips_source_phases {
+  always (Run.mode = BaseMode implies skippedPhases = sourcePhases)
 }
 ```
 
@@ -398,14 +608,27 @@ pred has_unpreserved_evidence [f : Finding] {
   some e : f.evidenceSet | e.preserved = False
 }
 
-// Unsupported verdict: would-be finding without preserved evidence
-// The tool must suppress this and emit a defect finding instead
-pred suppress_unsupported_verdict [f : Finding] {
-  // Guard: finding has unpreserved evidence
-  has_unpreserved_evidence[f]
-  // Effect: f is NOT added to findings; a defect finding IS added
-  f not in Run.findings'
-  // A well-formed defect finding is added instead (modeled by the phase event)
+// Unsupported verdict: a would-be finding whose evidence is not preserved.
+// RAE-EVID-FAIL requires the tool to SUPPRESS that verdict (it never enters the
+// findings set) and to SURFACE the missing-evidence condition as a well-formed
+// defect finding. Modeled here as a real transition event (wired into
+// `transitions`) so the suppression is an observable step, not just an invariant.
+pred suppress_unsupported_verdict [wouldBe, defect : Finding] {
+  // Guard: catalog constructed, run healthy, candidate has unpreserved evidence
+  Run.catalog = CatalogConstructed
+  Run.failed = False
+  has_unpreserved_evidence[wouldBe]
+  wouldBe not in Run.findings
+  defect not in Run.findings
+  wouldBe != defect
+  // The surfaced defect is itself admissible (well-formed, evidence preserved)
+  finding_wellformed[defect]
+  finding_evidence_preserved[defect]
+  // Effect: the defect is recorded; the unsupported verdict is excluded
+  Run.findings' = Run.findings + defect
+  wouldBe not in Run.findings'
+  // Frame: only the findings set changes
+  frame_all_but_findings
 }
 
 // Safety: all findings in the run have preserved evidence
@@ -422,6 +645,80 @@ assert provenance_always_present {
 // (modeled via the invariant - any finding that reaches Run.findings is preserved)
 assert no_unsupported_verdicts_in_output {
   always (all f : Run.findings | not has_unpreserved_evidence[f])
+}
+
+// RAE-EVID-FAIL behavioral guarantee: whenever a suppression step occurs, the
+// unsupported verdict is kept out of the findings set and a well-formed defect
+// finding is surfaced in its place.
+assert suppression_emits_defect {
+  always (all w, d : Finding | suppress_unsupported_verdict[w, d] implies
+    (d in Run.findings' and w not in Run.findings' and
+     finding_wellformed[d] and finding_evidence_preserved[d]))
+}
+
+// --- RAE-EVID-ARTS / RAE-EVID-CROSSIMPLY / RAE-EVID-LLM: source-specific
+//     evidence that must be preserved for particular analysis bases. ---
+
+// The analysis basis a finding rests on.
+abstract sig AnalysisBasis {}
+one sig FormalSolverBasis, CrossSideBasis, LLMBasis extends AnalysisBasis {}
+
+// Concrete evidence items that may be attached to a finding.
+abstract sig EvidenceSource {}
+one sig SolverArtifact, ModelArtifact                       // RAE-EVID-ARTS
+  extends EvidenceSource {}
+one sig ImplicationQuery, SolverResult, ClassificationRationale  // RAE-EVID-CROSSIMPLY
+  extends EvidenceSource {}
+one sig LLMResponse                                          // RAE-EVID-LLM
+  extends EvidenceSource {}
+
+// The evidence each basis MUST preserve:
+//  - solver/model findings preserve their generated artifacts (RAE-EVID-ARTS);
+//  - cross-side classifications preserve the implication queries, solver
+//    results, and classification rationale (RAE-EVID-CROSSIMPLY);
+//  - LLM-backed findings preserve the full response (RAE-EVID-LLM).
+fun requiredEvidenceFor : AnalysisBasis -> EvidenceSource {
+    FormalSolverBasis -> (SolverArtifact + ModelArtifact)
+  + CrossSideBasis -> (ImplicationQuery + SolverResult + ClassificationRationale)
+  + LLMBasis -> LLMResponse
+}
+
+// Every analysis basis mandates its source-specific evidence.
+assert evidence_source_requirements {
+  (SolverArtifact + ModelArtifact) in requiredEvidenceFor[FormalSolverBasis]
+  (ImplicationQuery + SolverResult + ClassificationRationale) in requiredEvidenceFor[CrossSideBasis]
+  LLMResponse in requiredEvidenceFor[LLMBasis]
+  all b : AnalysisBasis | some requiredEvidenceFor[b]
+}
+
+// --- RAE-EVID-RENDER-SAFE: preserved raw values render as inert Markdown data ---
+
+// Inline/block Markdown control constructs that must never be produced by a raw
+// evidence value: links, emphasis, inline code spans, headings, list items,
+// block quotes, and extra table cells.
+abstract sig MarkdownControl {}
+one sig LinkCtl, EmphasisCtl, InlineCodeCtl, HeadingCtl,
+        ListItemCtl, BlockQuoteCtl, TableCellCtl extends MarkdownControl {}
+
+// The renderer (neutralizeMarkdownInline) neutralizes every control construct.
+fun neutralizedControls : set MarkdownControl { MarkdownControl }
+
+// Whether a rendered raw value can activate report structure. A value the
+// renderer produced is inert (never active structure) regardless of whether the
+// raw payload contained control syntax, because it is neutralized.
+fun rendersAsActiveStructure [rawContainsControl : Bool, neutralized : Bool] : Bool {
+  (rawContainsControl = True and neutralized = False) implies True else False
+}
+
+// RAE-EVID-RENDER-SAFE: every enumerated control is neutralized, and a
+// neutralized render is inert whether or not the raw value contained controls.
+assert render_evidence_inert {
+  // All seven enumerated control constructs are neutralized (none omitted).
+  neutralizedControls = MarkdownControl
+  LinkCtl + EmphasisCtl + InlineCodeCtl + HeadingCtl
+    + ListItemCtl + BlockQuoteCtl + TableCellCtl in neutralizedControls
+  // Neutralized output never renders as active report structure.
+  all rawContainsControl : Bool | rendersAsActiveStructure[rawContainsControl, True] = False
 }
 ```
 
@@ -507,6 +804,154 @@ assert no_malformed_findings {
 
 // The severity field is always populated (by type constraint)
 // Category, provenance, description, rationale, and evidence are checked by finding_wellformed
+
+// --- RAE-SHAPE-MERGE-CONFLICT-EVIDENCE: logic-defect finding taxonomy ---
+// Structural defects surfaced by the logic-analysis pipeline. Modeled with
+// fixed-scope enumerations + functions (no open carrier sig) so the existing
+// analysis commands need no scope changes.
+
+// logic.merge_conflict and logic.invalid_group defect families.
+abstract sig LogicDefectKind {}
+one sig FunctionSignatureConflict, VariableSortConflict, SymbolKindCollision
+  extends LogicDefectKind {}                       // logic.merge_conflict family
+one sig DuplicateRawClaimId, SanitizedIdCollision
+  extends LogicDefectKind {}                       // logic.invalid_group family
+
+fun mergeConflictKinds : set LogicDefectKind {
+  FunctionSignatureConflict + VariableSortConflict + SymbolKindCollision
+}
+fun invalidGroupKinds : set LogicDefectKind {
+  DuplicateRawClaimId + SanitizedIdCollision
+}
+
+// Claim-attributed evidence roles a logic-defect finding may preserve.
+abstract sig EvidenceRole {}
+one sig SharedSanitizedSymbol, BothRawNames, BothClaimIds, ExclusionTuple  // merge core
+  extends EvidenceRole {}
+one sig BothSorts, BothDeclKinds                                            // kind-specific extras
+  extends EvidenceRole {}
+one sig DuplicatedRawIds, AffectedClaims, CollidingRawIds, SharedSanitizedId // invalid-group identity
+  extends EvidenceRole {}
+
+// The evidence each defect kind MUST preserve, mirroring the "Merge Evidence"
+// and "Invalid-Group Evidence" clauses. The merge family shares a common core
+// (shared sanitized symbol, both raw names, both claim IDs incl. the same-claim
+// [claimId, claimId] edge case, and the [existing, excluded] exclusion tuple);
+// variable-sort conflicts add both sorts; symbol-kind collisions add both kinds.
+fun requiredRoles : LogicDefectKind -> EvidenceRole {
+    FunctionSignatureConflict ->
+      (SharedSanitizedSymbol + BothRawNames + BothClaimIds + ExclusionTuple)
+  + VariableSortConflict ->
+      (SharedSanitizedSymbol + BothRawNames + BothClaimIds + ExclusionTuple + BothSorts)
+  + SymbolKindCollision ->
+      (SharedSanitizedSymbol + BothRawNames + BothClaimIds + ExclusionTuple + BothDeclKinds)
+  + DuplicateRawClaimId -> (DuplicatedRawIds + AffectedClaims)
+  + SanitizedIdCollision -> (CollidingRawIds + SharedSanitizedId)
+}
+
+// Severity of a logic defect is `error` regardless of source obligation, because
+// declaration conflicts and identity aliasing are structural defects, not
+// satisfiability outcomes.
+fun logicSeverity [k : LogicDefectKind, sourceObligated : Bool] : one Severity {
+  ErrorSev
+}
+
+// Every logic-defect kind carries a non-empty required-evidence set.
+assert every_logic_kind_requires_evidence {
+  all k : LogicDefectKind | some requiredRoles[k]
+}
+
+// All merge-conflict kinds preserve the shared conflict core.
+assert merge_core_evidence {
+  all k : mergeConflictKinds |
+    (SharedSanitizedSymbol + BothRawNames + BothClaimIds + ExclusionTuple) in requiredRoles[k]
+}
+
+// Kind-specific extra evidence is required exactly where the spec mandates it.
+assert kind_specific_evidence {
+  BothSorts in requiredRoles[VariableSortConflict]
+  BothSorts not in requiredRoles[FunctionSignatureConflict]
+  BothSorts not in requiredRoles[SymbolKindCollision]
+  BothDeclKinds in requiredRoles[SymbolKindCollision]
+  BothDeclKinds not in requiredRoles[FunctionSignatureConflict]
+  BothDeclKinds not in requiredRoles[VariableSortConflict]
+}
+
+// Invalid-group findings preserve identity-conflict evidence and are a family
+// disjoint from the merge conflicts (structural identity errors, not merges).
+assert invalid_group_identity_evidence {
+  DuplicatedRawIds in requiredRoles[DuplicateRawClaimId]
+  AffectedClaims in requiredRoles[DuplicateRawClaimId]
+  CollidingRawIds in requiredRoles[SanitizedIdCollision]
+  SharedSanitizedId in requiredRoles[SanitizedIdCollision]
+  no (mergeConflictKinds & invalidGroupKinds)
+  mergeConflictKinds + invalidGroupKinds = LogicDefectKind
+}
+
+// The taxonomy discriminates: distinct kinds require distinct evidence sets.
+assert logic_kinds_distinct_evidence {
+  all disj k1, k2 : LogicDefectKind | requiredRoles[k1] != requiredRoles[k2]
+}
+
+// No orphan roles: every declared evidence role is required by some kind.
+assert logic_roles_all_used {
+  all r : EvidenceRole | some k : LogicDefectKind | r in requiredRoles[k]
+}
+
+// Logic defects are always error severity, independent of source obligation.
+assert logic_defects_are_error {
+  all k : LogicDefectKind, o : Bool | logicSeverity[k, o] = ErrorSev
+}
+
+// --- RAE-SHAPE-CATALOG: catalog-empty diagnostics are as reviewable as findings ---
+
+// A catalog-empty diagnostic must surface the SAME explanatory completeness as a
+// normal finding: it identifies its cause and carries actionable remediation.
+// Mirrors formatCatalogEmptyMessage (src/cli/run-cli.ts), where each variant
+// reports a quantitative/contextual cause detail plus an actionable next step.
+
+// The cause detail surfaced per reason (the quantitative/contextual fact).
+abstract sig CatalogCauseDetail {}
+one sig InputCountDetail, ArchivedCountDetail, FilterReasonDetail
+  extends CatalogCauseDetail {}                 // 0 inputs / N archived / policy name
+
+// The actionable remediation cue surfaced per reason (the operator's next step).
+abstract sig CatalogRemediationCue {}
+one sig EnsureRecognizedDocs, UseAllowArchiveFlag, ShowExcludingPolicy
+  extends CatalogRemediationCue {}              // add docs / --allow-archive / relax policy
+
+fun catalogCause : CatalogEmptyReason -> CatalogCauseDetail {
+    NoRecognizedDocs -> InputCountDetail
+  + AllArchived      -> ArchivedCountDetail
+  + AllFiltered      -> FilterReasonDetail
+}
+
+fun catalogRemediation : CatalogEmptyReason -> CatalogRemediationCue {
+    NoRecognizedDocs -> EnsureRecognizedDocs
+  + AllArchived      -> UseAllowArchiveFlag
+  + AllFiltered      -> ShowExcludingPolicy
+}
+
+// A catalog-empty diagnostic is actionable iff it identifies its cause AND
+// carries actionable remediation — the catalog analogue of finding_wellformed.
+pred catalogDiagnosticActionable [r : CatalogEmptyReason] {
+  one catalogCause[r]
+  one catalogRemediation[r]
+}
+
+// RAE-SHAPE-CATALOG: every empty-catalog variant meets the finding reviewability
+// standard, with distinct (non-generic, non-omitted) cause and remediation, and
+// the --allow-archive cue reserved for the archived-only reason.
+assert catalog_diagnostics_actionable {
+  all r : CatalogEmptyReason | catalogDiagnosticActionable[r]
+  // Cause + remediation are total and reason-specific (nothing shared or blank).
+  all disj r1, r2 : CatalogEmptyReason | catalogCause[r1] != catalogCause[r2]
+  all disj r1, r2 : CatalogEmptyReason | catalogRemediation[r1] != catalogRemediation[r2]
+  // Consistency with the exit-boundary remediation model (RAE-CATALOG-ARCHIVE):
+  // --allow-archive is recommended exactly for the archived-only reason.
+  all r : CatalogEmptyReason |
+    (catalogRemediation[r] = UseAllowArchiveFlag iff r in remediationAllowArchive)
+}
 ```
 
 ### Requirement: Findings Never Silently Removed [RAE-FINDINGS-IMMUTABLE]
@@ -560,15 +1005,61 @@ assert findings_never_decrease {
 // Finding count monotonicity follows from findings_never_decrease (subset implies <=)
 // Integer cardinality comparison omitted to avoid Int scope overhead.
 
-// Supersession model: if a finding is "superseded", both the original
-// and the supersession explanation remain in the findings set
-pred supersede_finding [original : Finding, supersession : Finding] {
-  // Both findings must be in the set
+// Shared frame for findings-only events: every Run field except `findings`, and
+// every OutputFile, is held constant. Keeps the three emission events DRY.
+pred frame_all_but_findings {
+  Run.completedPhases' = Run.completedPhases
+  Run.reports' = Run.reports
+  Run.manifestPresent' = Run.manifestPresent
+  Run.manifestFiles' = Run.manifestFiles
+  Run.failed' = Run.failed
+  Run.catalog' = Run.catalog
+  Run.catalogReason' = Run.catalogReason
+  all f : OutputFile | f.pathState' = f.pathState
+}
+
+// Admissible emission: a well-formed finding with fully preserved evidence is
+// recorded. This is the sole way an ordinary finding enters the findings set,
+// which is why complete_phase now frames findings.
+pred emit_finding [f : Finding] {
+  // Guard
+  Run.catalog = CatalogConstructed
+  Run.failed = False
+  f not in Run.findings
+  finding_wellformed[f]
+  finding_evidence_preserved[f]
+  // Effect
+  Run.findings' = Run.findings + f
+  // Frame
+  frame_all_but_findings
+}
+
+// Supersession model (RAE-IMMUT-CHANGE): a later phase may supersede a prior
+// finding, but SHALL preserve the original and add a new finding that explains
+// the supersession. Modeled as a real transition event: the original is kept in
+// the findings set and an admissible supersession that references it is added.
+pred supersede_finding [original, supersession : Finding] {
+  // Guard
+  Run.catalog = CatalogConstructed
+  Run.failed = False
   original in Run.findings
-  supersession in Run.findings'
-  original in Run.findings'      // original preserved
-  // Supersession finding references the original (via evidence)
+  supersession not in Run.findings
+  original != supersession
+  // The supersession is itself admissible and references the original's provenance
+  finding_wellformed[supersession]
+  finding_evidence_preserved[supersession]
   original.provenance in supersession.provenance
+  // Effect: original preserved, supersession added
+  Run.findings' = Run.findings + supersession
+  // Frame
+  frame_all_but_findings
+}
+
+// RAE-IMMUT-CHANGE behavioral guarantee: a supersession step never removes the
+// original finding and always records a distinct explanatory supersession.
+assert supersede_preserves_original {
+  always (all o, s : Finding | supersede_finding[o, s] implies
+    (o in Run.findings' and s in Run.findings' and o != s))
 }
 ```
 
@@ -616,13 +1107,16 @@ pred write_manifest {
   // Guard: all required reports written, not failed
   requiredReports in Run.reports
   Run.failed = False
-  // Effect: manifest present
+  // Effect: manifest present and lists exactly the produced reports
   Run.manifestPresent' = True
+  Run.manifestFiles' = Run.reports
   // Frame
   Run.completedPhases' = Run.completedPhases
   Run.findings' = Run.findings
   Run.reports' = Run.reports
   Run.failed' = Run.failed
+  Run.catalog' = Run.catalog
+  Run.catalogReason' = Run.catalogReason
 }
 
 pred remove_stale_manifest {
@@ -631,11 +1125,14 @@ pred remove_stale_manifest {
   no Run.completedPhases
   // Effect: manifest removed
   Run.manifestPresent' = False
+  Run.manifestFiles' = Run.manifestFiles
   // Frame
   Run.completedPhases' = Run.completedPhases
   Run.findings' = Run.findings
   Run.reports' = Run.reports
   Run.failed' = Run.failed
+  Run.catalog' = Run.catalog
+  Run.catalogReason' = Run.catalogReason
 }
 
 pred run_fails {
@@ -649,6 +1146,9 @@ pred run_fails {
   Run.findings' = Run.findings
   Run.reports' = Run.reports
   Run.manifestPresent' = Run.manifestPresent
+  Run.manifestFiles' = Run.manifestFiles
+  Run.catalog' = Run.catalog
+  Run.catalogReason' = Run.catalogReason
 }
 
 // Safety: manifest only present when all required reports are written
@@ -733,6 +1233,22 @@ pred manifest_entries_valid [entries : set ManifestEntry] {
   all e : entries | e.entryPhase in Run.completedPhases
   // Coverage: every written report has an entry
   all r : Run.reports | some e : entries | e.entryReport = r
+}
+
+// Domain rule (RAE-SCHEMA-MATCH): a ManifestEntry only exists to describe a
+// written manifest. So whenever a manifest is present, every entry must
+// reference a written report, a completed originating phase, and carry a valid
+// (matching) checksum. This is entry-level SOUNDNESS only -- it deliberately
+// does NOT force every report to have an entry, so it never prunes the
+// reachability of manifest-present states in scenarios with few entries.
+// Report-level COVERAGE ("the manifest lists the produced files") is modeled
+// separately via Run.manifestFiles (see manifest_lists_all_reports).
+fact manifest_entries_describe_run {
+  always (Run.manifestPresent = True implies
+    (all e : ManifestEntry |
+      e.entryReport in Run.reports and
+      e.entryPhase in Run.completedPhases and
+      e.checksumValid = True))
 }
 
 // Safety: manifest entries always reference existing reports
@@ -920,7 +1436,52 @@ pred stutter {
   Run.findings' = Run.findings
   Run.reports' = Run.reports
   Run.manifestPresent' = Run.manifestPresent
+  Run.manifestFiles' = Run.manifestFiles
   Run.failed' = Run.failed
+  Run.catalog' = Run.catalog
+  Run.catalogReason' = Run.catalogReason
+  all f : OutputFile | f.pathState' = f.pathState
+}
+
+// --- Catalog construction events (RAE-CATALOG-ERROR) ---
+
+// Catalog construction succeeds: at least one active document survived.
+pred construct_catalog {
+  // Guard: catalog not yet decided
+  Run.catalog = CatalogPending
+  Run.failed = False
+  // Effect: catalog is constructed; phases may now run
+  Run.catalog' = CatalogConstructed
+  // Frame
+  Run.completedPhases' = Run.completedPhases
+  Run.findings' = Run.findings
+  Run.reports' = Run.reports
+  Run.manifestPresent' = Run.manifestPresent
+  Run.manifestFiles' = Run.manifestFiles
+  Run.failed' = Run.failed
+  Run.catalogReason' = Run.catalogReason
+  all f : OutputFile | f.pathState' = f.pathState
+}
+
+// Catalog construction aborts: no active document survived. The run fails with
+// a CatalogError classified by one of the three empty reasons, and NO
+// downstream reports are ever produced (RAE-REPORT-CATALOG).
+pred abort_catalog [r : CatalogEmptyReason] {
+  // Guard: catalog not yet decided, nothing produced yet
+  Run.catalog = CatalogPending
+  no Run.completedPhases
+  no Run.reports
+  Run.failed = False
+  // Effect: catalog aborts, reason recorded, run marked failed
+  Run.catalog' = CatalogAborted
+  Run.catalogReason' = r
+  Run.failed' = True
+  // Frame: no phases, no reports, no manifest ever produced on this path
+  Run.completedPhases' = Run.completedPhases
+  Run.findings' = Run.findings
+  Run.reports' = Run.reports
+  Run.manifestPresent' = Run.manifestPresent
+  Run.manifestFiles' = Run.manifestFiles
   all f : OutputFile | f.pathState' = f.pathState
 }
 
@@ -935,23 +1496,36 @@ pred write_summary {
   Run.completedPhases' = Run.completedPhases
   Run.findings' = Run.findings
   Run.manifestPresent' = Run.manifestPresent
+  Run.manifestFiles' = Run.manifestFiles
   Run.failed' = Run.failed
+  Run.catalog' = Run.catalog
+  Run.catalogReason' = Run.catalogReason
   all f : OutputFile | f.pathState' = f.pathState
 }
 
 pred init_state {
+  Run.catalog = CatalogPending
+  no Run.catalogReason
   no Run.completedPhases
   no Run.findings
   no Run.reports
   Run.manifestPresent = False
+  no Run.manifestFiles
   Run.failed = False
   all f : OutputFile | f.pathState = Absent
 }
 
 fact transitions {
   init_state and always (
+    // Catalog construction (must precede any phase)
+    construct_catalog
+    or (some r : CatalogEmptyReason | abort_catalog[r])
     // Phase execution
-    (some p : Phase | complete_phase[p])
+    or (some p : Phase | complete_phase[p])
+    // Findings emission (admissibility-gated)
+    or (some f : Finding | emit_finding[f])
+    or (some w, d : Finding | suppress_unsupported_verdict[w, d])
+    or (some o, s : Finding | supersede_finding[o, s])
     // Summary generation
     or write_summary
     // Manifest
@@ -992,7 +1566,10 @@ fact file_ops_frame_run {
     Run.findings' = Run.findings and
     Run.reports' = Run.reports and
     Run.manifestPresent' = Run.manifestPresent and
-    Run.failed' = Run.failed))
+    Run.manifestFiles' = Run.manifestFiles and
+    Run.failed' = Run.failed and
+    Run.catalog' = Run.catalog and
+    Run.catalogReason' = Run.catalogReason))
 }
 
 // --- Analysis rule: only well-formed findings enter the pipeline ---
@@ -1042,4 +1619,198 @@ check disabled_phases_no_reports for 3 Finding, 2 Evidence, 2 Provenance, 2 Arti
 
 check phases_monotonic for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
   2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 10 steps expect 0
+
+// Report emission (RAE-EMIT-REPORTS)
+check base_mode_reports for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 12 steps expect 0
+
+check source_mode_reports for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 14 steps expect 0
+
+// Naming convention (RAE-REPORT-NAMES)
+check naming_injective for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+check naming_total_for_phases for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+// Evidence preservation (RAE-PRESERVE-EVID)
+check provenance_always_present for 4 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 10 steps expect 0
+
+check no_unsupported_verdicts_in_output for 4 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 10 steps expect 0
+
+// Finding shape (RAE-FINDING-SHAPE)
+check no_malformed_findings for 4 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 10 steps expect 0
+
+// Atomic manifest ordering (RAE-ATOMIC-MANIFEST)
+check manifest_written_last for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 12 steps expect 0
+
+check stale_manifest_blocks_phases for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 10 steps expect 0
+
+// Manifest schema (RAE-MANIFEST-SCHEMA)
+check manifest_entries_match_files for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  3 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 12 steps expect 0
+
+check manifest_checksums_valid for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  3 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 12 steps expect 0
+
+// Output confinement (RAE-OUTPUT-CONFINE)
+check all_writes_confined for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  1 ManifestEntry, 3 WriteAttempt, 1 OutputFile, 5 steps expect 0
+
+// Atomic output writes (RAE-OUTPUT-ATOMIC)
+check successful_writes_complete for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 3 OutputFile, 10 steps expect 0
+
+// Catalog-error classification, exit codes, and report suppression (RAE-CATALOG-ERROR)
+check classify_empty_iff_no_active for 1 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+check classify_total_when_empty for 1 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+check classify_matches_precedence for 1 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+check only_archived_recommends_allow_archive for 1 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+check exit_codes_match_spec for 1 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps, 5 Int expect 0
+
+check catalog_abort_no_reports for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 10 steps expect 0
+
+check catalog_abort_is_failure for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 10 steps expect 0
+
+check phases_require_catalog for 3 Finding, 2 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 12 steps expect 0
+
+check catalog_abort_surfaces_error_code for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 10 steps expect 0
+
+run scenario_catalog_abort {
+  eventually (Run.catalog = CatalogAborted and some Run.catalogReason)
+} for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 8 steps
+
+run scenario_classify_all_reasons {
+  some a1, r1, x1, a2, r2, x2, a3, r3, x3 : Bool |
+    classify[a1, r1, x1] = NoRecognizedDocs and
+    classify[a2, r2, x2] = AllArchived and
+    classify[a3, r3, x3] = AllFiltered
+} for 1 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps
+
+// Findings emission events: suppression and supersession (RAE-EVID-FAIL, RAE-IMMUT-CHANGE)
+check suppression_emits_defect for 4 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 10 steps expect 0
+
+check supersede_preserves_original for 4 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 10 steps expect 0
+
+run scenario_suppress_unsupported {
+  eventually (some w, d : Finding | suppress_unsupported_verdict[w, d])
+} for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 8 steps
+
+run scenario_supersede {
+  eventually (some o, s : Finding | supersede_finding[o, s])
+} for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 10 steps
+
+// Logic-defect finding taxonomy: evidence roles + error severity (RAE-SHAPE-MERGE-CONFLICT-EVIDENCE)
+check every_logic_kind_requires_evidence for 1 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+check merge_core_evidence for 1 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+check kind_specific_evidence for 1 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+check invalid_group_identity_evidence for 1 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+check logic_kinds_distinct_evidence for 1 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+check logic_roles_all_used for 1 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+check logic_defects_are_error for 1 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+run scenario_logic_defect_taxonomy {
+  ExclusionTuple in requiredRoles[FunctionSignatureConflict]
+  BothSorts in requiredRoles[VariableSortConflict]
+  BothDeclKinds in requiredRoles[SymbolKindCollision]
+  SharedSanitizedId in requiredRoles[SanitizedIdCollision]
+} for 1 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps
+
+// Catalog-empty diagnostics stay as reviewable as findings (RAE-SHAPE-CATALOG)
+check catalog_diagnostics_actionable for 1 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+run scenario_catalog_diagnostic_actionable {
+  all r : CatalogEmptyReason |
+    some catalogCause[r] and some catalogRemediation[r]
+} for 1 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps
+
+// Code-derived gen artifacts (RAE-REPORT-GENSPECS)
+check genspecs_present_when_code_backwards for 2 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 12 steps expect 0
+
+check genspecs_paired for 2 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 12 steps expect 0
+
+check genspecs_only_in_source_mode for 3 Finding, 2 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 12 steps expect 0
+
+run scenario_genspecs_emitted {
+  Run.mode = SourceBackedMode
+  eventually (CodeCompare in Run.completedPhases
+    and genArtifactsPresent = GenSpecsDir + GenSpecsSmtDir)
+} for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 8 steps
+
+// Skipped-scope explanation (RAE-REPORT-SKIP)
+check enabled_and_skipped_partition for 1 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+check base_mode_skips_source_phases for 1 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+run scenario_skip_explained {
+  Run.mode = BaseMode
+  skippedPhases = sourcePhases and some skippedPhases
+} for 1 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps
+
+// Source-specific evidence + inert rendering (RAE-EVID-ARTS/CROSSIMPLY/LLM, RAE-EVID-RENDER-SAFE)
+check evidence_source_requirements for 1 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+check render_evidence_inert for 1 Finding, 1 Evidence, 1 Provenance,
+  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps expect 0
+
+run scenario_evidence_and_render {
+  // every analysis basis mandates its source-specific evidence
+  ModelArtifact in requiredEvidenceFor[FormalSolverBasis]
+  SolverResult in requiredEvidenceFor[CrossSideBasis]
+  LLMResponse in requiredEvidenceFor[LLMBasis]
+  // renderer semantics: raw control activates structure ONLY when not neutralized
+  rendersAsActiveStructure[True, False] = True
+  rendersAsActiveStructure[True, True] = False
+  rendersAsActiveStructure[False, False] = False
+} for 1 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 3 steps
 ```

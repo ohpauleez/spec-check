@@ -95,8 +95,14 @@ sig Assertion {
 // Declaration identity (for deduplication and conflict detection)
 sig DeclName {}
 sig DeclSignature {}
+// Symbol type: a sanitized symbol is bound either as a variable
+// (declare-const) or a function (declare-fun). This is the declaration
+// KIND, distinct from its signature/sort (declSig).
+abstract sig DeclKind {}
+one sig VarDecl, FunDecl extends DeclKind {}
 sig Declaration {
   declName : one DeclName,
+  declKind : one DeclKind,
   declSig : one DeclSignature,
   declClaim : one Claim
 }
@@ -122,12 +128,21 @@ one sig Pipeline {
 fact cluster_wellformed {
   all cl : Cluster | cl.representative in cl.members or no cl.representative
   all disj cl1, cl2 : Cluster | no (cl1.members & cl2.members)
+  // A cluster always groups at least one sample (empty clusters are not
+  // materialized). Together with pairwise disjointness this makes distinct
+  // clusters have distinct member sets.
+  all cl : Cluster | some cl.members
 }
 
 // Implication results are between distinct samples of the same claim
 fact implication_wellformed {
   all ir : ImplicationResult | ir.from != ir.to
   all ir : ImplicationResult | ir.from.claim = ir.to.claim
+  // Each ordered (from, to) pair resolves to exactly one solver result:
+  // a single query is issued per direction, so a pair cannot simultaneously
+  // carry (e.g.) an Unsat and a Timeout result.
+  all disj ir1, ir2 : ImplicationResult |
+    not (ir1.from = ir2.from and ir1.to = ir2.to)
 }
 
 // Equivalence via mutual implication (unsat means entailment holds)
@@ -783,27 +798,63 @@ sig CombinedSpec {
   namedAssertions : Assertion -> one Claim
 }
 
-// Well-formedness of combined specs
-fact combined_wellformed {
+// Domain axioms: structural facts defining what a CombinedSpec IS. A claim of
+// the spec is included xor excluded, and named assertions belong to included
+// claims. Declaration AGREEMENT (no surviving symbol with two sorts/kinds) is
+// deliberately NOT a fact here: it is the safety property to be verified,
+// modeled below as the predicate combined_wellformed and proven from the
+// exclusion policy rather than assumed.
+fact combined_structure {
   all cs : CombinedSpec {
-    // All claims from the spec are either included or excluded
-    all c : Claim | c.spec = cs.specRef implies
-      (c in cs.includedClaims or c in cs.excludedClaims)
+    // Included and excluded claims partition exactly the claims of specRef.
+    cs.includedClaims + cs.excludedClaims =
+      { c : Claim | c.spec = cs.specRef }
     no (cs.includedClaims & cs.excludedClaims)
-    // Deduplication: no duplicate declarations among included claims
-    all disj d1, d2 : Declaration |
-      (d1.declClaim in cs.includedClaims and d2.declClaim in cs.includedClaims and
-       d1.declName = d2.declName) implies d1.declSig = d2.declSig
     // Named assertions map to included claims only
     all a : cs.namedAssertions.Claim | a.sourceClaim in cs.includedClaims
   }
 }
 
+// Same-claim same-name declarations survive validation only as residual
+// cross-kind sanitizer collisions (opposite kinds); same-kind same-name
+// duplicates are rejected earlier at validation.
+fact validated_same_claim_declarations {
+  all c : Claim, disj d1, d2 : Declaration |
+    (d1.declClaim = c and d2.declClaim = c and d1.declName = d2.declName)
+      implies d1.declKind != d2.declKind
+}
+
+// Safety property (a PREDICATE, not a fact): every pair of included
+// declarations sharing one sanitized name agrees on both declaration kind and
+// signature -- i.e. no surviving symbol is bound to two sorts, or to both a
+// variable and a function. Because this is not asserted as a fact, the model
+// CAN exhibit a malformed combined artifact; the theorems below prove the
+// exclusion policy prevents it.
+pred combined_wellformed [cs : CombinedSpec] {
+  all disj d1, d2 : Declaration |
+    (d1.declClaim in cs.includedClaims and d2.declClaim in cs.includedClaims and
+     d1.declName = d2.declName) implies
+       (d1.declKind = d2.declKind and d1.declSig = d2.declSig)
+}
+
+// A conflict: two declarations (possibly of the same claim when c1 = c2) share
+// a sanitized name but disagree on declaration kind or signature. Passing
+// c1 = c2 models a same-claim variable/function sanitizer collision.
 pred conflict_detected [c1, c2 : Claim, sp : Spec] {
-  c1.spec = sp and c2.spec = sp and c1 != c2
+  c1.spec = sp and c2.spec = sp
   some disj d1, d2 : Declaration |
     d1.declClaim = c1 and d2.declClaim = c2 and
-    d1.declName = d2.declName and d1.declSig != d2.declSig
+    d1.declName = d2.declName and
+    (d1.declKind != d2.declKind or d1.declSig != d2.declSig)
+}
+
+// The exclusion policy: every detected conflict has at least one of its two
+// claims excluded. For a same-claim conflict (c1 = c2) this reduces to
+// excluding that single claim.
+pred conflicts_excluded [cs : CombinedSpec] {
+  all c1, c2 : Claim |
+    conflict_detected[c1, c2, cs.specRef] implies
+      (c1 in cs.excludedClaims or c2 in cs.excludedClaims)
 }
 
 pred emit_merge_conflict [c1, c2 : Claim] {
@@ -821,11 +872,21 @@ pred emit_merge_conflict [c1, c2 : Claim] {
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
-// Safety: conflicts produce findings, never malformed solver input
-assert conflict_excluded_from_combined {
-  all cs : CombinedSpec, disj c1, c2 : Claim |
-    conflict_detected[c1, c2, cs.specRef] implies
-      (c1 in cs.excludedClaims or c2 in cs.excludedClaims)
+// Safety theorem: applying the exclusion policy is SUFFICIENT to make the
+// combined artifact wellformed. Wellformedness is proven from the policy, not
+// assumed -- the honest direction (exclusion => wellformed), in contrast to a
+// fact-imposed invariant which would only let us derive the converse.
+assert exclusion_implies_wellformed {
+  all cs : CombinedSpec |
+    conflicts_excluded[cs] implies combined_wellformed[cs]
+}
+
+// A same-claim sanitizer collision forces that claim's own exclusion once the
+// exclusion policy is applied.
+assert same_claim_collision_excluded {
+  all cs : CombinedSpec, c : Claim |
+    (conflicts_excluded[cs] and conflict_detected[c, c, cs.specRef])
+      implies c in cs.excludedClaims
 }
 ```
 
@@ -981,6 +1042,10 @@ WHEN the same formalization samples and solver results are processed on two sepa
 // Symmetry is guaranteed by the structural fact clusters_respect_equivalence.
 // Determinism is a meta-property: same inputs -> same clusters (enforced by
 // the clustering algorithm being a deterministic function of ImplicationResults).
+// That meta-property is established over two runs which a single-instance structural
+// assertion cannot express; it is verified by the property-based test logic.property.test.ts:492 (cited in evidence).
+// What we CAN state structurally is the consequence that distinct clusters
+// carry distinct member sets (from pairwise disjointness + non-emptiness).
 
 // Verify: mutual implication places samples in same cluster
 assert symmetric_implication_same_cluster {
@@ -988,8 +1053,10 @@ assert symmetric_implication_same_cluster {
     (samples_equivalent[a, b] and a in cl.members) implies b in cl.members
 }
 
-// Determinism modeled as: cluster membership is uniquely determined by members
-assert clustering_deterministic {
+// Verify: distinct clusters have distinct member sets. This is the structural
+// footprint of a deterministic clustering (no two cluster identities collapse
+// to the same membership), following from disjoint + non-empty clusters.
+assert clusters_have_distinct_members {
   all disj cl1, cl2 : Cluster | cl1.members != cl2.members
 }
 ```
@@ -1161,13 +1228,15 @@ assert no_collision_no_grouping_abort {
     implies not collision_aborts_pipeline)
 }
 
-// Liveness: every merged capability eventually produces exactly one logic group
-// (given that compilation phase is reached and no collision)
+// Safety: during compilation without a key collision, each merged capability
+// is represented by at most one logic group (the structural footprint of
+// "exactly one group per capability" from fact one_group_per_capability).
+// The eventual FORMATION of that group is the liveness property stated below
+// as merged_cap_group_formation; this assertion is its safety counterpart.
 assert group_formation_complete {
   always (
     (Pipeline.phase = CompilationPh and not logical_key_collision)
-    implies (all sp : Spec | some lg : LogicalGroup | lg.groupCap = sp
-      implies one lg2 : LogicalGroup | lg2.groupCap = sp))
+    implies (all sp : Spec | lone { lg : LogicalGroup | lg.groupCap = sp }))
 }
 ```
 
@@ -1922,9 +1991,11 @@ assert evidence_eventually_persisted {
                   Pipeline.phase != AnalysisPh))
 }
 
-// L5: Collision detection terminates finitely
+// L5: Collision detection terminates finitely. Like every liveness property
+// this needs a fairness premise: without it, infinite stuttering could pin the
+// pipeline in CompilationPh forever (and vacuously falsify termination).
 assert collision_check_terminates {
-  always (Pipeline.phase = CompilationPh implies
+  pipeline_fairness implies always (Pipeline.phase = CompilationPh implies
     eventually (Pipeline.phase != CompilationPh))
 }
 
@@ -1996,6 +2067,42 @@ run scenario_pairwise_budget {
   2 DeclName, 2 DeclSignature, 1 CombinedSpec, 1 CompiledArtifact,
   2 ClaimId, 2 ImplicationResult, 1 GapCheck,
   1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps
+
+// Witness: without the exclusion policy a malformed combined artifact (one
+// sanitized symbol bound with two sorts/kinds among included claims) is
+// representable. This is the failure mode the merge fix prevents; the
+// invariant-as-fact style could not exhibit it as an instance at all.
+run combined_malformed_witness {
+  some cs : CombinedSpec | not combined_wellformed[cs]
+} for 3 Claim, 1 Spec, 4 Sample, 2 Cluster, 2 Finding,
+  1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion, 2 Declaration,
+  2 DeclName, 2 DeclSignature, 1 CombinedSpec, 1 CompiledArtifact,
+  2 ClaimId, 2 ImplicationResult, 1 GapCheck,
+  2 LogicalGroup, 2 LogicalKey, 2 JsonExtraction, 4 JsonInput, 5 Int, 8 steps expect 1
+
+// Witness: a cross-claim conflict where the later claim is excluded leaves the
+// combined artifact wellformed (the intended merge outcome).
+run combined_conflict_with_exclusion {
+  some cs : CombinedSpec, disj c1, c2 : Claim |
+    conflict_detected[c1, c2, cs.specRef] and
+    c1 in cs.includedClaims and c2 in cs.excludedClaims and
+    conflicts_excluded[cs] and combined_wellformed[cs]
+} for 3 Claim, 1 Spec, 4 Sample, 2 Cluster, 2 Finding,
+  1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion, 2 Declaration,
+  2 DeclName, 2 DeclSignature, 1 CombinedSpec, 1 CompiledArtifact,
+  2 ClaimId, 2 ImplicationResult, 1 GapCheck,
+  2 LogicalGroup, 2 LogicalKey, 2 JsonExtraction, 4 JsonInput, 5 Int, 8 steps expect 1
+
+// Witness: a same-claim variable/function sanitizer collision (c1 = c2) is
+// representable and forces that claim's own exclusion.
+run same_claim_collision_witness {
+  some cs : CombinedSpec, c : Claim |
+    conflict_detected[c, c, cs.specRef] and c in cs.excludedClaims
+} for 3 Claim, 1 Spec, 4 Sample, 2 Cluster, 2 Finding,
+  1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion, 2 Declaration,
+  2 DeclName, 2 DeclSignature, 1 CombinedSpec, 1 CompiledArtifact,
+  2 ClaimId, 2 ImplicationResult, 1 GapCheck,
+  2 LogicalGroup, 2 LogicalKey, 2 JsonExtraction, 4 JsonInput, 5 Int, 8 steps expect 1
 
 // ============================================================
 // COMMANDS — Property verification (check)
@@ -2102,4 +2209,57 @@ check formalization_eventually_resolves for 2 Claim, 1 Spec, 3 Sample, 1 Cluster
   1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
   0 CompiledArtifact, 1 ClaimId, 0 ImplicationResult, 0 GapCheck,
   0 LogicalGroup, 0 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 15 steps
+
+// ============================================================
+// COMMANDS — Remaining assertion coverage (every assert is checked)
+// ============================================================
+// The commands above check a representative subset. The commands below close
+// the gap so that ALL assertions declared in this module are machine-verified,
+// preventing silent drift (four assertions previously here were only fixed
+// because these checks were added). Scopes use the compact `for N` form; each
+// was chosen large enough for the relevant antecedent to be reachable (the run
+// scenarios above witness reachability of contradiction/abort/collision paths).
+
+// --- Structural (pure-function) assertions: no temporal unrolling ---
+check recovered_implies_valid_input for 4 but 5 Int expect 0
+check irrecoverable_never_silent for 4 but 5 Int expect 0
+check extraction_total for 4 but 5 Int expect 0
+check no_checksat_in_compiled for 4 but 5 Int expect 0
+check safe_ids_preserved for 4 but 5 Int expect 0
+check exclusion_implies_wellformed for 5 but 5 Int expect 0
+check same_claim_collision_excluded for 5 but 5 Int expect 0
+check inconclusive_no_cluster_corruption for 5 but 5 Int expect 0
+check single_result_per_query for 5 but 5 Int expect 0
+check clusters_have_distinct_members for 5 but 5 Int expect 0
+check unsat_has_core for 5 but 5 Int expect 0
+
+// --- Temporal safety assertions: single-transition properties ---
+check zero_candidates_implies_abort for 3 but 5 Int, 6 steps expect 0
+check invalid_never_in_candidates for 3 but 5 Int, 6 steps expect 0
+check divergent_produces_finding for 3 but 5 Int, 6 steps expect 0
+check no_collision_no_grouping_abort for 3 but 5 Int, 6 steps expect 0
+check group_formation_complete for 3 but 5 Int, 6 steps expect 0
+check contradiction_severity_correct for 3 but 5 Int, 6 steps expect 0
+check advisory_only_not_error for 3 but 5 Int, 6 steps expect 0
+check inconclusive_never_silent for 3 but 5 Int, 6 steps expect 0
+check solver_error_surfaced for 3 but 5 Int, 6 steps expect 0
+check pairwise_severity_correct for 3 but 5 Int, 6 steps expect 0
+check exhaustive_no_gap for 3 but 5 Int, 6 steps expect 0
+check gap_requires_all_conditional for 3 but 5 Int, 6 steps expect 0
+check timeout_no_block for 3 but 5 Int, 6 steps expect 0
+check collision_abort_sets_exit_code for 3 but 5 Int, 6 steps expect 0
+check json_failure_no_state_corruption for 3 but 5 Int, 6 steps expect 0
+check non_abort_failures_preserve_phase for 3 but 5 Int, 6 steps expect 0
+check evidence_monotonic for 3 but 5 Int, 6 steps expect 0
+check candidates_monotonic_in_validation for 3 but 5 Int, 6 steps expect 0
+check representatives_monotonic_in_clustering for 3 but 5 Int, 6 steps expect 0
+check single_terminal_state for 3 but 5 Int, 6 steps expect 0
+check findings_reference_valid_claims for 3 but 5 Int, 6 steps expect 0
+check exit_code_only_on_abort for 3 but 5 Int, 6 steps expect 0
+
+// --- Liveness assertions: require fairness premises (checked, no expect) ---
+check merged_cap_group_formation for 2 but 5 Int, 12 steps
+check evidence_eventually_persisted for 2 but 5 Int, 12 steps
+check collision_check_terminates for 2 but 5 Int, 12 steps
+check pairwise_terminates for 2 but 5 Int, 12 steps
 ```

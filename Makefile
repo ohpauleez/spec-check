@@ -49,7 +49,8 @@ test:
 .PHONY : dist
 dist:
 	@$(NPM) run build \
-	&& $(NPM) run bundle
+	&& $(NPM) run bundle \
+	&& chmod +x dist/spec-check.js
 
 .PHONY : run
 run:

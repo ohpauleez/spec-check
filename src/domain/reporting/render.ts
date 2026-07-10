@@ -12,6 +12,50 @@ import { writeOutputAtomic } from "../../adapters/fs.js";
 import { toRelativePath, type OutputDirPath } from "../branded.js";
 
 /**
+ * Neutralize untrusted Markdown data so evidence renders as inert text.
+ *
+ * @param value - raw untrusted text from findings or provenance
+ * @returns escaped text safe for inclusion in markdown list/table contexts
+ *
+ * @remarks
+ * Preconditions: input may contain arbitrary UTF-16 text including markdown
+ * control sequences and line breaks.
+ *
+ * Postconditions:
+ * - neutralizes inline controls (`[`, `]`, `(`, `)`, `*`, `_`, `` ` ``, `|`);
+ * - neutralizes leading block controls per line (`#`, `>`, `-`, `+`, `*`, digits+dot);
+ * - preserves inspectability (content remains readable as literal text);
+ * - does not create anchors, emphasis, code spans, headings, quotes, lists, or
+ *   extra table cells from raw evidence.
+ *
+ * @example
+ * ```ts
+ * neutralizeMarkdownInline("[x](http://evil)");
+ * // => "\\[x\\]\\(http://evil\\)"
+ * ```
+ */
+export function neutralizeMarkdownInline(value: string): string {
+  const escapedInline = value
+    .replace(/\\/gu, "\\\\")
+    .replace(/([[\]()*`_|])/gu, "\\$1");
+
+  const lines = escapedInline.split("\n");
+  const neutralizedLines = lines.map((line) => {
+    if (/^\s*[#>\-+*]/u.test(line)) {
+      return `\\${line}`;
+    }
+
+    if (/^\s*\d+[.)]\s+/u.test(line)) {
+      return line.replace(/^(\s*)(\d+)([.)])(\s+)/u, "$1$2\\$3$4");
+    }
+
+    return line;
+  });
+
+  return neutralizedLines.join("\n");
+}
+
+/**
  * Write phase reports for qualitative and coverage passes.
  *
  * Renders each phase's findings into a Markdown report file and writes it
@@ -312,11 +356,20 @@ function renderFindingsReport(filename: string, title: string, findings: readonl
   }
 
   for (const finding of findings) {
-    lines.push(`- [${finding.severity}] ${finding.category}: ${finding.description}`);
-    lines.push(`  - provenance: ${finding.provenance.file}${finding.provenance.heading === undefined ? "" : `#${finding.provenance.heading}`}`);
-    lines.push(`  - evidence: ${finding.evidence.map((item) => `${item.kind}=${item.value}`).join("; ")}`);
+    const safeDescription = neutralizeMarkdownInline(finding.description);
+    const safeProvenanceFile = neutralizeMarkdownInline(finding.provenance.file);
+    const safeProvenanceHeading = finding.provenance.heading === undefined
+      ? ""
+      : `#${neutralizeMarkdownInline(finding.provenance.heading)}`;
+    const safeEvidence = finding.evidence
+      .map((item) => `${neutralizeMarkdownInline(item.kind)}=${neutralizeMarkdownInline(item.value)}`)
+      .join("; ");
+
+    lines.push(`- [${finding.severity}] ${finding.category}: ${safeDescription}`);
+    lines.push(`  - provenance: ${safeProvenanceFile}${safeProvenanceHeading}`);
+    lines.push(`  - evidence: ${safeEvidence}`);
     if (finding.relatedClaimIdentifiers !== undefined && finding.relatedClaimIdentifiers.length > 0) {
-      lines.push(`  - related: ${finding.relatedClaimIdentifiers.join(", ")}`);
+      lines.push(`  - related: ${finding.relatedClaimIdentifiers.map((identifier) => neutralizeMarkdownInline(identifier)).join(", ")}`);
     }
   }
   return `${lines.join("\n")}\n`;

@@ -8,6 +8,7 @@
 import type { LogicIrClaim, LogicSort } from "../logic-ir.js";
 import { toClaimId } from "../branded.js";
 import { err, ok, type Result } from "../result.js";
+import { sanitizeIdentifier } from "./identifiers.js";
 
 /**
  * Validation error returned when a formalization sample fails schema checks.
@@ -88,6 +89,14 @@ export function validateFormalizationSample(sample: unknown): Result<LogicIrClai
     return functionsResult;
   }
 
+  const declarationConflictResult = validateDeclarationCollisions(
+    variablesResult.value.variables,
+    functionsResult.value,
+  );
+  if (!declarationConflictResult.ok) {
+    return declarationConflictResult;
+  }
+
   const assertionsResult = validateAssertions(record.assertions);
   if (!assertionsResult.ok) {
     return assertionsResult;
@@ -100,6 +109,73 @@ export function validateFormalizationSample(sample: unknown): Result<LogicIrClai
     functions: functionsResult.value,
     assertions: assertionsResult.value,
   });
+}
+
+/**
+ * Validate same-claim declaration collision rules.
+ *
+ * @param variables - validated variable declarations for one claim
+ * @param functions - validated function declarations for one claim
+ * @returns `ok(void)` when no same-claim collisions exist; otherwise validation error
+ *
+ * @remarks
+ * Preconditions:
+ * - `variables` and `functions` belong to the same claim.
+ * - entries are already structurally validated.
+ *
+ * Postconditions:
+ * - rejects raw variable/function name overlap;
+ * - rejects duplicate variables by sanitized symbol;
+ * - rejects duplicate functions by sanitized symbol;
+ * - does not reject same-claim sanitizer-induced cross-kind collisions (these are
+ *   compiler-level `symbol_kind_collision` cases handled in merge logic).
+ */
+function validateDeclarationCollisions(
+  variables: readonly { readonly name: string; readonly sort: LogicSort }[],
+  functions: readonly { readonly name: string; readonly args: readonly LogicSort[]; readonly returns: LogicSort }[],
+): Result<void, SampleValidationError> {
+  const variableRawNames = new Set<string>();
+  const functionRawNames = new Set<string>();
+  const seenVariableSymbols = new Map<string, string>();
+  const seenFunctionSymbols = new Map<string, string>();
+
+  for (const variable of variables) {
+    variableRawNames.add(variable.name);
+
+    const sanitizedName = sanitizeIdentifier(variable.name);
+    const existingRawName = seenVariableSymbols.get(sanitizedName);
+    if (existingRawName !== undefined) {
+      return err({
+        message: `duplicate variable declarations sanitize to one symbol: ${existingRawName}, ${variable.name}`,
+      });
+    }
+
+    seenVariableSymbols.set(sanitizedName, variable.name);
+  }
+
+  for (const fn of functions) {
+    functionRawNames.add(fn.name);
+
+    const sanitizedName = sanitizeIdentifier(fn.name);
+    const existingRawName = seenFunctionSymbols.get(sanitizedName);
+    if (existingRawName !== undefined) {
+      return err({
+        message: `duplicate function declarations sanitize to one symbol: ${existingRawName}, ${fn.name}`,
+      });
+    }
+
+    seenFunctionSymbols.set(sanitizedName, fn.name);
+  }
+
+  for (const variableName of variableRawNames) {
+    if (functionRawNames.has(variableName)) {
+      return err({
+        message: `raw variable/function name overlap in one claim: ${variableName}`,
+      });
+    }
+  }
+
+  return ok(undefined);
 }
 
 // ---------------------------------------------------------------------------

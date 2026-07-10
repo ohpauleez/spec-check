@@ -4,7 +4,11 @@ import { tmpdir } from "node:os";
 
 import { describe, expect, it } from "vitest";
 import { traceSpec } from "../support/spec-trace.js";
-import { writePhaseReports, writeSummaryReport } from "../../src/domain/reporting/render.js";
+import {
+  neutralizeMarkdownInline,
+  writePhaseReports,
+  writeSummaryReport,
+} from "../../src/domain/reporting/render.js";
 import type { Finding } from "../../src/domain/findings.js";
 import { toOutputDirPath } from "../../src/domain/branded.js";
 
@@ -151,5 +155,110 @@ describe("reporting contracts", () => {
     });
     const files = await readdir(dir);
     expect(files).toContain("report_2.logic.md");
+  });
+
+  it("neutralizes markdown control payloads in rendered evidence and provenance", async () => {
+    traceSpec("RAE-EVID-RENDER-SAFE");
+    const dir = await mkdtemp(join(tmpdir(), "spec-check-report-"));
+    const payloads = [
+      "[x](http://evil)",
+      "**x**",
+      "_x_",
+      "`code`",
+      "a | b",
+      "# heading",
+      "> quote",
+      "- bullet",
+    ];
+
+    const findings: Finding[] = payloads.map((payload, index) => ({
+      severity: "error",
+      category: "logic.merge_conflict",
+      provenance: { file: payload, heading: payload },
+      description: payload,
+      rationale: "payload should stay inert",
+      evidence: [{ kind: `k${String(index)}`, value: payload }],
+      relatedClaimIdentifiers: [payload],
+    }));
+
+    await writePhaseReports({
+      outputDir: toOutputDirPath(dir),
+      report11: findings,
+      report12: [],
+      report13: [],
+    });
+
+    const content = await readFile(join(dir, "report_1.1.md"), "utf8");
+    expect(content).not.toContain("[x](http://evil)");
+    expect(content).toContain("\\[x\\]\\(http://evil\\)");
+    expect(content).toContain("\\*\\*x\\*\\*");
+    expect(content).toContain("\\_x\\_");
+    expect(content).toContain("\\`code\\`");
+    expect(content).toContain("a \\| b");
+    expect(content).toContain("\\# heading");
+    expect(content).toContain("\\> quote");
+    expect(content).toContain("\\- bullet");
+  });
+
+  it("neutralization helper escapes block and inline markdown controls", () => {
+    traceSpec("RAE-EVID-RENDER-SAFE");
+    const raw = "[x](http://evil)\n# head\n> q\n- b\n1. list\n**x** _x_ `x` a | b";
+    const safe = neutralizeMarkdownInline(raw);
+
+    expect(safe).toContain("\\[x\\]\\(http://evil\\)");
+    expect(safe).toContain("\\# head");
+    expect(safe).toContain("\\> q");
+    expect(safe).toContain("\\- b");
+    expect(safe).toContain("1\\. list");
+    expect(safe).toContain("\\*\\*x\\*\\*");
+    expect(safe).toContain("\\_x\\_");
+    expect(safe).toContain("\\`x\\`");
+    expect(safe).toContain("a \\| b");
+  });
+
+  it("renders merge-conflict and invalid-group evidence as inert data", async () => {
+    traceSpec("RAE-SHAPE-MERGE-CONFLICT-EVIDENCE", "RAE-EVID-RENDER-SAFE");
+    const dir = await mkdtemp(join(tmpdir(), "spec-check-report-"));
+    const findings: Finding[] = [
+      {
+        severity: "error",
+        category: "logic.merge_conflict",
+        provenance: { file: "specs/[x](http://evil).md" },
+        description: "Function **f** conflicts",
+        rationale: "must stay inert",
+        evidence: [
+          { kind: "existing_function_name", value: "**f**" },
+          { kind: "excluded_claim_id", value: "- CLAIM-1" },
+        ],
+        relatedClaimIdentifiers: ["#CLAIM-1"],
+      },
+      {
+        severity: "error",
+        category: "logic.invalid_group",
+        provenance: { file: "specs/>group.md" },
+        description: "duplicate raw IDs: [A](b)",
+        rationale: "must stay inert",
+        evidence: [
+          { kind: "duplicated_raw_ids", value: "a | b" },
+          { kind: "sanitized_claim_id", value: "`shared`" },
+        ],
+        relatedClaimIdentifiers: [">CLAIM"],
+      },
+    ];
+
+    await writePhaseReports({
+      outputDir: toOutputDirPath(dir),
+      report11: findings,
+      report12: [],
+      report13: [],
+    });
+
+    const content = await readFile(join(dir, "report_1.1.md"), "utf8");
+    expect(content).toContain("logic.merge_conflict");
+    expect(content).toContain("logic.invalid_group");
+    expect(content).toContain("\\*\\*f\\*\\*");
+    expect(content).toContain("a \\| b");
+    expect(content).toContain("\\#CLAIM-1");
+    expect(content).toContain("\\>CLAIM");
   });
 });

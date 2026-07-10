@@ -1,0 +1,385 @@
+## 1. Validation and Identifier Safety
+
+- [x] 1.1 Update `src/domain/formal/validate.ts` to reject raw variable/function name overlap within one claim.
+- [x] 1.2 Update `src/domain/formal/validate.ts` to reject duplicate variable declarations whose raw names sanitize to the same variable symbol.
+- [x] 1.3 Update `src/domain/formal/validate.ts` to reject duplicate function declarations whose raw names sanitize to the same function symbol.
+- [x] 1.4 Preserve sanitizer-induced same-claim variable/function cross-kind collisions as compiler-level `symbol_kind_collision` cases rather than validation failures.
+- [x] 1.5 Extract `sanitizeIdentifier()` into a new `src/domain/formal/identifiers.ts` module and re-export it from `src/domain/formal/smtlib.ts` as a compatibility shim so existing importers keep working, then make the sanitizer injective: pass through only ASCII letters and digits `[A-Za-z0-9]`, reserve `_` as the escape lead, and escape every other code point — including a literal underscore (`U+005F` becomes `_00005F`) — as `_` followed by exactly six uppercase hexadecimal digits of the Unicode code point. Iterate the raw string by Unicode code point (`for…of`/`codePointAt`), never by UTF-16 code unit (`charCodeAt`), so a supplementary-plane character such as `😀` (`U+1F600`) maps to a single six-digit escape (`_01F600`) and an unpaired surrogate escapes to its own six-digit form. Escape a leading raw digit as its six-digit hex form (a bare `_` prefix would break unique decodability), map the empty string to `_`, and perform no Unicode normalization.
+- [x] 1.6 Preserve assertion-label invariants for `<sanitizedClaimId>__a<index>`; ensure the new sanitizer cannot place raw `__` inside sanitized IDs and that label mapping remains collision-free.
+- [x] 1.7 Update the single escape-output-sensitive golden assertion in `test/contract/smtlib.test.ts` (the `sanitizeIdentifier("REQ(1)|A")` expectation) from `/^REQ_28/` to `/^REQ_000028/` to match fixed-width-6 output. No many-to-one raw-dedup characterization test exists to invert: the old sanitizer's collisions were latent (never asserted), and all other sanitizer tests assert the shape `/^[A-Za-z_][A-Za-z0-9_]*$/` or `sanitizeIdentifier("") === "_"`, which the injective sanitizer still satisfies.
+- [x] 1.8 Add `validate.test.ts` cases for raw variable/function overlap, duplicate sanitized variables, and duplicate sanitized functions.
+- [x] 1.9 Add sanitizer contract/property tests proving formerly colliding identifiers such as `REQ(1)` and `REQ_281_29` now produce distinct sanitized symbols and distinct assertion labels.
+- [x] 1.10 Correct the stale sanitizer documentation that still describes the old two-digit `_XX` escape: update the `SanitizedClaimId` doc comment in `src/domain/branded.ts` and the sanitizer/module JSDoc in `src/domain/formal/smtlib.ts` to describe the injective fixed-width-6 encoding, so no doc comment contradicts the new `identifiers.ts` contract.
+
+### Validation and Identifier Safety change summary
+
+**What changed:**
+- Extracted identifier sanitization into a new module `src/domain/formal/identifiers.ts` and made it injective. `sanitizeIdentifier()` now passes through only `[A-Za-z0-9]`, reserves `_` as the escape lead, and escapes every other Unicode code point — including a literal underscore (`U+005F` → `_00005F`) — as `_` followed by exactly six uppercase hex digits (`encodeCodePointEscape` at `identifiers.ts:42`). Iteration is by code point (`for…of` + `codePointAt`, `identifiers.ts:99`), so `😀` (`U+1F600`) maps to a single `_01F600`; a leading raw digit is escaped; empty input maps to `_`; no Unicode normalization is applied.
+- `src/domain/formal/smtlib.ts:85` re-exports `sanitizeIdentifier` from the new module (`export const sanitizeIdentifier = sanitizeIdentifierImpl`) as a compatibility shim so existing importers keep working.
+- Added same-claim declaration-collision validation in `src/domain/formal/validate.ts` (`validateDeclarationCollisions`, wired into `validateFormalizationSample`): rejects raw variable/function name overlap, duplicate variables that sanitize to one symbol, and duplicate functions that sanitize to one symbol. Same-claim sanitizer-induced cross-kind collisions are intentionally NOT rejected here.
+- Updated stale `_XX` two-digit-escape documentation: the `SanitizedClaimId` doc in `src/domain/branded.ts` and the sanitizer/module JSDoc now describe the injective fixed-width-6 encoding.
+
+**Why this was done:**
+- The previous sanitizer was many-to-one: distinct raw IDs such as `REQ(1)` and `REQ_281_29` could collapse to one symbol, silently aliasing declarations and assertion labels. Injectivity is the precondition for VSC-8 (determinism), VSC-10b (sanitized claim-ID uniqueness), and collision-free assertion labels `<sanitizedClaimId>__a<index>`.
+- Same-claim duplicate/overlap rejection closes the schema-layer gap (tasks 1.1–1.3) so malformed samples fail fast, while cross-kind sanitizer collisions are deferred to the compiler as `symbol_kind_collision` (task 1.4, VSC-9) because they are a merge-namespace property, not a schema property.
+
+**Implementation details / evidence:**
+- Fixed-width-6 escape: `encodeCodePointEscape` uses `codePoint.toString(16).toUpperCase().padStart(6, "0")` (`identifiers.ts:43`); output always matches `SanitizedClaimId`'s `^[A-Za-z_][A-Za-z0-9_]*$`.
+- `validateDeclarationCollisions` returns `Result` errors (never throws), consistent with the validation layer's `Result` contract.
+- Assertion-label invariant preserved: injective output for non-empty input never contains a raw `__`, so the `__a` separator stays unambiguous (documented in the sanitizer JSDoc invariants).
+
+**Under-specified decision:**
+- Operational bounds are out of scope for Section 1; the sanitizer stays total for all JavaScript strings. The single `throw` in `sanitizeIdentifier` guards the unreachable `codePointAt() === undefined` internal invariant only, per style-guide "throw on broken invariant".
+
+**Developer handoff notes:**
+- `identifiers.ts` is now the sole owner of solver-facing identifier encoding; import from there for new code and treat the `smtlib.ts` export purely as a backward-compat shim.
+- Fixed-width-6 escapes widen sanitized output, so any test asserting exact escape shape must use the six-digit form (`_000028`, not `_28`).
+
+**Validation evidence:**
+- `test/contract/validate.test.ts` (11 tests): "rejects raw variable/function name overlap within one claim", "rejects duplicate variables that sanitize to the same symbol", "rejects duplicate functions that sanitize to the same symbol".
+- `test/contract/smtlib.test.ts`: golden `sanitizeIdentifier("REQ(1)|A")` updated to `/^REQ_000028/`; new "sanitizer distinguishes formerly colliding identifiers" and "keeps assertion labels distinct for formerly colliding identifiers".
+- `npm run lint:types` clean; targeted suite 61/61 passing.
+
+## 2. Combined SMT-LIB Conflict Detection
+
+- [x] 2.1 Extend `SpecMergeConflict` in `src/domain/formal/smtlib.ts` to the three-kind discriminated union: `function_signature_mismatch`, `variable_sort_mismatch`, and `symbol_kind_collision`. Type each variant's `sanitizedName` as the branded `SanitizedClaimId` from `src/domain/branded.ts` (not raw `string`) so solver-facing symbol identity is compiler-enforced; keep the raw `existing*`/`conflicting*` name and `claimId` evidence fields as `string`.
+- [x] 2.2 Rename function-conflict evidence from the old `functionName` shape to explicit `existingFunctionName` and `conflictingFunctionName`, preserving `claimIds: [existingClaimId, excludedClaimId]`.
+- [x] 2.3 Add explicit `existingClaimId` and `excludedClaimId` to all conflict kinds and treat `claimIds` as evidence only, not downstream inclusion state.
+- [x] 2.4 Add `declaredVariables: Map<SanitizedClaimId, { variableName: string; sort: LogicSort; claimId: string }>` and extend `declaredFunctions` to `Map<SanitizedClaimId, { functionName, fn, claimId }>` for evidence, keying both registries on the branded sanitized symbol returned by `sanitizeIdentifier()`.
+- [x] 2.5 Implement variable-sort mismatch detection first, comparing exact closed `LogicSort` values and recording `expectedSort` and `conflictingSort`.
+- [x] 2.6 Preserve and update function-signature mismatch detection second, including new evidence fields and first surviving declaration ownership.
+- [x] 2.7 Implement symbol-kind collision detection third for cross-claim variable/function reuse and same-claim sanitizer-induced cross-kind collisions.
+- [x] 2.8 Enforce first-conflict-wins per claim: scan variables before functions before cross-kind checks, record one conflict, and break on first hit.
+- [x] 2.9 Register only included claims; use first-wins guards for both variable and function registries so compatible redeclarations never re-anchor ownership or overwrite sort/signature.
+- [x] 2.10 Ensure the second emission pass excludes declarations, assertions, `claimIds`, and `assertionNameMap` entries for every conflicted claim.
+- [x] 2.11 Add `smtlib.test.ts` coverage for compatible variable deduplication, variable-sort mismatch, multiple later mismatches, excluded assertion absence, excluded unique declaration absence, function-conflict regression, mixed conflict kinds, precedence boundaries, cross-claim symbol-kind collision, same-claim sanitizer collision, raw names colliding after sanitization, empty claim lists, and no-variable compatible-function claims.
+- [x] 2.12 Encode the merge-core contracts as in-code assertions using `precondition`/`invariant`/`postcondition` from `src/domain/assert.ts`: precondition that the claim list is finite and within the declared bounds; a post-detection invariant that no registry symbol maps to two sorts, two signatures, or two declaration kinds; and postconditions that `compiled.claimIds` is an order-preserving subsequence of the input claim IDs, that no `excludedClaimId` appears in `compiled.claimIds`, and that `assertionNameMap` keys are a subset of `compiled.claimIds`. Keep expected structural outcomes (duplicate IDs, declaration conflicts) as `Result`-style findings, never thrown errors; split assertions into small single-fact checks so a failure names the exact violated contract.
+- [x] 2.13 Introduce named operational bounds `CLAIMS_PER_GROUP_MAX` (claims per compile group) and `DECLARATIONS_PER_CLAIM_MAX` (variable-plus-function declarations per claim). Guard the compile boundary with a `precondition` when a group or claim exceeds them, iterating the bounded collections with `for…of` and breaking on the first breach. Note (code-review amendment): because compile groups are assembled from an unbounded upstream claim count, an oversized group is an expected input-driven condition, not a broken invariant; the primary size rejection is therefore a graceful `logic.invalid_group` finding produced by `preflightGroupBounds` (task 3.13), and the `compileSpecSmtlib` `precondition` guards are retained as unreachable caller-contract backstops rather than the primary path.
+
+### Combined SMT-LIB Conflict Detection change summary
+
+**What changed:**
+- `SpecMergeConflict` in `src/domain/formal/smtlib.ts:36` is now a three-kind discriminated union: `function_signature_mismatch`, `variable_sort_mismatch`, and `symbol_kind_collision`. Every variant's `sanitizedName` is the branded `SanitizedClaimId`; raw `existing*`/`conflicting*` names and claim-ID evidence stay `string`. Function evidence was renamed from `functionName` to explicit `existingFunctionName` / `conflictingFunctionName`.
+- All variants carry explicit `existingClaimId`, `excludedClaimId`, and `claimIds: readonly [string, string]` (evidence only, never inclusion state).
+- Added two evidence registries keyed on the branded sanitized symbol (`smtlib.ts:171-172`): `declaredVariables: Map<SanitizedClaimId, {variableName, sort, claimId}>` and `declaredFunctions: Map<SanitizedClaimId, {functionName, fn, claimId}>`.
+- Detection runs in fixed per-claim precedence and stops on the first hit (`conflictForClaim`, `break`): variable-sort mismatch first (`smtlib.ts:188`), function-signature mismatch second (`:208`), then symbol-kind collisions third (`:226`) covering cross-claim variable↔function reuse plus same-claim sanitizer-induced cross-kind collisions.
+- First-wins ownership: registries record a symbol only when absent (`!has` guards, `smtlib.ts:298-318`), and only included claims register, so compatible redeclarations never re-anchor ownership or overwrite sort/signature. A second emission pass (`:330`) skips every excluded claim, so their declarations, assertions, `claimIds`, and `assertionNameMap` entries are all absent.
+- Named operational bounds `CLAIMS_PER_GROUP_MAX` (1024) and `DECLARATIONS_PER_CLAIM_MAX` (2048) guard the compile boundary via `precondition` (`smtlib.ts:17-21`, `:142-155`). Following a code review, these guards are retained as unreachable backstops; the primary size rejection is the graceful `logic.invalid_group` finding from `preflightGroupBounds` (see Section 3).
+- Merge-core contracts encoded as small single-fact `precondition`/`invariant`/`postcondition` checks: finite bounded claim list precondition; post-detection invariants that no symbol maps to two sorts or to both a variable and function (`:321-328`); postconditions that `claimIds` is an order-preserving subsequence of the input (`:363-372`), no `excludedClaimId` appears in `claimIds` (`:374`), and `assertionNameMap` values reference only included claims (`:379`).
+
+**Why this was done:**
+- VSC-1 / VSC-9: never emit a symbol with two sorts or as both variable and function → post-detection invariants.
+- VSC-2: never include an excluded claim's assertions → second-pass exclusion + `assertionNameMap` postcondition.
+- VSC-3: never hide a sort mismatch behind first-wins dedup → `variable_sort_mismatch` recorded for the later incompatible claimant with `expectedSort`/`conflictingSort`.
+- VSC-4: inclusion authority is `compiled.claimIds`; explicit `excludedClaimId` plus the subsequence postcondition keep evidence from ever implying a different exclusion than compilation used.
+- VSC-5 / VSC-6: compatible variable/function redeclarations stay included and analyzable.
+- VSC-7: bounded `for…of` with break guarantees termination for any finite claim list.
+- Branding `sanitizedName` makes solver-symbol identity compiler-enforced rather than a raw `string`.
+
+**Implementation details / evidence:**
+- Same-claim sanitizer cross-kind collision emits `existingClaimId === excludedClaimId` and `claimIds: [claimId, claimId]` (`smtlib.ts:254-268`), distinguishing it from cross-claim collisions.
+- `signaturesMatch` (`:462`) compares return sort then arity then positional arg sorts for exact compatibility.
+
+**Under-specified decision:**
+- Concrete bound values 1024 / 2048 were not fixed by the spec; chosen as generous ceilings that reject pathological groups but never trip on realistic specs. They are exported constants so callers and tests can reference them.
+- Bound violations throw (broken-invariant class), whereas expected structural outcomes (duplicate IDs, declaration conflicts) remain `Result`-style findings, per the style guide.
+
+**Developer handoff notes:**
+- Adding a fourth conflict kind requires updating this union AND the `conflictToFinding` switch (Section 3); the `assertNever` default makes the omission a compile error.
+- Treat `claimIds` as human-facing evidence only — never branch inclusion on it; use `compiled.claimIds`.
+
+**Validation evidence:**
+- `test/contract/smtlib.test.ts` (17 tests): "detects variable sort mismatch and excludes later claim", "detects symbol kind collision across claims", "detects same-claim symbol kind collision", "uses conflict precedence variable before function before symbol-kind", plus compatible-dedup and excluded-declaration/assertion-absence coverage.
+- `npm run lint:types` clean (exhaustive union verified by the compiler).
+
+## 3. Logic Analysis Group Preflight and Inclusion Coherence
+
+- [x] 3.1 Add compile-group preflight in `src/domain/formal/logic-analysis.ts` that detects duplicate raw `claimId` values before `compileSpecSmtlib()`, artifact writes, or solver calls.
+- [x] 3.2 Emit one `logic.invalid_group` finding with severity `error` for duplicate raw IDs, listing duplicated IDs and affected claims, and add an appropriate report line.
+- [x] 3.3 Add sanitized-claim-ID uniqueness preflight using `sanitizeIdentifier(claimId)` as a defense-in-depth safety net for VSC-10b.
+- [x] 3.4 Emit one `logic.invalid_group` finding with severity `error` for sanitized-ID collisions, listing colliding raw IDs and the shared sanitized ID, and skip all compiler/writer/solver work for that group.
+- [x] 3.5 Keep invalid-group rejection group-scoped: sibling valid groups must still compile, write artifacts, and run solver queries.
+- [x] 3.6 Convert all `SpecMergeConflict` variants to `logic.merge_conflict` findings using an exhaustive `switch (conflict.kind)` whose `default` branch calls `assertNever(conflict)` (from `src/domain/assert.ts`, matching the existing `src/domain/errors.ts` pattern) so adding a fourth conflict variant becomes a compile-time error.
+- [x] 3.7 Preserve per-kind finding evidence: sanitized symbol, both raw names, both claim IDs, both sorts for variable conflicts, and both declaration kinds for symbol-kind conflicts.
+- [x] 3.8 Keep merge-conflict severity hardcoded to `error`, independent of source obligation.
+- [x] 3.9 Replace downstream pairwise/completeness filters based on conflict evidence tuples with `const includedClaimIds = new Set(compiled.claimIds)` and filter by inclusion.
+- [x] 3.10 Add `logic-analysis.test.ts` coverage for invalid-group zero compiler/writer/solver work, sibling valid group continuation, per-kind merge-conflict finding shapes, surviving-claim false-negative regression, and downstream filtering by `compiled.claimIds`.
+- [x] 3.11 Add a constructed sanitized-ID collision preflight test, even though injective sanitization makes it unreachable from distinct raw IDs in normal inputs.
+- [x] 3.12 Assert in code, co-located with the preflight, that a group rejected as `logic.invalid_group` performs zero `compileSpecSmtlib()`, artifact-write, and `runZ3Query()` calls for that group, complementing the contract/property zero-work tests with a runtime fail-fast guard. Note (code-review amendment, Section 9): the runtime `postcondition` guard and its `compileInvoked`/`artifactWriteInvoked`/`solverInvoked` booleans were subsequently removed as tautological self-certification (each asserted a boolean the same function had just set). The zero-work contract is now enforced solely by the independent mock-call-count oracle tests in `test/contract/logic-analysis.test.ts`, marked at the source short-circuit by a why-comment (`logic-analysis.ts:394-397`).
+- [x] 3.13 (code-review amendment) Add `preflightGroupBounds(claims)` in `logic-analysis.ts`, composed bounds-first with `preflightGroupClaimIds`, so a group exceeding `CLAIMS_PER_GROUP_MAX` claims or a claim exceeding `DECLARATIONS_PER_CLAIM_MAX` declarations rejects as a graceful `logic.invalid_group` finding (`group_too_large` / `claim_too_many_declarations`) with zero compile/write/solver work, instead of throwing a `precondition` that aborts the whole run. Extend the invalid-group union to four variants and dispatch `buildInvalidGroupFinding` through an exhaustive `switch` + `assertNever`. Retain the `compileSpecSmtlib` size `precondition` guards as unreachable backstops (proven by a direct-call throw test). Cover the group-cardinality bound, the per-claim declaration bound, sibling isolation, boundary behavior, and the retained backstop across `logic-analysis.test.ts`, `logic.property.test.ts`, and `smtlib.test.ts` under scenario `FLA-SPEC-GROUP-BOUNDS`.
+
+### Logic Analysis Group Preflight and Inclusion Coherence change summary
+
+**What changed:**
+- Added `preflightGroupClaimIds(claims, sanitizeClaimId = sanitizeIdentifier)` in `src/domain/formal/logic-analysis.ts:114`, run before `compileSpecSmtlib()`, artifact writes, or solver calls (`analyzeSpecGroup`, `:237`). It detects duplicate raw claim IDs first, then duplicate sanitized claim IDs (defense-in-depth for VSC-10b), returning at most one issue per group.
+- Invalid groups emit one `logic.invalid_group` error finding via `buildInvalidGroupFinding` (`:401`) — listing duplicated/colliding raw IDs, affected claims, and the shared sanitized ID — plus a report line, and skip all compile/write/solver work for that group only. Rejection stays group-scoped: sibling valid groups still compile, write, and run under `mapBounded` (`:75`).
+- `conflictToFinding` (`:160`) converts every `SpecMergeConflict` to a `logic.merge_conflict` error finding through an exhaustive `switch (conflict.kind)` whose `default` calls `assertNever(conflict)`, matching the `errors.ts` pattern. Per-kind evidence is preserved: sanitized symbol, both raw names, both claim IDs, both sorts for variable conflicts, both declaration kinds for symbol-kind conflicts. Severity is hardcoded `error`, independent of source obligation.
+- Downstream pairwise/completeness now filter by `const includedClaimIds = new Set(compiled.claimIds)` (`:375`) instead of reconstructing exclusion from conflict evidence tuples.
+- The invalid-group short-circuit performs zero compile/write/solver work; that contract is verified by the independent mock-call-count oracle tests in `test/contract/logic-analysis.test.ts` and marked at the source short-circuit by a why-comment (`logic-analysis.ts:394-397`). (An earlier revision asserted this at runtime via `compileInvoked`/`artifactWriteInvoked`/`solverInvoked` booleans and `postcondition`; those were removed as tautological self-certification — see Section 9.)
+- (Code-review amendment) `preflightGroupBounds(claims)` rejects oversized groups gracefully as `logic.invalid_group` before any compile/write/solver work, composed bounds-first with the claim-ID preflight (`preflightGroupBounds(claims) ?? preflightGroupClaimIds(claims)`). The invalid-group issue type became a four-variant discriminated union (`duplicate_raw_claim_id`, `duplicate_sanitized_claim_id`, `group_too_large`, `claim_too_many_declarations`), and `buildInvalidGroupFinding` dispatches through an exhaustive `switch (issue.kind)` + `assertNever`. This replaces the earlier behavior where the `compileSpecSmtlib` size `precondition` threw and aborted the entire run; those `precondition` guards remain as unreachable caller-contract backstops.
+
+**Why this was done:**
+- VSC-10: never build or consume a solver query for duplicate raw claim IDs → raw preflight rejects before any compile/solver call.
+- VSC-10b: enforce sanitized claim-ID uniqueness even if sanitizer injectivity ever regresses → sanitized preflight, made testable by the injectable `sanitizeClaimId` seam.
+- VSC-4: a single inclusion authority (`compiled.claimIds`) prevents deeper checks from disagreeing with compilation → `Set` filter over `compiled.claimIds`.
+- VSC-10c: an oversized compile group must not abort the run → `preflightGroupBounds` converts it to a group-scoped `logic.invalid_group` finding with zero compile/write/solver work, isolating the failure from valid sibling groups.
+- `assertNever` provides compile-time exhaustiveness so a future fourth conflict kind cannot silently drop a finding.
+
+**Implementation details / evidence:**
+- The `sanitizeClaimId` default parameter is a dependency-injection test seam: a forced-collision function lets `test/contract/logic-analysis.test.ts` exercise the sanitized-collision branch that injective sanitization otherwise makes unreachable.
+- `resolveCoreToClaims` (`:443`) maps unsat-core labels back to claim IDs through `assertionNameMap`, which now only ever contains included claims (Section 2 postcondition).
+
+**Under-specified decision:**
+- Preflight returns at most one issue per group and prefers the raw-duplicate check over the sanitized check (raw duplication is the stronger, simpler signal). This keeps findings deterministic and minimal.
+- Report-line wording (`invalid compile group (<kind>)`, `merge conflict (<kind>) between <ids>`) is implementation-chosen and not spec-fixed.
+
+**Developer handoff notes:**
+- The invalid-group zero-work contract is enforced by the mock-call-count oracle tests in `test/contract/logic-analysis.test.ts` (not by runtime assertions). If new compile/write/solver calls are added to `analyzeSpecGroup`, keep them below the preflight short-circuit and keep those oracle tests green.
+- Preflight must stay inside the per-group analysis; do not hoist it above the group loop or group-scoping (sibling continuation) breaks.
+
+**Validation evidence:**
+- `test/contract/logic-analysis.test.ts`: "rejects duplicate raw claim IDs as invalid group before compile and solver work", "maps each merge conflict kind to merge_conflict finding with stable evidence", "detects constructed sanitized-id collision in preflight", plus sibling-continuation and downstream-filtering coverage.
+- `test/contract/logic-analysis.test.ts` (`FLA-SPEC-GROUP-BOUNDS`): oversized-group rejection, per-claim over-declaration rejection scoped to the claim, oversized-group sibling isolation, and `preflightGroupBounds` boundary behavior — all asserting zero solver/write work.
+- `test/property/logic.property.test.ts` (`FLA-SPEC-GROUP-BOUNDS`): `preflightGroupBounds` is `null` at each limit and returns the correct issue kind one past it, for both group cardinality and `variables + functions` counts.
+- `test/contract/smtlib.test.ts` (`FLA-SPEC-GROUP-BOUNDS`): `compileSpecSmtlib` still throws its size `precondition` when called directly past a bound, proving the backstop is retained.
+- `npm run lint:types` clean (exhaustive four-variant switch verified).
+
+## 4. Reporting and Evidence Rendering Safety
+
+- [x] 4.1 Update `src/domain/reporting/render.ts` so finding descriptions, provenance, related claim IDs, and evidence values render as inert Markdown data rather than raw Markdown control content.
+- [x] 4.2 Neutralize inline Markdown links, emphasis, underscores used for emphasis, inline-code/backtick syntax, table-cell pipes, headings, block quotes, list markers, and other leading block markers in raw evidence.
+- [x] 4.3 Preserve evidence inspectability while preventing report structure changes such as synthetic anchors, emphasis spans, code spans, table cells, headings, block quotes, or list items.
+- [x] 4.4 Add reporting tests using concrete payloads `[x](http://evil)`, `**x**`, `_x_`, a backtick payload, `a | b`, leading `#`, leading `>`, and leading `-`.
+- [x] 4.5 Add merge-conflict and invalid-group report tests proving raw names, claim IDs, paths, and conflict evidence remain inert data.
+- [x] 4.6 Confirm existing reporting shape requirements still pass after renderer escaping changes.
+
+### Reporting and Evidence Rendering Safety change summary
+
+**What changed:**
+- Added exported `neutralizeMarkdownInline(value)` in `src/domain/reporting/render.ts` and applied it to every untrusted field rendered by `renderFindingsReport`: finding description, provenance file, provenance heading, each evidence `kind=value` pair, and related claim IDs.
+- Neutralization escapes backslash first (`\` → `\\`), then inline Markdown controls (`[`, `]`, `(`, `)`, `*`, backtick, `_`, `|`), then per line neutralizes leading block markers (`#`, `>`, `-`, `+`, `*`) and ordered-list markers (digits followed by `.` or `)`) so raw evidence cannot open a new block structure.
+
+**Why this was done:**
+- VSC-12: security-sensitive evidence (raw names, claim IDs, assertion IDs, paths) must remain inert data across reports and cannot synthesize Markdown findings, links, emphasis, inline code spans, table cells, headings, block quotes, or list items. Merge-conflict and invalid-group findings (Sections 2–3) surface untrusted raw names and IDs directly into the report, so escaping at the render boundary is required.
+
+**Implementation details / evidence:**
+- Escape order matters and is fixed: backslash-escape first so subsequently inserted `\` prefixes are not themselves re-escaped, then the inline character class, then leading-marker handling line-by-line (`escapedInline.split("\n").map(...)`).
+- The pipe `|` is escaped globally so evidence cannot inject extra table cells even if a future report uses Markdown tables.
+- Inspectability is preserved: payloads remain literal, readable text — e.g. `[x](http://evil)` renders as `\[x\]\(http://evil\)`, not a live link.
+- All five untrusted field categories in `renderFindingsReport` route through the helper (description, provenance file, provenance heading, evidence kind/value, related identifiers).
+
+**Under-specified decision:**
+- Chose per-line leading-marker neutralization plus global inline escaping rather than HTML-encoding or content stripping, to keep evidence human-readable while inert. This matches the task requirement to "preserve evidence inspectability while preventing report structure changes."
+
+**Developer handoff notes:**
+- Any new rendered field that carries untrusted data must be passed through `neutralizeMarkdownInline`; the helper is exported specifically so new render paths and unit tests can reuse it directly.
+
+**Validation evidence:**
+- `test/contract/reporting.test.ts` (11 tests): "neutralizes markdown control payloads in rendered evidence and provenance" (payloads `[x](http://evil)`, `**x**`, `_x_`, backtick, `a | b`, leading `#`, `>`, `-`), "neutralization helper escapes block and inline markdown controls", and "renders merge-conflict and invalid-group evidence as inert data". Pre-existing reporting shape tests still pass after the escaping changes.
+- `npm run lint:types` clean; targeted suite 61/61 passing.
+
+## 5. Spec, Alloy, Documentation, Property, and Regression Coverage
+
+- [x] 5.1 Create the standalone, compilable Alloy 6 file `openspec/changes/variable-claim-conflict/specs/formalization-and-logic-analysis/alloy/merge.als` (module `merge`) as an external documentation-and-verification model for the structural safety properties behind `FLA-SPEC-COMBINE` (not part of the test harness and not a spec condition), modeling claim identity (`claimId` on `Claim`), declaration kind (`DeclKind`, `declKind` on `Declaration`), and `DeclName` as the final sanitized declaration identity.
+- [x] 5.2 Add `merge.als` facts `unique_claim_ids_per_spec` and `validated_same_claim_declarations` aligned with validation and preflight boundaries.
+- [x] 5.3 Define `merge.als` `conflict_detected` to cover differing declaration kind or differing declaration signature for the same sanitized name, allowing `c1 = c2` for same-claim sanitizer collisions.
+- [x] 5.4 Define `merge.als` `combined_wellformed` so included declarations sharing a name agree on both kind and signature, plus `combined_partitions_spec_claims` so included/excluded claims partition the spec's claims disjointly.
+- [x] 5.5 Keep `merge.als` `conflicts_excluded` disjunctive (`c1 in excludedClaims or c2 in excludedClaims`) and document that positional later-claim exclusion is verified by property tests rather than Alloy.
+- [x] 5.6 Add `merge.als` safety assertions `exclusion_implies_wellformed` and `same_claim_collision_excluded` and `run` commands `sanity`, `conflict_with_exclusion`, and `same_claim_collision`, each with `expect` annotations, then run the Alloy Analyzer externally (`java -jar tooling/alloy_v6.0.2.jar exec -f …/alloy/merge.als`) to confirm the three runs are SAT and the two checks are UNSAT, and record the resulting transcript in this section's change summary. This is an external verification step, not part of the automated test suite.
+- [x] 5.7 Update `ARCHITECTURE.md` for formal-module accuracy: add the `merged-capability-analysis` capability to the Existing Specs list, add `identifiers.ts` (plus `logic-analysis-checks.ts` and `logic-analysis-sexpr.ts`) to the formal module inventory, and correct identifier-sanitization ownership from `smtlib.ts` to the new `identifiers.ts` module (with `smtlib.ts` re-exporting it as a compatibility shim).
+- [x] 5.8 Update `docs/design.md` for the injective sanitizer and external formal model: describe SMT-LIB identifier sanitization as the injective fixed-width-6 encoding owned by `identifiers.ts`, confirm the `SanitizedClaimId` shape `^[A-Za-z_][A-Za-z0-9_]*$`, update decision D-6 to fixed-width-6 injectivity, reframe the verification-pyramid formal-models tier as the external Alloy model verified by manual analyzer runs, and add the `compiled.claimIds`-authority and duplicate-claim-ID preflight invariants.
+- [x] 5.9 Add complete TSDoc to every new or changed exported function and type per `docs/typescript_style.md` (Documentation): state preconditions, postconditions, preserved invariants, all expected failure forms with `@throws`, ownership/mutability assumptions, and an `@example` for exported APIs and any subtle behavior — at minimum the injective `sanitizeIdentifier()`, the variable-sort/symbol-kind detection helpers, the group preflight, the conflict→finding conversion, and the renderer neutralization helper; for `Result`-returning functions document the meaning and invariants of both the success and error branches so TSDoc states the same contracts the assertions enforce.
+
+### Tasks deferred until `/opsx-archive` is performed
+-  Update `openspec/specs/formalization-and-logic-analysis/spec.md` to add `FLA-SPEC-VARSORT-CONFLICT`, `FLA-SPEC-SYMKIND-CONFLICT`, and `FLA-SPEC-DUPLICATE-CLAIM-ID`.
+-  Narrow `FLA-SPEC-CONFLICT` prose to function-signature conflicts and preserve both raw function names plus the shared sanitized symbol in evidence.
+-  Update `FLA-SPEC-COMBINE` and `FLA-SPEC-NAMED` to document `compiled.claimIds`, duplicate raw/sanitized claim-ID rejection, injective fixed-width-6 sanitization, and assertion-label uniqueness, and refresh the pre-existing `FLA-SMTLIB-COMPILE` requirement's `FLA-SMTLIB-SANITIZE`/`FLA-SMTLIB-PRESERVE` scenarios and worked examples to the fixed-width-6 encoding (as a `MODIFIED` delta restating the requirement's unchanged scenarios verbatim) so its outputs stay consistent with the new sanitizer.
+-  Update the `FLA-PAIRWISE` and `FLA-COMPLETENESS` requirements (as a `MODIFIED` delta restating their unchanged scenarios verbatim) so that a `timeout`/`unknown` verdict from any pairwise guard-activation sub-check or the completeness sub-check is documented as one aggregated `logic.inconclusive` warning finding carrying only counts and sampled claim IDs — extending the existing per-merged-capability inconclusive flow specified by `FLA-LOGIC-TIMEOUT` from the global query down to the deeper sub-checks (no new solver-result category; see Section 8).
+-  Record the per-group solver-concurrency bound in the `FLA-PAIRWISE` requirement model or design notes: pairwise Z3 fan-out is capped at `PAIRWISE_SOLVER_CONCURRENCY` (3) and the completeness pass adds exactly one concurrent query, so the per-group sub-check peak is 4 and the global peak stays at `concurrency × 4` under the group-level `mapBounded` (see Section 8).
+-  Document VSC-10b, VSC-11, and VSC-12 as encoding/rendering evidence obligations tested by concrete contract, property, and renderer tests rather than Alloy unless they affect merge state.
+-  Update `openspec/specs/reporting-and-evidence/spec.md` with `RAE-EVID-RENDER-SAFE` and merge/invalid-group finding evidence details.
+-  Update `openspec/specs/merged-capability-analysis/spec.md` with `MCA-MERGE-GROUP-KEY`, synthetic logical-key grouping semantics, and compile-group claim-ID uniqueness boundary.
+-  Ensure every new or modified scenario ID has at least one covering trace in contract/property/reporting tests.
+
+### Spec, Alloy, Property, and Regression Coverage change summary
+
+**What changed:**
+- Confirmed the standalone Alloy model at `openspec/changes/variable-claim-conflict/specs/formalization-and-logic-analysis/alloy/merge.als` is present, compilable, and contains the required signatures/facts/predicates/assertions/runs for tasks 5.1–5.6.
+- Updated `ARCHITECTURE.md` to include `merged-capability-analysis` in Existing Specs and corrected formal module inventory/ownership (`identifiers.ts`, `logic-analysis-checks.ts`, `logic-analysis-sexpr.ts`, and sanitizer ownership with `smtlib.ts` as compatibility re-export).
+- Updated `docs/design.md` to reflect injective fixed-width-6 sanitization ownership in `identifiers.ts`, expanded D-6 wording, added downstream inclusion/preflight invariants (`compiled.claimIds` authority and duplicate-ID preflight), and added the external Alloy model tier to the verification pyramid.
+- Completed missing exported API documentation in `src/domain/formal/logic-analysis.ts` for `runLogicAnalysis`, `preflightGroupClaimIds`, and `conflictToFinding` so contracts/failure forms are explicit and aligned with style requirements.
+
+**Why this was done:**
+- Section 5 requires closing the documentation/formal-model verification loop so code, design docs, and model-based evidence all describe the same structural safety story for merge conflicts and compile-group identity.
+
+**Implementation details / evidence:**
+- Alloy execution transcript (`java -jar tooling/alloy_v6.0.2.jar exec -f openspec/changes/variable-claim-conflict/specs/formalization-and-logic-analysis/alloy/merge.als`):
+  - `run sanity`: SAT
+  - `run conflict_with_exclusion`: SAT
+  - `run same_claim_collision`: SAT
+  - `check exclusion_implies_wellformed`: UNSAT
+  - `check same_claim_collision_excluded`: UNSAT
+
+**Under-specified decision:**
+- The spec asked to add complete TSDoc at minimum for listed APIs. Existing sanitizer and renderer docs already met most of this; this pass focused on exported logic-analysis APIs that were still under-documented.
+
+**Developer handoff notes:**
+- The external Alloy model is intentionally not wired into CI/tests; keep it as manual verification evidence unless a later change explicitly integrates it.
+- Keep design invariants and implementation assertions synchronized when extending merge conflict variants or preflight logic.
+
+## 6. State-Machine and Security Property Tests
+
+- [x] 6.1 Expand `test/property/logic.property.test.ts` to model an ordered claim-list state, reference declaration registry keyed by sanitized symbol, included/excluded IDs, first-conflict evidence, and duplicate-ID preflight state.
+- [x] 6.2 Implement generated commands `appendCompatibleClaim`, `appendVariableSortConflict`, `appendFunctionSignatureConflict`, `appendSymbolKindConflict`, `appendSameClaimSanitizerCollision`, `appendDuplicateClaimId`, `removeClaim`, and `reorderClaims`.
+- [x] 6.3 Assert determinism by comparing two `compileSpecSmtlib()` calls on the same generated state for identical conflicts, `claimIds`, assertion maps, and SMT-LIB text.
+- [x] 6.4 Assert model/implementation agreement for included IDs, excluded IDs, conflict kinds, first-conflict evidence, and surviving declaration table.
+- [x] 6.5 Assert inclusion partition: with unique raw claim IDs, each claim is either included or appears as a conflict's `excludedClaimId`, never both and never neither.
+- [x] 6.6 Assert no surviving disagreement: included claims never have one sanitized symbol with two sorts, two signatures, or two declaration kinds.
+- [x] 6.7 Assert positional first-wins by lowest-index scan: the surviving declaration for each symbol is contributed by the lowest-index compatible claimant, and every later incompatible declarant points back to that first claimant.
+- [x] 6.8 Assert append-compatible monotonicity while allowing insertion/reorder histories to be non-monotonic because first-wins is positional.
+- [x] 6.9 Assert function-conflict regression scope for histories with function conflicts and no variable/kind conflicts.
+- [x] 6.10 Assert duplicate raw claim IDs reject as `logic.invalid_group` before compile/solver work, with zero `compileSpecSmtlib()` and `runZ3Query` calls.
+- [x] 6.11 Assert sanitizer injectivity across generated distinct raw IDs and assert constructed sanitized-ID collision input is rejected with zero solver calls.
+- [x] 6.12 Promote every minimized failing command history to a named regression test with the covering `FLA-*`, `RAE-*`, or `MCA-*` scenario ID.
+- [x] 6.13 Add security property tests for SMT-LIB comment injection using CR, LF, semicolons, parentheses, and command fragments such as `(check-sat)` and `(set-option ...)`.
+- [x] 6.14 Add security property tests proving declaration names and assertion identifier-like tokens pass through `sanitizeIdentifier()` before declaration or named-assertion emission.
+- [x] 6.15 Add security property tests proving evidence rendering cannot create synthetic Markdown findings, links, emphasis, inline code spans, headings, block quotes, list items, or extra table cells.
+- [x] 6.16 Tag VSC-11 and VSC-12 security tests through relevant `FLA-*` and `RAE-*` scenario IDs or add a dedicated security scenario if needed.
+
+### State-Machine and Security Property Tests change summary
+
+**What changed:**
+- Expanded `test/property/logic.property.test.ts` with additional generated properties for:
+  - ordered claim-list state modeling with a local reference merge model,
+  - generated command histories (`appendCompatibleClaim`, `appendVariableSortConflict`, `appendFunctionSignatureConflict`, `appendSymbolKindConflict`, `appendSameClaimSanitizerCollision`, `appendDuplicateClaimId`, `removeClaim`, `reorderClaims`),
+  - implementation/reference agreement for included/excluded IDs, conflict kinds, and surviving symbol ownership,
+  - inclusion partition and no-surviving-disagreement checks,
+  - deterministic double-compilation checks for identical conflicts/claim IDs/assertion maps/SMT-LIB text,
+  - append-only monotonicity in compatible-only histories,
+  - function-conflict-only regression scope checks,
+  - named regression tests for minimized conflict-order and same-claim collision histories,
+  - sanitizer injectivity across distinct generated raw identifiers,
+  - duplicate raw-ID preflight rejection,
+  - constructed sanitized-ID collision rejection,
+  - zero solver/write work for invalid groups,
+  - conflict precedence and symbol-kind first-wins behavior,
+  - Markdown neutralization safety,
+  - SMT-LIB comment safety against newline command injection,
+  - declaration/assertion token sanitization before emission.
+- Added missing trace tags in contract tests to cover newly active scenario IDs (including `FLA-SPEC-CLAIMIDS`, `FLA-SPEC-DANGLING-REF`, and `MCA-MERGE-GROUP-KEY`).
+
+**Why this was done:**
+- Section 6 requires stateful/security property evidence for identity, sanitization, and rendering boundaries, plus traceability alignment for newly introduced scenarios.
+
+**Under-specified decision:**
+- Same-claim cross-kind collisions can emit `existingClaimId === excludedClaimId` where the `existingClaimId` no longer survives in `compiled.claimIds`; ownership checks were constrained to surviving owners only, and this behavior is captured by an explicit regression test.
+
+**Validation evidence:**
+- `npm run test -- test/property/logic.property.test.ts` passed (15/15).
+- `npm run test -- test/contract/smtlib.test.ts test/contract/logic-analysis.test.ts test/contract/validate.test.ts test/contract/reporting.test.ts test/contract/merge-logic-routing.test.ts` passed (60/60).
+- `npm run lint:types` clean.
+
+## 7. Final Verification
+
+- [x] 7.1 Run targeted contract tests for SMT-LIB compilation, logic analysis, validation, and reporting.
+- [x] 7.2 Run the state-machine and security property suite.
+- [x] 7.3 Run TypeScript strict compilation or repository typecheck to catch missing union fields and non-exhaustive switches.
+- [x] 7.4 Run OpenSpec/trace coverage so new scenario IDs exist in non-archived specs and every new catalog ID is covered.
+- [x] 7.5 Run the full test suite to catch consumers of old conflict shapes, old sanitizer output, old downstream filtering, and report rendering changes.
+- [x] 7.6 Record exact commands, results, and any residual risks in the task summaries.
+
+### Final Verification change summary
+
+**Commands run and results:**
+- `npm run test -- test/contract/smtlib.test.ts test/contract/logic-analysis.test.ts test/contract/validate.test.ts test/contract/reporting.test.ts` → pass (58/58).
+- `npm run test -- test/property/logic.property.test.ts` → pass (11/11).
+- `npm run lint:types` → pass.
+- `npm run test:trace` → pass (all catalog IDs covered; 62 files passed, 1 intentionally skipped live test).
+- `npm run test` → pass (480 passed, 1 skipped live test).
+
+**Residual risks:**
+- Section 6 tasks 6.1–6.9 and 6.12 remain open (full command-based model/state-machine framework and minimized-history promotion still pending).
+- External Alloy verification remains manual by design; CI does not enforce it.
+
+## 8. Sub-Check Inconclusive Surfacing and Solver Concurrency Bound
+
+This section is an adjacent hardening pass on the same specs-forward logic-analysis path touched by Section 3, completed on this branch after the Section 7 verification. It does **not** introduce a new solver-result category: it extends the **existing** `logic.inconclusive` flow — already acknowledged as an existing category in `proposal.md#Out of Scope` and specified for the global per-merged-capability query by `FLA-LOGIC-TIMEOUT` — from the global satisfiability query down into the deeper pairwise and completeness sub-checks, and it bounds the solver fan-out those sub-checks create. Because the behavior reuses the existing category and its covering tests trace to the existing parent scenarios `FLA-PAIRWISE`, `FLA-COMPLETENESS`, and `FLA-PAIRWISE-BOUND`, no new canonical scenario identifier is introduced; the corresponding canonical-spec prose deltas are batched into the "deferred until `/opsx-archive`" list above.
+
+- [x] 8.1 Add `inconclusive: boolean` to `PairCheckResult` with the invariant that at most one of `contradicts` / `errored` / `inconclusive` is true, and set it in `checkPairContradiction` whenever an executed phase returns `kind:"timeout"` or `kind:"unknown"` (Phase 1 short-circuit and Phase 2).
+- [x] 8.2 Aggregate every undecided pairwise query into exactly one `logic.inconclusive` finding in `collectPairwiseFindings`, appended in the fixed order contradictions → `logic.check_error` → `logic.inconclusive` so a mixed batch stays deterministic.
+- [x] 8.3 Surface a `timeout`/`unknown` verdict from the single completeness query in `runCompletenessCheck` as one aggregated `logic.inconclusive` finding instead of silently treating it as "no gap".
+- [x] 8.4 Add `buildCheckInconclusiveFinding(checkType, inconclusiveQueryCount, totalQueryCount, inconclusiveClaimIds, specFile)` emitting a warning finding whose evidence carries only counts (`inconclusive_query_count`, `total_query_count`) and a deduped, lexicographically sorted `sample_claim_ids` list capped at `CHECK_DIAGNOSTIC_SAMPLE_MAX` — never raw SMT-LIB, stdout, or stderr — mirroring the security contract of the existing `buildCheckErrorFinding`.
+- [x] 8.5 Cap the pairwise Z3 fan-out with `PAIRWISE_SOLVER_CONCURRENCY = 3` in the pairwise `mapBounded`, so that with the one concurrent completeness query the per-group sub-check peak is `3 + 1 = 4` and the global peak stays bounded at `concurrency × 4` (16 at the default group concurrency of 4) rather than growing with pair count.
+- [x] 8.6 Refresh the module `@remarks` and the affected function TSDoc (`runPairwiseContradictionChecks`, `checkPairContradiction`, `collectPairwiseFindings`, `runCompletenessCheck`, `buildCheckInconclusiveFinding`) to state the undecided-sub-check surfacing behavior, the `PAIRWISE_SOLVER_CONCURRENCY` rationale, and the `SUBCHECK_TIMEOUT_MS` per-query bound.
+- [x] 8.7 Add contract coverage in `test/contract/logic-analysis.test.ts` reusing the existing parent scenario IDs, plus a shared `inconclusiveFindingsFor(findings, checkType)` filter helper that distinguishes sub-check `logic.inconclusive` findings from the group-level one by `check_type` evidence.
+- [x] 8.8 Re-run the full verification (`npm run lint`, `npm run test:trace`) after the Section 8 additions.
+
+### Sub-Check Inconclusive Surfacing and Solver Concurrency Bound change summary
+
+**What changed:**
+- `PairCheckResult` gained a boolean `inconclusive` field (`logic-analysis-checks.ts:106`) with the invariant that at most one of `contradicts` / `errored` / `inconclusive` holds. `checkPairContradiction` sets it whenever an executed phase returns `timeout`/`unknown` — Phase 1 short-circuit (`:385`) and Phase 2 (`:405`) — so an undecided pair is never silently read as "no contradiction".
+- `collectPairwiseFindings` (`:427`) now counts undecided pairs and their claim IDs and appends exactly one aggregated `logic.inconclusive` finding (`:455-456`), after any `logic.conditional_contradiction` findings and the aggregated `logic.check_error`, keeping finding order deterministic for mixed success/error/undecided batches.
+- `runCompletenessCheck` (`:559-560`) surfaces a `timeout`/`unknown` completeness verdict as one aggregated `logic.inconclusive` finding over the implicated claim IDs instead of treating the undecided query as "no gap".
+- Added `buildCheckInconclusiveFinding` (`:647`): a warning-severity `logic.inconclusive` finding (`:659`) whose description reports `<n> of <total> solver queries returned timeout/unknown` (`:661`) and whose evidence is `check_type`, `inconclusive_query_count`, `total_query_count`, and a `"; "`-joined `sample_claim_ids` capped at `CHECK_DIAGNOSTIC_SAMPLE_MAX` (`:663-668`); `relatedClaimIdentifiers` is the full deduped, sorted claim-ID list (`:669`). Evidence carries only counts and claim IDs, never raw solver text.
+- Bounded the pairwise solver fan-out at `PAIRWISE_SOLVER_CONCURRENCY = 3` (`:58`), applied in the pairwise `mapBounded` (`:241`). The group-level orchestrator comment (`logic-analysis.ts:551-554`) documents that `3 (pairwise) + 1 (completeness) = 4` per group, so under `mapBounded(input.groups, concurrency)` (`logic-analysis.ts:155`, default `LOGIC_ANALYSIS_CONCURRENCY_DEFAULT = 4`) total in-flight Z3 processes stay bounded at `concurrency × 4` (16 at the default).
+
+**Why this was done:**
+- A `timeout`/`unknown` verdict from a pairwise or completeness sub-check previously fell through as "no finding", so a green result could mask a solver that never reached a decision. Surfacing an aggregated `logic.inconclusive` warning preserves the same honesty guarantee that `FLA-LOGIC-TIMEOUT` already provides for the global query, now at sub-check granularity.
+- Without a pairwise fan-out cap, a densely-coupled group could spawn up to `2 × FORMAL_PAIR_BUDGET` pairwise queries and, multiplied by group-level concurrency, overwhelm the host with Z3 subprocesses. Capping pairwise at 3 makes the per-group and global solver peak a small, documented constant.
+
+**Implementation details / evidence:**
+- Aggregation is one-finding-per-check-type, not one-per-query, so a group with many undecided pairs still yields a single `logic.inconclusive` finding whose counts convey the scale.
+- The sub-check `logic.inconclusive` evidence always includes a `check_type` (`"pairwise"` / `"completeness"`), which distinguishes it from the group-level `logic.inconclusive` emitted by the global query in `analyzeSpecGroup` (that one carries `smtlib`/`solver_stdout`/`solver_stderr` and no `check_type`), so consumers and tests can filter the two apart.
+- Each sub-query is bounded by `SUBCHECK_TIMEOUT_MS` (10 s, `:61`); a non-`sat`, non-`unsat` verdict is what feeds the inconclusive path.
+
+**Under-specified decision:**
+- The pairwise cap is fixed at 3 (not a CLI flag) because the useful invariant is the constant per-group peak of 4; making it configurable would reintroduce an unbounded-peak footgun for no analysis benefit. It is a named module constant so tests and future callers can reference it.
+- `logic.inconclusive` was reused verbatim rather than adding a sub-check-specific category, per `proposal.md#Out of Scope` ("no new solver result categories"); the `check_type` evidence field carries the pairwise/completeness distinction instead.
+
+**Developer handoff notes:**
+- If a third deep sub-check is added, route its undecided verdicts through `buildCheckInconclusiveFinding` with a new `checkType` literal and keep aggregation to one finding per check type.
+- Keep the pairwise cap at or below `LOGIC_ANALYSIS_CONCURRENCY_DEFAULT` so the `concurrency × 4` reasoning in the `logic-analysis.ts` comment stays valid; if either constant changes, update that comment and the `PAIRWISE_SOLVER_CONCURRENCY` TSDoc together.
+
+**Validation evidence:**
+- `test/contract/logic-analysis.test.ts` added the `inconclusiveFindingsFor(findings, checkType)` helper (`:106`) and three tests, all reusing existing parent scenario IDs: "liveness: unknown Phase 1 and timeout Phase 2 each surface an inconclusive diagnostic rather than a false contradiction" (`:1035`, `FLA-PAIRWISE`) asserting exactly one pairwise `logic.inconclusive` on both an unknown Phase-1 run and a timeout Phase-2 run; "completeness inconclusive: a timeout on the completeness query surfaces one aggregated logic.inconclusive" (`:1073`, `FLA-COMPLETENESS`); and "concurrency bound: per-group solver sub-checks never exceed the pairwise + completeness peak of four" (`:1118`, `FLA-PAIRWISE-BOUND`), a deterministic macrotask-resolved probe asserting the in-flight peak is `<= 4` and `> 1` (non-vacuous).
+- `npm run lint` clean; `npm run test:trace` → 62 files passed / 1 skipped, 508 tests passed / 1 skipped, every catalog ID still covered with no new scenario IDs introduced (`logic-analysis.test.ts` at 39 tests).
+
+## 9. Post-Verification Code-Review Alignment
+
+This section records a code-review-alignment pass performed on this branch after the Section 7 final verification and the Section 8 hardening. It contains no behavioral feature work: it removes a class of tautological self-certifying assertions, fixes a latent liveness defect in the bounded-concurrency adapter that Section 8's solver bound relies on, strengthens the sanitizer-injectivity evidence, and closes exhaustiveness/TSDoc gaps surfaced by review. Findings retain the review's A/B/D grouping (shown inline). No new canonical scenario IDs are introduced: new tests reuse existing parent scenarios or are source-only adapter regressions.
+
+- [x] 9.1 (A1) Fix the `mapBounded` liveness defect in `src/adapters/concurrency.ts`: on the semaphore path (`concurrency < items.length`), a success callback that settles after a sibling rejection has set `hasError` and drained `inFlight` to zero must itself perform the final `reject(firstError)` instead of early-returning, otherwise the returned promise never settles (`concurrency.ts:88-97`).
+- [x] 9.2 (A2) Add deterministic regression coverage in `test/contract/concurrency.test.ts` (`describe("mapBounded settle behavior under rejection")`): a reject-then-later-resolve hang reproduction using a per-test timeout as the hang detector plus a launch-count tripwire, a last-in-flight-rejection non-regression guard, and an all-success input-ordering anchor. These are source-only adapter tests (no `traceSpec`), per `docs/typescript_style.md` rule 11 (a concurrency bug becomes a deterministic regression test).
+- [x] 9.3 (A3) Remove the tautological zero-work self-certification from `analyzeSpecGroup` in `src/domain/formal/logic-analysis.ts`: delete the self-certifying `postcondition(...)` assertions at all six group-analysis exit points (invalid-group, no-claims, unsat, error, inconclusive, and SAT returns), the `compileInvoked`/`artifactWriteInvoked`/`solverInvoked` booleans and their assignments, and the now-unused `postcondition` import. Replace with an explanatory why-comment at the preflight short-circuit (`logic-analysis.ts:394-397`); the zero-work contract remains enforced by the independent mock-call-count oracle tests in `test/contract/logic-analysis.test.ts`.
+- [x] 9.4 (B1) Make `obligationToSeverity` exhaustive in `src/domain/formal/logic-analysis-sexpr.ts` with `default: return assertNever(obligation)` (`:448`, importing `assertNever` from `../assert.js` at `:10`), matching the `assertNever` hardening used for the conflict/error unions in Sections 2-3, and update its TSDoc `@remarks` to state the exhaustiveness contract.
+- [x] 9.5 (B2) Correct the `checkPairContradiction` `@returns` in `src/domain/formal/logic-analysis-checks.ts` to list all three result fields `{ contradicts, errored, inconclusive }` after the Section 8 `inconclusive` addition.
+- [x] 9.6 (B3) Restore full TSDoc (preconditions/postconditions/invariants/failure forms) on the `src/domain/formal/smtlib.ts` exports that a prior refactor had stripped — `compileSmtlib`, `parseSmtlibContent`, `parseUnsatCore`, the `sanitizeIdentifier` re-export, the internal `sanitizeAssertion`/`signaturesMatch`/`escapeCommentLine`, and the `CompiledSmtlib`/`CompiledSpecSmtlib`/`SpecMergeConflict` types — and refresh the stale module-level "Exports:" line so it lists the current surface, keeping task 5.9's documentation contract true.
+- [x] 9.7 (D1) Strengthen sanitizer-injectivity evidence in `test/property/logic.property.test.ts` with a reference left-inverse decoder (`decodeSanitizedIdentifier`, `:138`) and a full-Unicode round-trip property (`injectiveRoundTripArb`, `:102`; test "sanitizeIdentifier is uniquely decodable, proving injectivity over full Unicode" at `:470`, tracing `FLA-SPEC-LABEL-ENCODE`/`FLA-SPEC-NAMED`): a left inverse proves injectivity structurally over ASCII, astral-plane, lone-surrogate, and boundary inputs — strictly stronger than the retained pairwise-distinctness sampling test — and additionally asserts the no-`__` invariant that keeps `<sanitizedClaimId>__a<index>` labels unambiguous.
+
+### Post-Verification Code-Review Alignment change summary
+
+**What changed:**
+- **(A1/A2)** `mapBounded` now settles on every path: when an earlier rejection has flipped `hasError` and a later success is the last in-flight op, the success callback performs the final `reject(firstError)` (`concurrency.ts:88-97`) rather than early-returning into a permanent hang. Three deterministic regression tests were added, using per-test timeouts as hang detectors and a launch-count tripwire to prove halted-pool behavior.
+- **(A3)** `analyzeSpecGroup` no longer self-certifies zero-work via runtime assertions. The self-certifying `postcondition(...)` assertions at all six exit points, the three tracking booleans and their assignments, and the `postcondition` import were removed; a why-comment at the preflight short-circuit (`logic-analysis.ts:394-397`) documents that the zero-work contract is checked by the independent mock-call-count oracle tests.
+- **(B1)** `obligationToSeverity` gained an `assertNever` default so a future `LogicObligation` variant becomes a compile-time error rather than a silent fall-through.
+- **(B2)** `checkPairContradiction`'s `@returns` now documents `{ contradicts, errored, inconclusive }`, matching the Section 8 field addition.
+- **(B3)** Restored TSDoc on the `smtlib.ts` exports and types stripped by a prior refactor, and refreshed the module "Exports:" header.
+- **(D1)** Added a reference left-inverse decoder and a full-Unicode round-trip injectivity property; retained the existing pairwise-distinctness test.
+
+**Why this was done:**
+- **A1/A2 (review finding F7):** Section 8 bounds the global solver peak at `concurrency × 4` *through* `mapBounded`. A latent settle-hang in that adapter could stall the entire analysis under a reject-then-resolve interleaving, silently undermining the concurrency-safety guarantee. Per `docs/typescript_style.md` rule 11, the concurrency bug is captured as a deterministic regression test rather than left as a one-off fix.
+- **A3 (review finding F1):** the removed `postcondition`s asserted a boolean that the same function body had just assigned — self-certification that can never fail and therefore verifies nothing. The genuine zero-work contract is a property of control flow, already proven by the mock-call-count oracle tests; the runtime booleans added noise and a false sense of coverage.
+- **B1/B2/B3:** align exhaustiveness and TSDoc with the style guide and with the Section 8 result-shape change; B3 restores documentation that a refactor had regressed, keeping task 5.9 accurate.
+- **D1:** a left inverse establishes injectivity everywhere (not merely on sampled pairs), tightening the evidence behind VSC-8 determinism and VSC-10b sanitized-ID uniqueness, and re-checking the assertion-label separator invariant.
+
+**Under-specified decision:**
+- D1's Unicode generator builds strings from random code points (`fc.oneof` over `fc.string()`, `String.fromCodePoint`-derived arbitraries, and explicit boundary constants) rather than the deprecated fast-check `fullUnicodeString`/`string16bits` arbitraries; it exercises ASCII, astral planes, lone surrogates, and the escape-boundary constants explicitly.
+- A3 keeps the invalid-group why-comment (not a runtime assertion) as the in-source signpost, on the principle that a control-flow contract is best asserted by tests that can actually observe a violation.
+
+**Developer handoff notes:**
+- Do not reintroduce "assert a flag this function just set" style postconditions; to prove zero-work, assert it from a test that observes real call counts, not from within the function under test.
+- Keep the `mapBounded` final-settle branches (`concurrency.ts:88-97` and the `.catch` drain at `:105-121`) intact; the three regression tests will hang and time out if the last-op reject path regresses.
+
+**Validation evidence:**
+- Full `make check` green after the pass: `dist` build + bundle, `npm run lint` (`lint:types` `tsc --noEmit` + `lint:eslint` `--max-warnings=0`), and the `SPEC_TRACE_COVERAGE=1` trace suite → 512 passed / 1 skipped, trace gate satisfied, no new scenario IDs introduced.
+- New tests: `test/contract/concurrency.test.ts` (3 settle-behavior regressions) and `test/property/logic.property.test.ts` "sanitizeIdentifier is uniquely decodable, proving injectivity over full Unicode".

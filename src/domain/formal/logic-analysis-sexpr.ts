@@ -4,22 +4,33 @@
  * to enable pairwise contradiction and completeness checks.
  *
  * Internal helper for the logic-analysis subsystem.
- * Exports: extractImplications, collectVariableDeclarations, deriveSeverityFromClaims.
+ * Exports: extractImplications, collectVariableDeclarations,
+ * collectFunctionDeclarations, buildDeclarationPreamble, deriveSeverityFromClaims.
  */
+import { assertNever } from "../assert.js";
 import type { FindingSeverity } from "../findings.js";
-import type { LogicIrClaim, LogicObligation, LogicVariableDeclaration } from "../logic-ir.js";
-import { sanitizeIdentifier } from "./smtlib.js";
+import type { LogicFunctionSymbol, LogicIrClaim, LogicObligation, LogicVariableDeclaration } from "../logic-ir.js";
+import { sanitizeAssertionExpr, sanitizeIdentifier } from "./smtlib.js";
 
 /**
  * A parsed implication assertion: antecedent => consequent.
  * Claims whose assertion expressions match `(=> guard consequent)` have
  * a guard that can be activated to check pairwise contradiction.
+ *
+ * @remarks
+ * Invariant: `sanitizedGuard === sanitizeAssertionExpr(guard)` and
+ * `sanitizedConsequent === sanitizeAssertionExpr(consequent)`. The **raw**
+ * `guard`/`consequent` are used only in human-facing evidence; the **sanitized**
+ * forms are the only variants that may enter a solver query, guaranteeing symbol
+ * parity with the compiled preamble.
  */
 export interface ParsedImplication {
   readonly claim: LogicIrClaim;
   readonly assertionIndex: number;
   readonly guard: string;
   readonly consequent: string;
+  readonly sanitizedGuard: string;
+  readonly sanitizedConsequent: string;
 }
 
 /**
@@ -69,6 +80,8 @@ export function extractImplications(claims: readonly LogicIrClaim[]): readonly P
           assertionIndex: i,
           guard: parsed.guard,
           consequent: parsed.consequent,
+          sanitizedGuard: sanitizeAssertionExpr(parsed.guard),
+          sanitizedConsequent: sanitizeAssertionExpr(parsed.consequent),
         });
       }
     }
@@ -188,7 +201,7 @@ export function splitSExprParts(expr: string): string[] {
   while (i < len) {
     // Goal: advance past inter-token whitespace so `i` sits on a token start.
     // This preserves the invariant that we never emit empty strings.
-    while (i < len && /\s/.test(expr[i]!)) i++;
+    while (i < len && isSExprWhitespace(expr.charCodeAt(i))) i++;
     if (i >= len) break;
 
     if (expr[i] === "(") {
@@ -221,7 +234,7 @@ export function splitSExprParts(expr: string): string[] {
       // so we consume until we hit a delimiter. This is safe because we
       // already know `expr[i]` is neither whitespace nor `(`.
       const start = i;
-      while (i < len && !/[\s()]/.test(expr[i]!)) i++;
+      while (i < len && !isSExprDelimiter(expr.charCodeAt(i))) i++;
       parts.push(expr.slice(start, i));
     }
   }
@@ -230,6 +243,37 @@ export function splitSExprParts(expr: string): string[] {
   // If the input was well-formed (balanced parens), the concatenation of
   // parts separated by single spaces reconstructs the semantic content.
   return parts;
+}
+
+/**
+ * Test whether a UTF-16 code unit is ASCII whitespace that delimits S-expression
+ * tokens (space, tab, LF, CR, VT, FF).
+ *
+ * @param code - A UTF-16 code unit, typically from `String.prototype.charCodeAt`.
+ * @returns `true` for ` `, `\t`, `\n`, `\r`, `\v`, `\f`; otherwise `false`.
+ *
+ * @remarks
+ * Hot-path replacement for `/\s/.test(...)` in {@link splitSExprParts}. Scoped to
+ * ASCII whitespace, which is the only whitespace the compile path emits into
+ * SMT-LIB assertion text. Failure modes: none — pure computation.
+ */
+function isSExprWhitespace(code: number): boolean {
+  return code === 0x20 || code === 0x09 || code === 0x0a || code === 0x0d || code === 0x0b || code === 0x0c;
+}
+
+/**
+ * Test whether a UTF-16 code unit terminates an atomic S-expression token —
+ * ASCII whitespace or a parenthesis.
+ *
+ * @param code - A UTF-16 code unit, typically from `String.prototype.charCodeAt`.
+ * @returns `true` for whitespace, `(` (0x28), or `)` (0x29); otherwise `false`.
+ *
+ * @remarks
+ * Hot-path replacement for `/[\s()]/.test(...)` in {@link splitSExprParts}.
+ * Failure modes: none — pure computation.
+ */
+function isSExprDelimiter(code: number): boolean {
+  return isSExprWhitespace(code) || code === 0x28 || code === 0x29;
 }
 
 /**
@@ -263,26 +307,75 @@ export function collectVariableDeclarations(claims: readonly LogicIrClaim[]): re
 }
 
 /**
- * Build SMT-LIB preamble declaring all variables from a set of claims.
+ * Collect all function-symbol declarations across a set of claims (deduplicated
+ * by name).
  *
- * @param variables - The deduplicated variable declarations to emit.
- * @returns A newline-separated string of SMT-LIB `declare-const` statements, one per variable.
+ * @param claims - The set of logic IR claims whose function declarations should be merged.
+ * @returns A deduplicated array of function symbols preserving encounter order.
  *
  * @remarks
- * Output format: Each line follows the pattern `(declare-const <sanitized-name> <sort>)`.
- * Variable names are sanitized via {@link sanitizeIdentifier} to ensure they are valid
- * SMT-LIB identifiers.
+ * Deduplication strategy: **first-wins**, mirroring {@link collectVariableDeclarations}.
+ * When multiple claims declare functions with the same name, the declaration from
+ * the earliest claim (in iteration order) is authoritative; later duplicates are
+ * discarded. For `survivingClaims` (post-compile, conflict-free) all same-named
+ * functions share one signature, so first-wins is loss-free.
  *
  * Postconditions:
- * - The returned string contains exactly `variables.length` lines (or is empty for no variables).
- * - Lines are joined by `\n` with no trailing newline.
+ * - Every unique function name appears exactly once in the result.
+ * - The result order follows first-encounter order across claims and their function lists.
  *
  * Failure modes: none — pure computation.
  */
-export function buildDeclarationPreamble(variables: readonly LogicVariableDeclaration[]): string {
-  return variables
-    .map((v) => `(declare-const ${sanitizeIdentifier(v.name)} ${v.sort})`)
-    .join("\n");
+export function collectFunctionDeclarations(claims: readonly LogicIrClaim[]): readonly LogicFunctionSymbol[] {
+  const seen = new Map<string, LogicFunctionSymbol>();
+  for (const claim of claims) {
+    for (const fn of claim.functions) {
+      if (!seen.has(fn.name)) {
+        seen.set(fn.name, fn);
+      }
+    }
+  }
+  return [...seen.values()];
+}
+
+/**
+ * Build an SMT-LIB preamble declaring all variables and functions from a set of
+ * claims.
+ *
+ * @param variables - The deduplicated variable declarations to emit.
+ * @param functions - The deduplicated function-symbol declarations to emit.
+ * @returns A newline-separated string of SMT-LIB declarations: one
+ *   `(declare-const ...)` per variable followed by one `(declare-fun ...)` per
+ *   function.
+ *
+ * @remarks
+ * Output format mirrors the global compile path
+ * (`smtlib.ts` `compileSpecSmtlib`): variables become
+ * `(declare-const <sanitized-name> <sort>)` and functions become
+ * `(declare-fun <sanitized-name> (<arg-sorts>) <returns>)`. Names are sanitized
+ * via {@link sanitizeIdentifier} so the preamble declares exactly the symbols the
+ * sanitized guard/consequent queries reference.
+ *
+ * Postconditions:
+ * - The result contains exactly `variables.length + functions.length` lines
+ *   (empty string when both are empty).
+ * - Variable lines precede function lines; lines are joined by `\n` with no
+ *   trailing newline.
+ *
+ * Failure modes: none — pure computation.
+ */
+export function buildDeclarationPreamble(
+  variables: readonly LogicVariableDeclaration[],
+  functions: readonly LogicFunctionSymbol[],
+): string {
+  const lines: string[] = [];
+  for (const v of variables) {
+    lines.push(`(declare-const ${sanitizeIdentifier(v.name)} ${v.sort})`);
+  }
+  for (const fn of functions) {
+    lines.push(`(declare-fun ${sanitizeIdentifier(fn.name)} (${fn.args.join(" ")}) ${fn.returns})`);
+  }
+  return lines.join("\n");
 }
 
 /**
@@ -340,14 +433,18 @@ export function deriveSeverityFromClaims(
  *
  * Because the switch is exhaustive over the `LogicObligation` union, TypeScript
  * will report a compile error if a new obligation level is added without updating
- * this function.
+ * this function. The `default` branch delegates to `assertNever`, which both
+ * enforces that compile-time exhaustiveness and throws if an out-of-union value
+ * is ever passed at runtime.
  *
- * Failure modes: none — pure computation; exhaustive match over closed union.
+ * Failure modes: throws `Error` only if called with a value outside the
+ * `LogicObligation` union (unreachable given well-typed callers).
  */
 export function obligationToSeverity(obligation: LogicObligation): FindingSeverity {
   switch (obligation) {
     case "mandatory": return "error";
     case "advisory": return "warning";
     case "informational": return "info";
+    default: return assertNever(obligation);
   }
 }

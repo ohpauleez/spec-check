@@ -33,7 +33,7 @@ describe("merge logic routing contracts", () => {
   });
 
   it("runs one logic group per merged capability and detects contradictions in one run", async () => {
-    traceSpec("FLA-RUN-LOGIC", "STC-LOGIC-CONTRA");
+    traceSpec("FLA-RUN-LOGIC", "FLA-GROUP-ONE", "STC-LOGIC-CONTRA", "MCA-MERGE-GROUP-KEY");
     const { runZ3Query } = await import("../../src/adapters/z3.js");
     vi.mocked(runZ3Query)
       .mockResolvedValueOnce({ kind: "unsat", stdout: "unsat\n(CAP_A_1__a0)\n", stderr: "", exitCode: 0 })
@@ -55,7 +55,7 @@ describe("merge logic routing contracts", () => {
   });
 
   it("writes logic artifacts under synthetic merged logicalFile artifact key", async () => {
-    traceSpec("FLA-SOLVER-PERSIST", "STC-LOGIC-REPORT");
+    traceSpec("FLA-SOLVER-PERSIST", "FLA-GROUP-LOGICAL", "STC-LOGIC-REPORT");
     const { runZ3Query } = await import("../../src/adapters/z3.js");
     const { writeOutputAtomic } = await import("../../src/adapters/fs.js");
     vi.mocked(runZ3Query).mockResolvedValue({

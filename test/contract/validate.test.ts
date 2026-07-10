@@ -67,4 +67,51 @@ describe("formalization sample validation", () => {
     });
     expect(result.ok).toBe(true);
   });
+
+  it("rejects raw variable/function name overlap within one claim", () => {
+    traceSpec("FLA-VALIDATE-SAMPLE", "FLA-SAMPLE-SAMECLAIM");
+    const result = validateFormalizationSample({
+      ...validSample,
+      variables: [{ name: "Shared", sort: "Bool" }],
+      functions: [{ name: "Shared", args: ["Bool"], returns: "Bool" }],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.message).toContain("raw variable/function name overlap");
+    }
+  });
+
+  it("rejects duplicate variables that sanitize to the same symbol", () => {
+    traceSpec("FLA-VALIDATE-SAMPLE", "FLA-SAMPLE-SAMECLAIM");
+    const result = validateFormalizationSample({
+      ...validSample,
+      variables: [
+        { name: "SameName", sort: "Bool" },
+        { name: "SameName", sort: "Bool" },
+      ],
+      functions: [],
+      assertions: [{ id: "ASSERT-1", expr: "true" }],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.message).toContain("duplicate variable declarations sanitize to one symbol");
+    }
+  });
+
+  it("rejects duplicate functions that sanitize to the same symbol", () => {
+    traceSpec("FLA-VALIDATE-SAMPLE", "FLA-SAMPLE-SAMECLAIM");
+    const result = validateFormalizationSample({
+      ...validSample,
+      variables: [],
+      functions: [
+        { name: "sameFn", args: ["Bool"], returns: "Bool" },
+        { name: "sameFn", args: ["Bool"], returns: "Bool" },
+      ],
+      assertions: [{ id: "ASSERT-1", expr: "true" }],
+    });
+    expect(result.ok).toBe(false);
+    if (!result.ok) {
+      expect(result.error.message).toContain("duplicate function declarations sanitize to one symbol");
+    }
+  });
 });

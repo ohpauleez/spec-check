@@ -67,11 +67,31 @@ sig MergedCapability {
   mergedReqs : set Requirement,
   mergedScenarios : set Scenario,
   logicalKey : one LogicalKey,
+  sanitizedKey : one SanitizedKey,
   findings : set Finding
 }
 
 // Synthetic logical key for artifact naming (distinct from source provenance)
 sig LogicalKey {}
+
+// Artifact-safe key derived from the logical key by sanitization. Distinct logical
+// keys MAY sanitize to the same SanitizedKey (a collision); the Artifact-Key Contract
+// makes such a collision a fatal, pipeline-aborting condition.
+sig SanitizedKey {}
+
+// --- Derived claims and compile groups (MCA-MERGE-GROUP-KEY) ---
+// Downstream claim identifiers grouped under one merged capability. All claims that
+// share one logical key form one compile group (one declaration namespace, one
+// assertion-label namespace, one conflict-preflight scope, one solver submission boundary).
+sig ClaimId {}
+sig SanitizedClaimId {}
+
+sig Claim {
+  rawClaimId : one ClaimId,           // canonical claim identifier
+  sanitizedClaimId : one SanitizedClaimId,  // artifact-safe form used for solver labels
+  claimCap : one MergedCapability,    // the compile group (logical-key boundary) owning this claim
+  derivedFrom : one Requirement       // provenance: the merged requirement this claim was extracted from
+}
 
 // --- Findings ---
 
@@ -81,24 +101,41 @@ one sig DupBase, DupDelta, DupAdded, DupModifiedId,
         ModMissingId, RemMissingId,
         PreSectionContent, StandaloneScenario,
         RenameUnsupported, FinalizedDeltaHeadingIgnored,
-        EmptyCapSkipped extends FindingKind {}
+        EmptyCapSkipped,
+        DupRawClaimId, DupSanitizedClaimId extends FindingKind {}
 
 sig Finding {
   kind : one FindingKind,
   affectedReq : lone Requirement,
-  affectedScen : lone Scenario
+  affectedScen : lone Scenario,
+  affectedClaim : lone Claim
 }
 
 // --- Pipeline state (temporal: for liveness modeling) ---
 
 abstract sig Phase {}
 one sig Idle, Merging, ClaimExtraction, CoverageAnalysis,
-        LogicAnalysis, Complete extends Phase {}
+        LogicAnalysis, Complete, Aborted extends Phase {}
+
+// Fatal abort causes (design: Graceful Degradation -> PipelineAbortError, no fallback).
+// A merge failure is a pipeline failure; there is no fallback to per-file analysis.
+abstract sig AbortCause {}
+one sig DeltaCountViolation,      // > 1 delta selected for one capability (precondition)
+        ArtifactKeyCollision,     // two capabilities sanitize to one artifact key
+        InternalMergeError        // unexpected internal merge exception / assertion
+        extends AbortCause {}
+
+// Which fatal causes are actually present in a given run (possibly none).
+// ArtifactKeyCollision is tied to the structural sanitizedKey collision below;
+// the other two are opaque input/runtime faults the run may or may not exhibit.
+sig ActiveAbort in AbortCause {}
 
 one sig PipelineState {
   var currentPhase : one Phase,
-  var processedCaps : set MergedCapability,   // caps submitted downstream
-  var mergeComplete : set MergedCapability     // caps that completed merge
+  var processedCaps : set MergedCapability,    // caps submitted downstream
+  var mergeComplete : set MergedCapability,    // caps that completed merge
+  var solverSubmitted : set MergedCapability,  // groups that passed claim-ID preflight and reached the solver
+  var abortCause : set AbortCause              // fatal causes recorded when the pipeline aborts
 }
 
 // --- Ownership and well-formedness facts ---
@@ -151,6 +188,38 @@ fact baseItemsHaveBaseOp {
 fact scenarioInheritsDelta {
   all s : Scenario | some s.parentReq implies
     s.scenDeltaOp = s.parentReq.deltaOp
+}
+
+// --- Claim, artifact-key, and abort well-formedness ---
+
+// Every claim derives from a requirement that survives in its group's merged output
+fact claimProvenance {
+  all c : Claim | c.derivedFrom in c.claimCap.mergedReqs
+}
+
+// Sanitization is deterministic on claim ids: equal raw ids map to equal sanitized ids
+fact claimSanitizationDeterministic {
+  all disj c1, c2 : Claim |
+    c1.rawClaimId = c2.rawClaimId implies c1.sanitizedClaimId = c2.sanitizedClaimId
+}
+
+// Sanitization is deterministic on artifact keys: equal logical keys map to equal sanitized keys
+fact keySanitizationDeterministic {
+  all disj mc1, mc2 : MergedCapability |
+    mc1.logicalKey = mc2.logicalKey implies mc1.sanitizedKey = mc2.sanitizedKey
+}
+
+// [Artifact-Key Contract] The artifact-key collision cause is active exactly when two
+// capabilities' sanitized keys collide. (Sanitized keys must be unique per run.)
+fact keyCollisionActiveWhenStructural {
+  ArtifactKeyCollision in ActiveAbort iff
+    (some disj mc1, mc2 : MergedCapability | mc1.sanitizedKey = mc2.sanitizedKey)
+}
+
+// Claim findings reference claims owned by the capability that carries the finding
+fact claimFindingsAreLocal {
+  all mc : MergedCapability, f : mc.findings |
+    some f.affectedClaim implies f.affectedClaim.claimCap = mc
 }
 
 // --- Merge structural invariants ---
@@ -316,6 +385,8 @@ pred init_state {
   PipelineState.currentPhase = Idle
   no PipelineState.processedCaps
   no PipelineState.mergeComplete
+  no PipelineState.solverSubmitted
+  no PipelineState.abortCause
 }
 ```
 
@@ -872,6 +943,7 @@ pred emit_target_not_found_removed [mc : MergedCapability, r : Requirement] {
   r.identifier not in mc.cap.finalized.requirements.identifier
   // Effect: finding emitted, operation skipped
   some f : mc.findings | f.kind = RemNotFound and f.affectedReq = r
+  r not in mc.mergedReqs
 }
 
 // Failure mode: ADDED introduces duplicate identifier
@@ -884,7 +956,7 @@ pred emit_duplicate_added [mc : MergedCapability, r : Requirement] {
   // Effect: finding emitted (identifies colliding id and namespace), block + scenarios skipped
   some f : mc.findings | f.kind = DupAdded and f.affectedReq = r
   r not in mc.mergedReqs
-  r.scenarios not in mc.mergedScenarios
+  no (r.scenarios & mc.mergedScenarios)
 }
 
 // Failure mode: duplicate base identifier (first-occurrence wins)
@@ -1014,7 +1086,7 @@ run failure_mode_scenario {
 ```
 
 ### Requirement: Preserve Source Provenance In Merged Output [MCA-MERGE-PROVEN]
-WHEN the spec-check tool emits merged requirements, merged scenarios, and derived claims from a merged capability view, THE spec-check tool SHALL preserve the original source-file provenance on each contributing item and SHALL use a separate synthetic merged capability key only for grouping and artifact naming.
+WHEN the spec-check tool emits merged requirements, merged scenarios, and derived claims from a merged capability view, THE spec-check tool SHALL preserve the original source-file provenance on each contributing item, SHALL use a separate synthetic merged capability key only for grouping and artifact naming, and SHALL treat all claims grouped under one synthetic merged capability key as one downstream compile-group identity boundary for specs-forward logic analysis.
 
 **References:**
 - `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Preconditions, Postconditions, and Invariants`
@@ -1040,6 +1112,27 @@ WHEN the spec-check tool persists specs-forward solver artifacts or report headi
 - Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345), [pipeline-helpers.ts:403 sanitizeLogicalFileForArtifacts()](/src/cli/pipeline-helpers.ts#L403)
 - Test: [merge-logic-routing.test.ts:57 writes logic artifacts under synthetic merged logicalFile artifact key](/test/contract/merge-logic-routing.test.ts#L57)
 - Test (integration): [merge-liveness.integration.test.ts:85 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L85)
+
+#### Scenario: Synthetic Logical Key Defines Compile-Group Boundary [MCA-MERGE-GROUP-KEY]
+WHEN the specs-forward pipeline groups derived claims for combined SMT-LIB compilation, THE spec-check tool SHALL group all claims that share one synthetic merged capability key into the same compile group and SHALL preserve claim identifier uniqueness as a downstream precondition for that group.
+
+**Postcondition:** Compile-group identity is consistent from merged-capability routing through logic analysis, and claim-ID safety checks are applied at the same grouping boundary used for solver submission.
+
+**Data Boundary:** The synthetic merged capability key is the `specFile` or logical-file identity for specs-forward compilation and artifact naming. It is not necessarily a raw source path and SHALL be treated as untrusted text when emitted into SMT-LIB comments or reports.
+
+**Identity Boundary:** All claims grouped under one synthetic merged capability key share one declaration namespace, one assertion-label namespace, one conflict-preflight scope, and one solver submission boundary. Raw and sanitized claim-ID uniqueness SHALL be enforced within this grouped boundary before solver work.
+
+##### Evidence
+- Implementation: [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345), [logic-analysis.ts:146 runLogicAnalysis()](/src/domain/formal/logic-analysis.ts#L146), [logic-analysis.ts:200 preflightGroupClaimIds()](/src/domain/formal/logic-analysis.ts#L200)
+- Test: [merge-logic-routing.test.ts:35 runs one logic group per merged capability and detects contradictions in one run](/test/contract/merge-logic-routing.test.ts#L35)
+- Example:
+```typescript
+const { preflightGroupClaimIds } = await import("./src/domain/formal/logic-analysis.ts");
+const uniqueGroup = [{ claimId: "CAP-A-1" }, { claimId: "CAP-A-2" }];
+preflightGroupClaimIds(uniqueGroup); //=> null
+const duplicateGroup = [{ claimId: "CAP-A-1" }, { claimId: "CAP-A-1" }];
+preflightGroupClaimIds(duplicateGroup).kind; //=> duplicate_raw_claim_id
+```
 
 #### Scenario: Merged Output Ordering Is Deterministic [MCA-MERGE-ORDER]
 WHEN the same finalized and delta inputs are merged on separate runs, THE spec-check tool SHALL produce the same requirement order, scenario order, capability order, findings, and logical grouping identity on each run.
@@ -1128,6 +1221,93 @@ run provenance_scenario {
     and some r1 : mc.mergedReqs | r1.sourceFile = mc.cap.finalized.source
     and some r2 : mc.mergedReqs | r2.sourceFile = mc.cap.delta.source
 } for 4 expect 1
+
+// --- Compile-group identity boundary and claim-ID uniqueness (MCA-MERGE-GROUP-KEY) ---
+// All claims that share one synthetic logical key form one compile group. Claim-ID
+// uniqueness (raw first, sanitized as defense-in-depth) is a downstream precondition
+// enforced within that grouped boundary before any solver work.
+
+// The compile group of a merged capability = the claims routed to its logical key
+fun compileGroup [mc : MergedCapability] : set Claim {
+  claimCap.mc
+}
+
+// Preflight failure form 1: a raw claim id appears more than once in one group
+pred hasRawClaimIdCollision [mc : MergedCapability] {
+  some disj c1, c2 : compileGroup[mc] | c1.rawClaimId = c2.rawClaimId
+}
+
+// Preflight failure form 2: two DISTINCT raw ids sanitize to one sanitized id (defense-in-depth)
+pred hasSanitizedClaimIdCollision [mc : MergedCapability] {
+  some disj c1, c2 : compileGroup[mc] |
+    c1.rawClaimId != c2.rawClaimId and c1.sanitizedClaimId = c2.sanitizedClaimId
+}
+
+// A compile group is claim-ID-valid iff it has neither a raw nor a sanitized collision
+pred claimGroupValid [mc : MergedCapability] {
+  not hasRawClaimIdCollision[mc]
+  not hasSanitizedClaimIdCollision[mc]
+}
+
+// Failure mode: duplicate raw claim id -> emit finding, group is not claim-ID-valid
+pred emit_duplicate_raw_claim_id [mc : MergedCapability] {
+  // Guard
+  hasRawClaimIdCollision[mc]
+  // Effect: one preflight finding, group rejected (not valid for solver submission)
+  some f : mc.findings | f.kind = DupRawClaimId
+  not claimGroupValid[mc]
+}
+
+// Failure mode: duplicate sanitized claim id (raw check passed first) -> emit finding
+pred emit_duplicate_sanitized_claim_id [mc : MergedCapability] {
+  // Guard: raw ids distinct (raw check runs first) but sanitized ids collide
+  not hasRawClaimIdCollision[mc]
+  hasSanitizedClaimIdCollision[mc]
+  // Effect: one preflight finding, group rejected
+  some f : mc.findings | f.kind = DupSanitizedClaimId
+  not claimGroupValid[mc]
+}
+
+// Invariant: claims sharing a logical key share one compile group (one identity boundary)
+assert one_group_per_logical_key {
+  all disj c1, c2 : Claim |
+    c1.claimCap.logicalKey = c2.claimCap.logicalKey implies c1.claimCap = c2.claimCap
+}
+
+// Safety: a claim-ID-valid group has all-distinct raw AND sanitized claim ids
+// (raw + sanitized uniqueness enforced within the grouped boundary)
+assert valid_group_has_unique_claim_ids {
+  all mc : MergedCapability | claimGroupValid[mc] implies (
+    (all disj c1, c2 : compileGroup[mc] | c1.rawClaimId != c2.rawClaimId)
+    and
+    (all disj c1, c2 : compileGroup[mc] | c1.sanitizedClaimId != c2.sanitizedClaimId)
+  )
+}
+
+// Safety: every compile group is scoped to exactly one merged capability
+// (one declaration/label/preflight/submission namespace per group)
+assert group_scoped_to_one_capability {
+  all c : Claim | one c.claimCap
+}
+
+check one_group_per_logical_key for 6 expect 0
+check valid_group_has_unique_claim_ids for 5 expect 0
+check group_scoped_to_one_capability for 6 expect 0
+
+// Scenario: a raw claim-ID collision is detectable within a group and flags a finding
+run claim_id_collision_scenario {
+  some mc : MergedCapability |
+    hasRawClaimIdCollision[mc]
+    and (some f : mc.findings | f.kind = DupRawClaimId)
+    and not claimGroupValid[mc]
+} for 4 expect 1
+
+// Scenario: a clean group with multiple distinct claims is claim-ID-valid
+run valid_group_scenario {
+  some mc : MergedCapability |
+    some disj c1, c2 : compileGroup[mc] | c1.rawClaimId != c2.rawClaimId
+    and claimGroupValid[mc]
+} for 4 expect 1
 ```
 
 ### Requirement: Ensure All Non-Empty Merged Capabilities Reach Downstream Phases [MCA-LIVENESS]
@@ -1184,17 +1364,22 @@ pred start_merge {
   PipelineState.currentPhase' = Merging
   PipelineState.mergeComplete' = MergedCapability
   PipelineState.processedCaps' = PipelineState.processedCaps
+  PipelineState.solverSubmitted' = PipelineState.solverSubmitted
+  PipelineState.abortCause' = PipelineState.abortCause
 }
 
 // Event: complete merge phase and advance to downstream
 pred complete_merge_phase {
-  // Guard: currently in Merging phase, all capabilities have been merged
+  // Guard: in Merging, all caps merged, and NO fatal abort cause is present
   PipelineState.currentPhase = Merging
   PipelineState.mergeComplete = MergedCapability
+  no ActiveAbort
   // Effect: advance to ClaimExtraction, submit non-empty caps
   PipelineState.currentPhase' = ClaimExtraction
   PipelineState.processedCaps' = { mc : MergedCapability | some mc.mergedReqs }
   PipelineState.mergeComplete' = PipelineState.mergeComplete
+  PipelineState.solverSubmitted' = PipelineState.solverSubmitted
+  PipelineState.abortCause' = PipelineState.abortCause
 }
 
 // Event: batch claim extraction (all submitted capabilities processed together)
@@ -1203,6 +1388,8 @@ pred process_all_claims {
   PipelineState.currentPhase' = CoverageAnalysis
   PipelineState.processedCaps' = PipelineState.processedCaps
   PipelineState.mergeComplete' = PipelineState.mergeComplete
+  PipelineState.solverSubmitted' = PipelineState.solverSubmitted
+  PipelineState.abortCause' = PipelineState.abortCause
 }
 
 // Event: batch coverage analysis
@@ -1211,13 +1398,33 @@ pred process_all_coverage {
   PipelineState.currentPhase' = LogicAnalysis
   PipelineState.processedCaps' = PipelineState.processedCaps
   PipelineState.mergeComplete' = PipelineState.mergeComplete
+  PipelineState.solverSubmitted' = PipelineState.solverSubmitted
+  PipelineState.abortCause' = PipelineState.abortCause
 }
 
-// Event: batch logic analysis
+// Event: batch logic analysis. Only claim-ID-valid groups pass preflight and reach the
+// solver; groups that fail claim-ID preflight are excluded before any solver work.
 pred process_all_logic {
   PipelineState.currentPhase = LogicAnalysis
   PipelineState.currentPhase' = Complete
+  PipelineState.solverSubmitted' = { mc : PipelineState.processedCaps | claimGroupValid[mc] }
   PipelineState.processedCaps' = PipelineState.processedCaps
+  PipelineState.mergeComplete' = PipelineState.mergeComplete
+  PipelineState.abortCause' = PipelineState.abortCause
+}
+
+// Event: fatal abort (MCA-LIVENESS-ASSERT + design Graceful Degradation).
+// A precondition violation (>1 delta), a sanitized artifact-key collision, or an
+// internal merge error propagates as PipelineAbortError -- no fallback, no downstream.
+pred abort_pipeline {
+  // Guard: a fatal cause is present while still pre-downstream (before any artifact write)
+  some ActiveAbort
+  PipelineState.currentPhase in (Idle + Merging)
+  // Effect: terminal Aborted state; record causes; no processed or solver-submitted caps
+  PipelineState.currentPhase' = Aborted
+  PipelineState.abortCause' = ActiveAbort
+  no PipelineState.processedCaps'
+  no PipelineState.solverSubmitted'
   PipelineState.mergeComplete' = PipelineState.mergeComplete
 }
 
@@ -1226,6 +1433,8 @@ pred stutter {
   PipelineState.currentPhase' = PipelineState.currentPhase
   PipelineState.processedCaps' = PipelineState.processedCaps
   PipelineState.mergeComplete' = PipelineState.mergeComplete
+  PipelineState.solverSubmitted' = PipelineState.solverSubmitted
+  PipelineState.abortCause' = PipelineState.abortCause
 }
 
 // Transition system
@@ -1236,6 +1445,7 @@ fact transitions {
     or process_all_claims
     or process_all_coverage
     or process_all_logic
+    or abort_pipeline
     or stutter
   )
 }
@@ -1258,11 +1468,17 @@ pred fairness {
     implies (always eventually process_all_coverage)
   (eventually always (PipelineState.currentPhase = LogicAnalysis))
     implies (always eventually process_all_logic)
+  // If a fatal cause is pending while still abortable, the abort eventually fires
+  (eventually always (some ActiveAbort
+                      and PipelineState.currentPhase in (Idle + Merging)))
+    implies (always eventually abort_pipeline)
 }
 
 // Liveness: every non-empty merged capability eventually reaches Complete phase
+// (guarded on the no-fatal-abort premise: a pending abort legitimately diverts
+// the pipeline to the terminal Aborted phase instead of Complete)
 assert all_nonempty_caps_reach_downstream {
-  fairness implies
+  (fairness and no ActiveAbort) implies
     (some MergedCapability implies eventually PipelineState.currentPhase = Complete)
 }
 
@@ -1293,14 +1509,57 @@ assert precondition_structurally_enforced {
   all c : Capability | lone c.delta
 }
 
+// Safety: an aborted pipeline stays aborted (fatal abort, no recovery/fallback)
+assert abort_is_terminal {
+  always (PipelineState.currentPhase = Aborted
+    implies always PipelineState.currentPhase = Aborted)
+}
+
+// Safety: an aborted pipeline emits no downstream work (no partial artifacts)
+assert abort_produces_no_downstream {
+  always (PipelineState.currentPhase = Aborted implies
+    (no PipelineState.processedCaps and no PipelineState.solverSubmitted))
+}
+
+// Safety: reaching Complete implies no sanitized artifact-key collision occurred
+// (a structural key collision activates ArtifactKeyCollision, which forces an
+// abort before complete_merge_phase -- and thus Complete -- is ever reachable)
+assert complete_implies_no_key_collision {
+  always (PipelineState.currentPhase = Complete implies
+    (no disj mc1, mc2 : MergedCapability | mc1.sanitizedKey = mc2.sanitizedKey))
+}
+
+// Safety: every group submitted to the solver passed claim-ID preflight
+assert solver_groups_are_claim_id_valid {
+  always (all mc : PipelineState.solverSubmitted | claimGroupValid[mc])
+}
+
+// Safety: solver-submitted groups are always a subset of the caps processed downstream
+assert solver_subset_of_processed {
+  always (PipelineState.solverSubmitted in PipelineState.processedCaps)
+}
+
+// Liveness: a pending fatal cause always eventually drives the pipeline to Aborted
+assert fatal_cause_eventually_aborts {
+  (fairness and some ActiveAbort)
+    implies eventually PipelineState.currentPhase = Aborted
+}
+
 check all_nonempty_caps_reach_downstream for 3 but 15 steps expect 0
 check no_silent_omission for 3 but 15 steps expect 0
 check empty_never_processed for 4 but 10 steps expect 0
 check exactly_once_processing for 4 but 10 steps expect 0
 check precondition_structurally_enforced for 6 expect 0
+check abort_is_terminal for 4 but 10 steps expect 0
+check abort_produces_no_downstream for 4 but 10 steps expect 0
+check complete_implies_no_key_collision for 4 but 10 steps expect 0
+check solver_groups_are_claim_id_valid for 4 but 10 steps expect 0
+check solver_subset_of_processed for 4 but 10 steps expect 0
+check fatal_cause_eventually_aborts for 3 but 12 steps expect 0
 
 // Scenario: non-empty capability reaches Complete phase
 run liveness_scenario {
+  no ActiveAbort
   some mc : MergedCapability |
     some mc.mergedReqs
     and eventually (PipelineState.currentPhase = Complete
@@ -1309,11 +1568,24 @@ run liveness_scenario {
 
 // Scenario: pipeline with empty capability skips it
 run empty_cap_skipped_scenario {
+  no ActiveAbort
   some mc : MergedCapability |
     no mc.mergedReqs
     and eventually (PipelineState.currentPhase = Complete)
     and always (mc not in PipelineState.processedCaps)
 } for 3 but 12 steps expect 1
+
+// Scenario: a pending fatal cause aborts the pipeline into the terminal state
+run abort_scenario {
+  some ActiveAbort
+  eventually PipelineState.currentPhase = Aborted
+} for 3 but 10 steps expect 1
+
+// Scenario: a sanitized artifact-key collision drives a fatal abort
+run key_collision_aborts_scenario {
+  some disj mc1, mc2 : MergedCapability | mc1.sanitizedKey = mc2.sanitizedKey
+  eventually PipelineState.currentPhase = Aborted
+} for 4 but 10 steps expect 1
 
 // Sanity: the transition system is satisfiable
 run pipeline_sanity {} for 3 but 10 steps expect 1

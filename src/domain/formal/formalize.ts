@@ -1,9 +1,9 @@
 /**
- * Translates natural-language specification claims into SMT-LIB formalizations
- * by prompting an LLM and validating the structured output.
+ * Translate requirement and scenario claims into validated Logic IR samples.
  *
- * Core transformation step in the formal verification pipeline.
- * Exports: formalizeClaims, formalizeClaim.
+ * Semantic grouping and physical batching are deterministic. Filesystem and
+ * adapter effects are isolated at the attached-transport edge, where every
+ * handled failure is converted into claim-level output.
  */
 import { callOpencode } from "../../adapters/opencode.js";
 import { mapBounded } from "../../adapters/concurrency.js";
@@ -11,145 +11,123 @@ import type { Claim } from "../claim-graph.js";
 import type { LogicIrClaim } from "../logic-ir.js";
 import type { Finding } from "../findings.js";
 import { err, ok, type Result } from "../result.js";
+import { assertNever } from "../assert.js";
 import { validateFormalizationSample } from "./validate.js";
-import { FORMALIZATION_INSTRUCTIONS, FORMALIZATION_SANDBOXING, BATCH_FORMALIZATION_INSTRUCTIONS } from "../prompts/formalization.js";
+import {
+  groupFormalizationClaims,
+  splitPhysicalBatches,
+  type IndexedFormalizationClaim,
+  type PhysicalClaimBatch,
+} from "./grouping.js";
+import {
+  buildBatchContextFile,
+  buildBatchAttemptEvidence,
+  cleanupBatchContextDirectory,
+  createBatchContextDirectory,
+  hashBatchContext,
+  serializeBatchContext,
+  writeBatchContextFile,
+  type BatchAttemptEvidence,
+  type BatchCleanupOutcome,
+  type BatchAttemptOutcome,
+} from "./batch-transport.js";
+import { shouldDegradeBatchError } from "./degradation.js";
+import type { OpencodeErrorKind } from "../../adapters/opencode.js";
+import {
+  ATTACHED_BATCH_FORMALIZATION_PROMPT,
+  FORMALIZATION_INSTRUCTIONS,
+  FORMALIZATION_SANDBOXING,
+} from "../prompts/formalization.js";
+
+/** Maximum concurrent physical batches when callers omit a value. */
+const FORMALIZATION_CONCURRENCY_DEFAULT = 3;
+/** Maximum concurrent per-claim fallback calls. */
+// Each physical-batch worker owns one adapter slot. Keeping nested fallback
+// work sequential prevents a failed batch from exceeding the caller's bound.
+const INLINE_FALLBACK_CONCURRENCY = 1;
+/** Adapter retry count passed for every formalization invocation. */
+const ADAPTER_RETRIES = 3;
+/** Default means one unbounded physical batch per logical group. */
+const MAX_BATCH_SIZE_DEFAULT = 0;
 
 /**
- * A single claim's formalization result: valid Logic IR samples and rejected attempts.
+ * A single claim's formalization result.
  *
  * @remarks
- * Invariant: `samples` contains only structurally validated Logic IR claims.
- * Invariant: `invalidSamples` preserves the raw payload and rejection reason for diagnostics.
- *
- * @example
- * ```ts
- * const candidate: FormalizationCandidate = {
- *   claim: { kind: "requirement", text: "SHALL timeout", obligation: "mandatory",
- *     provenance: { file: "specs/auth.md" }, references: [] },
- *   samples: [validLogicIrClaim],
- *   invalidSamples: [{ raw: { malformed: true }, reason: "missing assertions field" }],
- * };
- * ```
+ * `samples` contains only validated Logic IR. `eligibleIndex` is the stable
+ * identity used internally and is optional only for source compatibility with
+ * hand-built candidates from older callers.
  */
 export interface FormalizationCandidate {
   readonly claim: Claim;
   readonly samples: readonly LogicIrClaim[];
   readonly invalidSamples: readonly { readonly raw: unknown; readonly reason: string }[];
+  readonly eligibleIndex?: number;
 }
 
 /**
- * Successful output from the formalization pipeline across all eligible claims.
+ * Successful output from the formalization phase.
  *
  * @remarks
- * Invariant: `candidates` preserves input claim order for successfully formalized claims.
- * Invariant: `findings` aggregates warnings from invalid sample rejections.
- * Invariant: `errors` contains failures for claims that could not be formalized.
- * Callers can inspect `errors` to decide whether partial results are acceptable.
+ * Candidates and errors are ordered by eligible claim index where available.
+ * `batchAttempts` contains metadata only; it never stores claim text.
  */
 export interface FormalizationOutput {
   readonly candidates: readonly FormalizationCandidate[];
   readonly findings: readonly Finding[];
   readonly errors: readonly FormalizationError[];
+  readonly batchAttempts: readonly BatchAttemptEvidence[];
 }
 
 /**
- * Error produced when formalization of a claim fails entirely.
+ * Claim-level expected failure from formalization.
  *
  * @remarks
- * Invariant: `message` identifies the affected claim and the failure cause.
+ * The message remains the stable human-readable contract. Optional identity
+ * fields make output attribution independent of completion order.
  */
 export interface FormalizationError {
   readonly message: string;
+  readonly eligibleIndex?: number;
+  readonly claimId?: string;
+}
+
+interface BatchWorkResult {
+  readonly candidates: readonly FormalizationCandidate[];
+  readonly findings: readonly Finding[];
+  readonly errors: readonly FormalizationError[];
+  readonly batchAttempts: readonly BatchAttemptEvidence[];
+}
+
+interface ClaimSampleResult {
+  readonly candidate: FormalizationCandidate;
+  readonly findings: readonly Finding[];
+}
+
+type AdapterResponse = Awaited<ReturnType<typeof callOpencode>>;
+
+interface AttachedTransportResult {
+  readonly response: AdapterResponse | undefined;
+  readonly transportFailure: string | undefined;
+  readonly evidenceDraft: BatchAttemptEvidence;
+  readonly outcome: BatchAttemptOutcome;
+  readonly cleanup: BatchCleanupOutcome;
+  readonly cleanupDetail: string | undefined;
 }
 
 /**
- * Maximum concurrent LLM formalization sessions across claims.
+ * Formalize eligible claims with shared semantic grouping and bounded work.
+ *
+ * @param input - claims, adapter settings, shared grouping map, and test-only batch bound
+ * @returns formalization output or validation errors before external work begins
  *
  * @remarks
- * **Value:** 3 concurrent file-batch LLM sessions.
- *
- * **Rationale:** LLM API rate limits and cost are the binding constraints. At 3
- * concurrent sessions the pipeline keeps the model busy without triggering
- * per-minute rate limit rejections on most providers (typical burst limit is
- * 5–10 RPM for large-context calls). Lower values under-utilize available
- * throughput; higher values risk 429 errors and wasted retry budget.
- *
- * **Exceeded behavior:** This is a default — callers may override via the
- * `concurrency` parameter. If overridden higher, expect increased rate-limit
- * pressure and potential retry storms.
- */
-const FORMALIZATION_CONCURRENCY_DEFAULT = 3;
-
-/**
- * Formalize eligible claims into Logic IR using a batch-per-file strategy with bounded concurrency.
- *
- * @param input - Configuration object for the formalization pipeline.
- * @param input.claims - All claims to consider; only `"requirement"` and `"scenario"` kinds are processed.
- * @param input.model - LLM model identifier passed to the adapter for each formalization call.
- * @param input.samplesPerClaim - Number of independent valid Logic IR samples to collect per claim.
- * @param input.concurrency - Maximum concurrent file-batch LLM sessions (defaults to 3).
- *
- * @returns On success (`ok`): a {@link FormalizationOutput} containing:
- *   - `candidates` — successfully formalized claims with their valid Logic IR samples (preserves input order).
- *   - `findings` — warnings from rejected samples or batch entry validation failures.
- *   - `errors` — per-claim errors for claims that could not be formalized after all retries.
- *   The current implementation always returns `ok` with partial results; total failures are
- *   captured in `output.errors` rather than short-circuiting the pipeline.
- *
- *   On error (`err`): a readonly array of {@link FormalizationError} describing claims that
- *   failed entirely. Reserved for future use where catastrophic failure aborts the pipeline.
- *
- * @throws Propagates unhandled errors from the concurrency adapter (`mapBounded`) or the
- *   LLM transport layer if they throw outside of the handled retry/fallback paths (e.g.,
- *   network socket destruction, AbortSignal). Callers should wrap in try/catch for resilience.
- *
- * @remarks
- * Precondition: `input.claims` may be empty (produces empty output).
- * Precondition: `input.samplesPerClaim` >= 1.
- * Postcondition: every entry in `candidates` has at least one structurally valid Logic IR sample.
- * Postcondition: `candidates.length + errors.length <= eligibleClaims.length`.
- *
- * **Concurrency** (value: 3 file-batch sessions, unit: parallel LLM API calls):
- * File batches are processed with at most `concurrency` (default 3) parallel LLM
- * sessions. Within a batch, individual retries are capped at concurrency 2 (to
- * respect rate limits while still making progress on failed entries). The function
- * is safe to call concurrently from multiple callers — no shared mutable state.
- *
- * **Retry count** (value: 3, unit: LLM transport-level retries per call):
- * Each `callOpencode` invocation retries up to 3 times on transient failures
- * (network errors, 5xx responses). This bounds worst-case latency per call to
- * ~4× the single-call timeout while recovering from intermittent provider issues.
- *
- * **Sample count per claim** (value: caller-specified `samplesPerClaim`, typically 3):
- * Multiple independent formalizations are collected per claim so downstream
- * clustering can detect instability. The attempt cap per claim is bounded to
- * `samplesPerClaim × 3` maximum LLM calls to prevent unbounded retry loops when
- * the model consistently produces invalid output.
- *
- * **Batch size** (value: one batch per provenance file, unbounded claim count):
- * Claims are grouped by provenance file. Each file group is sent as a single
- * batch LLM call. This reduces LLM calls from O(claims × samplesPerClaim) to
- * O(files × samplesPerClaim) in the happy path. Individual entries that fail
- * validation are retried individually with the single-claim prompt (up to
- * `samplesPerClaim × 3` attempts per claim). If the entire batch call fails,
- * all claims in that batch fall back to individual formalization.
- *
- * @example
- * ```ts
- * const result = await formalizeClaims({
- *   claims: parsedClaims,
- *   model: "anthropic:claude-sonnet-4-20250514",
- *   samplesPerClaim: 3,
- *   concurrency: 5,
- * });
- * if (result.ok) {
- *   console.log(`Formalized ${result.value.candidates.length} claims`);
- *   console.log(`Errors: ${result.value.errors.length}`);
- *   for (const finding of result.value.findings) {
- *     console.warn(finding.description);
- *   }
- * }
- * ```
+ * Preconditions: `samplesPerClaim` and supplied controls are safe integers in
+ * their domains; the production pipeline supplies a validated map. Postconditions:
+ * every eligible claim becomes a candidate or claim error, no input claim is
+ * mutated, and physical batches preserve semantic and input order. Expected
+ * validation, adapter, filesystem, and model failures are returned as data;
+ * unexpected worker failures are normalized to affected claim errors.
  */
 export async function formalizeClaims(input: {
   readonly claims: readonly Claim[];
@@ -157,303 +135,703 @@ export async function formalizeClaims(input: {
   readonly samplesPerClaim: number;
   readonly timeoutMs: number;
   readonly concurrency?: number;
+  readonly logicalFileByCapability: ReadonlyMap<string, string>;
+  readonly maxBatchSize?: number;
 }): Promise<Result<FormalizationOutput, readonly FormalizationError[]>> {
+  const logicalFileByCapability = input.logicalFileByCapability;
+  const maxBatchSize = input.maxBatchSize ?? MAX_BATCH_SIZE_DEFAULT;
   const concurrency = input.concurrency ?? FORMALIZATION_CONCURRENCY_DEFAULT;
-  const eligibleClaims = input.claims.filter(
-    (candidate) => candidate.kind === "requirement" || candidate.kind === "scenario",
-  );
-
-  // Group claims by provenance file for batch processing.
-  const claimsByFile = new Map<string, Claim[]>();
-  for (const claim of eligibleClaims) {
-    const file = claim.provenance.file;
-    const group = claimsByFile.get(file);
-    if (group !== undefined) {
-      group.push(claim);
-    } else {
-      claimsByFile.set(file, [claim]);
-    }
-  }
-
-  // Process each file's batch with bounded concurrency across files.
-  const fileGroups = [...claimsByFile.values()];
-  const batchResults = await mapBounded(fileGroups, concurrency, async (fileClaims) => {
-    return await formalizeBatch({
-      claims: fileClaims,
-      model: input.model,
-      samplesPerClaim: input.samplesPerClaim,
-      timeoutMs: input.timeoutMs,
-    });
+  const validationErrors = validateFormalizationControls({
+    samplesPerClaim: input.samplesPerClaim,
+    concurrency,
+    maxBatchSize,
+    logicalFileByCapability,
   });
-
-  // Aggregate results across all file batches.
-  const candidates: FormalizationCandidate[] = [];
-  const findings: Finding[] = [];
-  const errors: FormalizationError[] = [];
-
-  for (const batchResult of batchResults) {
-    candidates.push(...batchResult.candidates);
-    findings.push(...batchResult.findings);
-    errors.push(...batchResult.errors);
+  if (!validationErrors.ok) {
+    return validationErrors;
   }
 
-  return ok({ candidates, findings, errors });
+  const groups = groupFormalizationClaims(input.claims, logicalFileByCapability);
+  const physicalBatches = groups.flatMap((group) => splitPhysicalBatches(group, maxBatchSize));
+  if (physicalBatches.length === 0) {
+    return ok({ candidates: [], findings: [], errors: [], batchAttempts: [] });
+  }
+
+  let batchResults: readonly BatchWorkResult[];
+  try {
+    batchResults = await mapBounded(physicalBatches, concurrency, async (batch) => {
+      try {
+        return await formalizePhysicalBatch({
+          batch,
+          model: input.model,
+          samplesPerClaim: input.samplesPerClaim,
+          timeoutMs: input.timeoutMs,
+        });
+      } catch (error: unknown) {
+        return workerFailureResult(batch, error);
+      }
+    });
+  } catch (error: unknown) {
+    const message = describeUnknownError(error, "formalization worker pool failed");
+    return ok({
+      candidates: [],
+      findings: [],
+      errors: physicalBatches.flatMap((batch) => batch.claims.map((indexed) => makeClaimError(indexed, message))),
+      batchAttempts: [],
+    });
+  }
+
+  const candidates = batchResults.flatMap((result) => result.candidates).sort(compareCandidates);
+  const findings = batchResults.flatMap((result) => result.findings);
+  const errors = batchResults.flatMap((result) => result.errors).sort(compareErrors);
+  const batchAttempts = batchResults.flatMap((result) => result.batchAttempts);
+  return ok({ candidates, findings, errors, batchAttempts });
 }
 
 /**
- * Formalize a batch of claims from a single spec file.
+ * Validate formalization controls and shared map values before any effect.
  *
- * Strategy: attempt a single batch LLM call for all claims in the group.
- * For each entry in the batch response that fails validation, fall back to
- * individual single-claim formalization.
- *
- * @param input - claims from one file, model, and samples per claim
- * @param input.claims - claims from a single provenance file to formalize together
- * @param input.model - LLM model identifier for formalization calls
- * @param input.samplesPerClaim - number of valid Logic IR samples to collect per claim
- * @returns aggregated candidates, findings, and errors across batch and retry phases
+ * @param input - numeric controls and capability map
+ * @returns `ok` or all validation failures discovered at the boundary
  *
  * @remarks
- * Precondition: `input.claims` is non-empty (caller groups by file and only invokes for non-empty groups).
- * Precondition: `input.samplesPerClaim` >= 1.
- * Postcondition: every input claim appears in exactly one of: `candidates`, `errors`, or was
- * merged into an existing candidate during the additional-samples phase.
- *
- * Failure modes:
- * - Propagates unhandled errors from `callOpencode` or `mapBounded` if they throw outside
- *   of the retry/fallback paths (network socket destruction, AbortSignal).
- * - Individual claim failures are captured in `errors`; the function does not throw for
- *   per-claim LLM failures.
+ * Preconditions: none; raw caller values are accepted. Postconditions: an
+ * `ok` result proves safe integer domains and non-empty map values. Failure
+ * form: readonly claim-style validation errors; no LLM or filesystem work.
  */
-async function formalizeBatch(input: {
-  readonly claims: readonly Claim[];
+function validateFormalizationControls(input: {
+  readonly samplesPerClaim: number;
+  readonly concurrency: number;
+  readonly maxBatchSize: number;
+  readonly logicalFileByCapability: ReadonlyMap<string, string>;
+}): Result<void, readonly FormalizationError[]> {
+  const errors: FormalizationError[] = [];
+  if (!Number.isSafeInteger(input.samplesPerClaim) || input.samplesPerClaim < 1) {
+    errors.push({ message: "samplesPerClaim must be a safe integer >= 1" });
+  }
+  if (!Number.isSafeInteger(input.concurrency) || input.concurrency < 1) {
+    errors.push({ message: "concurrency must be a safe integer >= 1" });
+  }
+  if (!Number.isSafeInteger(input.maxBatchSize) || input.maxBatchSize < 0) {
+    errors.push({ message: "maxBatchSize must be a safe integer >= 0" });
+  }
+  for (const [capability, logicalFile] of input.logicalFileByCapability) {
+    if (typeof logicalFile !== "string" || logicalFile.length === 0) {
+      errors.push({ message: `logicalFile must be non-empty for capability ${capability}` });
+    }
+  }
+  return errors.length === 0 ? ok(undefined) : err(errors);
+}
+
+/**
+ * Dispatch one physical batch to inline or attached transport.
+ *
+ * @param input - physical batch and adapter settings
+ * @returns normalized candidates, findings, errors, and attached evidence
+ *
+ * @remarks
+ * Preconditions: the batch is non-empty and controls were validated by the
+ * outer boundary. Postcondition: every batch claim is terminal in this result.
+ * Failure form: all adapter, filesystem, and thrown failures are claim-level.
+ */
+async function formalizePhysicalBatch(input: {
+  readonly batch: PhysicalClaimBatch;
   readonly model: string;
   readonly samplesPerClaim: number;
   readonly timeoutMs: number;
-}): Promise<{ readonly candidates: readonly FormalizationCandidate[]; readonly findings: readonly Finding[]; readonly errors: readonly FormalizationError[] }> {
-  const candidates: FormalizationCandidate[] = [];
-  const findings: Finding[] = [];
-  const errors: FormalizationError[] = [];
+}): Promise<BatchWorkResult> {
+  const firstClaim = input.batch.claims[0];
+  if (firstClaim === undefined) {
+    return { candidates: [], findings: [], errors: [], batchAttempts: [] };
+  }
+  if (input.batch.claims.length === 1) {
+    return await formalizeSingleClaim(firstClaim, input.model, input.samplesPerClaim, input.timeoutMs);
+  }
+  return await formalizeAttachedBatch(input);
+}
 
-  // ─── Phase 1: Batch attempt ───────────────────────────────────────────────────
-  // Goal: formalize all claims in a single LLM call to amortize latency and cost.
-  // A batch call is O(1) in network round-trips regardless of claim count, making
-  // it strictly cheaper than per-claim calls when the model cooperates.
-  const prompt = buildBatchFormalizationPrompt(input.claims);
-  const response = await callOpencode({
+/**
+ * Formalize one claim entirely through the inline path.
+ *
+ * @param indexedClaim - claim with authoritative eligible index
+ * @param model - adapter model identifier
+ * @param samplesPerClaim - bounded valid sample target
+ * @param timeoutMs - universal adapter timeout
+ * @returns one candidate or one claim error
+ *
+ * @remarks
+ * Preconditions: indexedClaim is formalizable and samplesPerClaim >= 1.
+ * Postconditions: thrown adapter failures are normalized and no error escapes.
+ */
+async function formalizeSingleClaim(
+  indexedClaim: IndexedFormalizationClaim,
+  model: string,
+  samplesPerClaim: number,
+  timeoutMs: number,
+): Promise<BatchWorkResult> {
+  const sampled = await sampleFormalizationsForClaim({
+    claim: indexedClaim.claim,
+    eligibleIndex: indexedClaim.eligibleIndex,
+    model,
+    samplesPerClaim,
+    timeoutMs,
+  });
+  if (!sampled.ok) {
+    return { candidates: [], findings: [], errors: [sampled.error], batchAttempts: [] };
+  }
+  return {
+    candidates: [sampled.value.candidate],
+    findings: sampled.value.findings,
+    errors: [],
+    batchAttempts: [],
+  };
+}
+
+/**
+ * Execute an attached multi-claim first-sample attempt and its degradation path.
+ *
+ * @param input - physical batch and adapter settings
+ * @returns terminal claim results plus one evidence entry for the attempt
+ *
+ * @remarks
+ * The temp directory is always cleaned after creation. Outcomes are assembled
+ * only after cleanup reaches a terminal state, and cleanup failure after a
+ * successful response becomes a warning without discarding candidates.
+ */
+async function formalizeAttachedBatch(input: {
+  readonly batch: PhysicalClaimBatch;
+  readonly model: string;
+  readonly samplesPerClaim: number;
+  readonly timeoutMs: number;
+}): Promise<BatchWorkResult> {
+  const context = buildBatchContextFile(input.batch.logicalFile, input.batch.claims);
+  const serializedContext = serializeBatchContext(context);
+  const contextSha256 = hashBatchContext(serializedContext);
+  const transport = await runAttachedTransport({
+    batch: input.batch,
     model: input.model,
-    phase: "formalization",
-    prompt,
-    retries: 3,
     timeoutMs: input.timeoutMs,
+    serializedContext,
+    contextSha256,
   });
-  // Invariant on success: `response.value` contains one entry per input claim
-  // (positional correspondence). Validation of individual entries happens below.
+  const assembled = await assembleAttachedOutcome({
+    batch: input.batch,
+    model: input.model,
+    samplesPerClaim: input.samplesPerClaim,
+    timeoutMs: input.timeoutMs,
+    transport,
+  });
+  const findings = [...assembled.findings];
+  let errors = [...assembled.errors];
 
-  // If the entire batch call fails (network error, rate limit exhaustion after
-  // retries, or unparseable top-level response), no partial results are salvageable.
-  // Falling back to individual calls is safe because the batch failure is
-  // independent of any single claim's content — the model simply did not respond.
-  if (!response.ok) {
-    const fallbackResults = await mapBounded(input.claims, 2, async (claim) => {
-      return await sampleFormalizationsForClaim({
-        claim,
-        model: input.model,
-        samplesPerClaim: input.samplesPerClaim,
-        timeoutMs: input.timeoutMs,
-      });
-    });
-    for (const result of fallbackResults) {
-      if (result.ok) {
-        candidates.push(result.value.candidate);
-        findings.push(...result.value.findings);
-      } else {
-        errors.push(result.error);
-      }
-    }
-    return { candidates, findings, errors };
-  }
-
-  // Parse the batch response into positionally-indexed entries. Each entry
-  // corresponds to the claim at the same index in the input array.
-  const batchEntries = extractBatchPayload(response.value);
-
-  // Match entries to claims by position. Claims whose batch entry is missing or
-  // invalid are collected for individual retry. This preserves the invariant that
-  // every input claim is either resolved to a candidate or queued for retry.
-  const failedClaims: Claim[] = [];
-  for (let i = 0; i < input.claims.length; i++) {
-    const claim = input.claims[i];
-    if (claim === undefined) continue;
-
-    const entry = batchEntries[i];
-    if (entry === undefined) {
-      // No corresponding entry in batch response — retry individually.
-      failedClaims.push(claim);
-      continue;
-    }
-
-    const validated = validateFormalizationSample(entry);
-    if (!validated.ok) {
-      failedClaims.push(claim);
-      findings.push({
-        severity: "warning",
-        category: "formalization.batch_entry_invalid",
-        provenance: claim.provenance,
-        description: `Batch entry invalid, retrying individually: ${validated.error.message}`,
-        rationale: "A batch entry that fails validation suggests the model produced malformed output for this claim; individual retry may succeed but the instability signals a fragile formalization.",
-        evidence: [{ kind: "claim", value: claim.text }],
-        ...(claim.id === undefined ? {} : { relatedClaimIdentifiers: [claim.id] }),
-      });
-      continue;
-    }
-
-    candidates.push({
-      claim,
-      samples: [validated.value],
-      invalidSamples: [],
-    });
-  }
-
-  // ─── Phase 2: Individual retry for failed batch entries ─────────────────────
-  // Goal: recover claims that the batch call could not produce valid output for.
-  // Per-claim retries are safe because each call is independent and bounded by
-  // sampleFormalizationsForClaim's internal attempt cap (samplesPerClaim * 3).
-  // Concurrency is capped at 2 to respect rate limits while still making progress.
-  if (failedClaims.length > 0) {
-    const retryResults = await mapBounded(failedClaims, 2, async (claim) => {
-      return await sampleFormalizationsForClaim({
-        claim,
-        model: input.model,
-        samplesPerClaim: input.samplesPerClaim,
-        timeoutMs: input.timeoutMs,
-      });
-    });
-    for (const result of retryResults) {
-      if (result.ok) {
-        candidates.push(result.value.candidate);
-        findings.push(...result.value.findings);
-      } else {
-        errors.push(result.error);
+  if (transport.cleanupDetail !== undefined) {
+    if (assembled.candidates.length > 0) {
+      findings.push(buildCleanupWarning(input.batch, contextSha256, transport.cleanupDetail));
+    } else {
+      const detail = `temporary batch cleanup also failed: ${transport.cleanupDetail}`;
+      errors = errors.map((error) => ({ ...error, message: `${error.message}; ${detail}` }));
+      if (errors.length === 0) {
+        errors = input.batch.claims.map((claim) => makeClaimError(claim, detail));
       }
     }
   }
 
-  // ─── Phase 3: Additional samples for clustering ────────────────────────────
-  // Goal: gather multiple independent formalizations per claim so downstream
-  // clustering can detect instability (divergent interpretations of the same
-  // natural-language claim). The batch call only yields one sample per claim;
-  // additional samples must be collected individually.
-  // The attempt cap per claim is bounded by sampleFormalizationsForClaim
-  // (samplesPerClaim * 3 max attempts), preventing runaway retries.
-  if (input.samplesPerClaim > 1) {
-    const needMoreSamples = candidates.filter((c) => c.samples.length < input.samplesPerClaim);
-    // Each candidate already holds at least one valid sample from Phase 1 or 2,
-    // so failures here are non-fatal — we degrade gracefully to fewer samples
-    // rather than losing the claim entirely.
-    const additionalResults = await mapBounded(needMoreSamples, 2, async (candidate) => {
-      const needed = input.samplesPerClaim - candidate.samples.length;
-      return await sampleFormalizationsForClaim({
-        claim: candidate.claim,
-        model: input.model,
-        samplesPerClaim: needed,
-        timeoutMs: input.timeoutMs,
-      });
-    });
-    for (const result of additionalResults) {
-      if (result.ok) {
-        // Find existing candidate and merge samples.
-        const existing = candidates.find((c) => c.claim.id === result.value.candidate.claim.id);
-        if (existing !== undefined) {
-          const merged: FormalizationCandidate = {
-            claim: existing.claim,
-            samples: [...existing.samples, ...result.value.candidate.samples],
-            invalidSamples: [...existing.invalidSamples, ...result.value.candidate.invalidSamples],
-          };
-          const idx = candidates.indexOf(existing);
-          candidates[idx] = merged;
-        }
-        findings.push(...result.value.findings);
-      }
-      // Silently ignore errors for additional samples — we already have at least one.
-    }
-  }
-
-  return { candidates, findings, errors };
+  const evidence: BatchAttemptEvidence = {
+    ...transport.evidenceDraft,
+    outcome: assembled.outcome,
+    cleanup: transport.cleanup,
+  };
+  return { ...assembled, findings, errors, batchAttempts: [evidence] };
 }
 
-/**
- * Sample multiple LLM formalizations for a single claim with retry loop.
- *
- * @param input - claim to formalize, model name, and number of valid samples needed
- * @returns candidate with valid samples and findings, or error if all attempts fail
- *
- * @remarks
- * Precondition: `input.samplesPerClaim` >= 1.
- * Postcondition: on success, `candidate.samples.length >= 1` (at least one valid sample).
- * Invariant: retry attempts are bounded to `samplesPerClaim * 3` to prevent unbounded loops.
- * Each attempt makes one LLM call; invalid responses are recorded but do not abort the loop.
- *
- * Failure modes:
- * - Returns `err` if the LLM transport layer fails on the first call (no valid samples collected).
- * - Returns `err` if all attempts produce invalid formalizations (exhausted retry budget).
- * - Propagates unhandled errors from `callOpencode` if it throws outside retry paths.
- */
-async function sampleFormalizationsForClaim(input: {
-  readonly claim: Claim;
+async function runAttachedTransport(input: {
+  readonly batch: PhysicalClaimBatch;
   readonly model: string;
-  readonly samplesPerClaim: number;
   readonly timeoutMs: number;
-}): Promise<Result<{ readonly candidate: FormalizationCandidate; readonly findings: readonly Finding[] }, FormalizationError>> {
-  const validSamples: LogicIrClaim[] = [];
-  const invalidSamples: { raw: unknown; reason: string }[] = [];
-  const findings: Finding[] = [];
+  readonly serializedContext: string;
+  readonly contextSha256: string;
+}): Promise<AttachedTransportResult> {
+  const directory = await createBatchContextDirectory();
+  if (!directory.ok) {
+    const evidenceDraft = buildBatchAttemptEvidence({
+      batch: input.batch,
+      contextSha256: input.contextSha256,
+      model: input.model,
+      outcome: { kind: "transport_failure", detail: "temporary batch directory creation failed" },
+      cleanup: "not_attempted",
+    });
+    return {
+      response: undefined,
+      outcome: { kind: "transport_failure", detail: directory.error },
+      cleanup: "not_attempted",
+      transportFailure: directory.error,
+      cleanupDetail: undefined,
+      evidenceDraft,
+    };
+  }
 
-  let attempts = 0;
-  const maxAttempts = Math.max(1, input.samplesPerClaim * 3);
-  while (validSamples.length < input.samplesPerClaim && attempts < maxAttempts) {
-    attempts += 1;
-    const prompt = buildFormalizationPrompt(input.claim);
+  // Construct attempt metadata before cleanup starts. The finalized record
+  // below adds the terminal cleanup classification after the finally block.
+  const evidenceDraft = buildBatchAttemptEvidence({
+    batch: input.batch,
+    contextSha256: input.contextSha256,
+    model: input.model,
+    outcome: { kind: "transport_failure", detail: "attached attempt pending" },
+    cleanup: "not_attempted",
+  });
+
+  let response: AdapterResponse | undefined;
+  let transportFailure: string | undefined;
+  let outcome: BatchAttemptOutcome | undefined;
+  let cleanup: BatchCleanupOutcome = "succeeded";
+  let cleanupDetail: string | undefined;
+  try {
+    const written = await writeBatchContextFile(directory.value, input.serializedContext);
+    if (!written.ok) {
+      transportFailure = written.error;
+      outcome = { kind: "transport_failure", detail: written.error };
+    } else {
+      const result = await callAttachedAdapter({
+        filePath: written.value.filePath,
+        model: input.model,
+        timeoutMs: input.timeoutMs,
+      });
+      response = result.response;
+      transportFailure = result.transportFailure;
+      outcome = result.outcome;
+    }
+  } finally {
+    const cleaned = await cleanupBatchContextDirectory(directory.value);
+    if (!cleaned.ok) {
+      cleanup = "failed";
+      cleanupDetail = cleaned.error;
+    }
+  }
+  return {
+    response,
+    transportFailure,
+    evidenceDraft,
+    outcome: outcome ?? { kind: "transport_failure", detail: "attached attempt did not run" },
+    cleanup,
+    cleanupDetail,
+  };
+}
+
+async function callAttachedAdapter(input: {
+  readonly filePath: string;
+  readonly model: string;
+  readonly timeoutMs: number;
+}): Promise<{
+  readonly response?: AdapterResponse;
+  readonly transportFailure?: string;
+  readonly outcome: BatchAttemptOutcome;
+}> {
+  try {
     const response = await callOpencode({
       model: input.model,
       phase: "formalization",
-      prompt,
-      retries: 3,
+      prompt: ATTACHED_BATCH_FORMALIZATION_PROMPT,
+      retries: ADAPTER_RETRIES,
       timeoutMs: input.timeoutMs,
+      files: [input.filePath],
     });
+    if (response.ok) {
+      return { response, outcome: { kind: "transport_failure", detail: "attached response pending validation" } };
+    }
+    return {
+      response,
+      outcome: isInfrastructureErrorKind(response.error.kind)
+        ? { kind: "infrastructure_failure", errorKind: response.error.kind }
+        : { kind: "model_failure", errorKind: response.error.kind },
+    };
+  } catch (error: unknown) {
+    const detail = describeUnknownError(error, "formalization adapter threw");
+    // Keep the detailed message on the claim error, but do not copy arbitrary
+    // adapter text into durable evidence where it could contain claim content.
+    return {
+      outcome: { kind: "transport_failure", detail: "formalization adapter threw" },
+      transportFailure: detail,
+    };
+  }
+}
+
+async function assembleAttachedOutcome(input: {
+  readonly batch: PhysicalClaimBatch;
+  readonly model: string;
+  readonly samplesPerClaim: number;
+  readonly timeoutMs: number;
+  readonly transport: AttachedTransportResult;
+}): Promise<BatchWorkResult & { readonly outcome: BatchAttemptOutcome }> {
+  if (input.transport.transportFailure !== undefined) {
+    return {
+      candidates: [],
+      findings: [],
+      errors: input.batch.claims.map((claim) => makeClaimError(claim, input.transport.transportFailure!)),
+      batchAttempts: [],
+      outcome: input.transport.outcome,
+    };
+  }
+  const response = input.transport.response;
+  if (response === undefined) {
+    return {
+      candidates: [],
+      findings: [],
+      errors: input.batch.claims.map((claim) => makeClaimError(claim, "attached attempt did not return a response")),
+      batchAttempts: [],
+      outcome: input.transport.outcome,
+    };
+  }
+  if (!response.ok) {
+    return await recoverAttachedAdapterFailure(input, response.error.kind, response.error.message);
+  }
+  return await acceptAttachedResponse(input, response.value);
+}
+
+async function recoverAttachedAdapterFailure(input: {
+  readonly batch: PhysicalClaimBatch;
+  readonly model: string;
+  readonly samplesPerClaim: number;
+  readonly timeoutMs: number;
+}, kind: OpencodeErrorKind, message: string): Promise<BatchWorkResult & { readonly outcome: BatchAttemptOutcome }> {
+  const outcome: BatchAttemptOutcome = isInfrastructureErrorKind(kind)
+    ? { kind: "infrastructure_failure", errorKind: kind }
+    : { kind: "model_failure", errorKind: kind };
+  if (!shouldDegradeBatchError(kind, input.batch.claims.map((claim) => claim.claim))) {
+    return {
+      candidates: [],
+      findings: [],
+      errors: input.batch.claims.map((claim) => makeClaimError(claim, message)),
+      batchAttempts: [],
+      outcome,
+    };
+  }
+  const fallback = await fallbackClaims(input.batch.claims, input.model, input.samplesPerClaim, input.timeoutMs);
+  return { ...fallback, outcome };
+}
+
+async function acceptAttachedResponse(input: {
+  readonly batch: PhysicalClaimBatch;
+  readonly model: string;
+  readonly samplesPerClaim: number;
+  readonly timeoutMs: number;
+}, response: unknown): Promise<BatchWorkResult & { readonly outcome: BatchAttemptOutcome }> {
+  const matched = matchAttachedBatchResponse(response, input.batch.claims);
+  if (!matched.ok) {
+    const fallback = await fallbackClaims(input.batch.claims, input.model, input.samplesPerClaim, input.timeoutMs);
+    return {
+      ...fallback,
+      outcome: { kind: "model_failure", errorKind: "schema_validation_error" },
+    };
+  }
+
+  const candidates: FormalizationCandidate[] = [];
+  const findings: Finding[] = [];
+  const errors: FormalizationError[] = [];
+  const failedClaims: IndexedFormalizationClaim[] = [];
+  for (const indexedClaim of input.batch.claims) {
+    const entry = matched.value.entries.get(indexedClaim.eligibleIndex);
+    if (entry === undefined || !entry.ok) {
+      failedClaims.push(indexedClaim);
+      if (entry !== undefined) {
+        findings.push(buildBatchEntryInvalidFinding(indexedClaim.claim, entry.error));
+      }
+      continue;
+    }
+    candidates.push({
+      claim: indexedClaim.claim,
+      eligibleIndex: indexedClaim.eligibleIndex,
+      samples: [entry.value],
+      invalidSamples: [],
+    });
+  }
+  if (failedClaims.length > 0) {
+    const fallback = await fallbackClaims(failedClaims, input.model, input.samplesPerClaim, input.timeoutMs);
+    candidates.push(...fallback.candidates);
+    findings.push(...fallback.findings);
+    errors.push(...fallback.errors);
+  }
+  const additional = await addAdditionalSamples(candidates, input.samplesPerClaim, input.model, input.timeoutMs);
+  return {
+    candidates: [...additional.candidates],
+    findings: [...findings, ...additional.findings],
+    errors,
+    batchAttempts: [],
+    outcome: failedClaims.length > 0
+      ? { kind: "model_failure", errorKind: "schema_validation_error" }
+      : { kind: "success" },
+  };
+}
+
+interface MatchedBatchResponse {
+  readonly entries: ReadonlyMap<number, Result<LogicIrClaim, string>>;
+}
+
+/**
+ * Match a batch response by explicit original eligible indexes.
+ *
+ * @param response - untrusted adapter payload
+ * @param claims - authoritative attached claim indexes
+ * @returns indexed validation results or structural schema failure
+ *
+ * @remarks
+ * Unknown, duplicate, missing, non-integer, or count-mismatched indexes reject
+ * the whole mapping as `schema_validation_error`; individual Logic IR failures
+ * remain per-claim results so fallback can be bounded and precise.
+ */
+function matchAttachedBatchResponse(
+  response: unknown,
+  claims: readonly IndexedFormalizationClaim[],
+): Result<MatchedBatchResponse, string> {
+  const entries = extractBatchPayload(response);
+  const expected = new Set(claims.map((claim) => claim.eligibleIndex));
+  if (entries.length !== claims.length) {
+    return err(`expected ${String(claims.length)} indexed formalizations, received ${String(entries.length)}`);
+  }
+
+  const matched = new Map<number, Result<LogicIrClaim, string>>();
+  for (const entry of entries) {
+    const index = readBatchEntryIndex(entry);
+    if (index === undefined || !expected.has(index) || matched.has(index)) {
+      return err("batch formalization indexes must be unique known safe integers");
+    }
+    const sample = validateFormalizationSample(extractSamplePayload(entry));
+    matched.set(index, sample.ok ? ok(sample.value) : err(sample.error.message));
+  }
+
+  for (const expectedIndex of expected) {
+    if (!matched.has(expectedIndex)) {
+      return err(`batch formalization is missing index ${String(expectedIndex)}`);
+    }
+  }
+  return ok({ entries: matched });
+}
+
+function readBatchEntryIndex(entry: unknown): number | undefined {
+  if (typeof entry !== "object" || entry === null) {
+    return undefined;
+  }
+  const index = (entry as { readonly index?: unknown }).index;
+  return typeof index === "number" && Number.isSafeInteger(index) ? index : undefined;
+}
+
+/**
+ * Retry a set of claims through bounded inline formalization.
+ *
+ * @param claims - claims affected by a model-response or structural failure
+ * @param model - adapter model identifier
+ * @param samplesPerClaim - full target because no batch sample is trusted
+ * @param timeoutMs - universal adapter timeout
+ * @returns deterministic per-claim results
+ *
+ * @remarks
+ * Preconditions: claims are distinct by eligible index. Postconditions: every
+ * supplied claim is represented by a candidate or error; worker throws are
+ * normalized locally so sibling claims continue.
+ */
+async function fallbackClaims(
+  claims: readonly IndexedFormalizationClaim[],
+  model: string,
+  samplesPerClaim: number,
+  timeoutMs: number,
+): Promise<BatchWorkResult> {
+  const results = await mapBounded(claims, INLINE_FALLBACK_CONCURRENCY, async (indexedClaim) => {
+    try {
+      const result = await sampleFormalizationsForClaim({
+        claim: indexedClaim.claim,
+        eligibleIndex: indexedClaim.eligibleIndex,
+        model,
+        samplesPerClaim,
+        timeoutMs,
+      });
+      return result;
+    } catch (error: unknown) {
+      return err(makeClaimError(indexedClaim, describeUnknownError(error, "inline fallback failed")));
+    }
+  });
+
+  const candidates: FormalizationCandidate[] = [];
+  const findings: Finding[] = [];
+  const errors: FormalizationError[] = [];
+  for (const result of results) {
+    if (result.ok) {
+      candidates.push(result.value.candidate);
+      findings.push(...result.value.findings);
+    } else {
+      errors.push(result.error);
+    }
+  }
+  return { candidates, findings, errors, batchAttempts: [] };
+}
+
+/**
+ * Collect additional samples and merge by eligible index, never by claim ID.
+ *
+ * @param candidates - candidates with at least one sample
+ * @param samplesPerClaim - desired total sample count
+ * @param model - adapter model identifier
+ * @param timeoutMs - universal adapter timeout
+ * @returns merged candidates and findings; existing candidates survive failures
+ *
+ * @remarks
+ * Preconditions: candidates have stable eligible indexes. Postconditions:
+ * duplicate or missing IDs cannot cross-merge, input claim objects are not
+ * mutated, and candidate order remains eligible order.
+ */
+async function addAdditionalSamples(
+  candidates: readonly FormalizationCandidate[],
+  samplesPerClaim: number,
+  model: string,
+  timeoutMs: number,
+): Promise<{ readonly candidates: readonly FormalizationCandidate[]; readonly findings: readonly Finding[] }> {
+  if (samplesPerClaim <= 1) {
+    return { candidates, findings: [] };
+  }
+  const needMore = candidates.filter((candidate) => candidate.samples.length < samplesPerClaim);
+  const results = await mapBounded(needMore, INLINE_FALLBACK_CONCURRENCY, async (candidate) => {
+    const eligibleIndex = candidate.eligibleIndex;
+    if (eligibleIndex === undefined) {
+      return err({ message: "candidate lacks eligible index for additional sample merge" });
+    }
+    try {
+      return await sampleFormalizationsForClaim({
+        claim: candidate.claim,
+        eligibleIndex,
+        model,
+        samplesPerClaim: samplesPerClaim - candidate.samples.length,
+        timeoutMs,
+      });
+    } catch (error: unknown) {
+      return err({ message: describeUnknownError(error, "additional formalization sample failed") });
+    }
+  });
+
+  const byIndex = new Map<number, FormalizationCandidate>();
+  for (const candidate of candidates) {
+    if (candidate.eligibleIndex !== undefined) {
+      byIndex.set(candidate.eligibleIndex, candidate);
+    }
+  }
+  const findings: Finding[] = [];
+  for (let index = 0; index < results.length; index += 1) {
+    const result = results[index];
+    const original = needMore[index];
+    if (result === undefined || original === undefined) {
+      continue;
+    }
+    if (!result.ok) {
+      findings.push({
+        severity: "warning",
+        category: "formalization.additional_sample_failed",
+        provenance: original.claim.provenance,
+        description: `Additional formalization samples were not completed: ${result.error.message}`,
+        rationale: "The first valid sample is preserved, but an incomplete bounded sample set reduces clustering confidence.",
+        evidence: [
+          { kind: "claim", value: original.claim.text },
+          { kind: "eligible_index", value: String(original.eligibleIndex ?? "unknown") },
+        ],
+        ...(original.claim.id === undefined ? {} : { relatedClaimIdentifiers: [original.claim.id] }),
+      });
+      continue;
+    }
+    const eligibleIndex = original.eligibleIndex;
+    if (eligibleIndex === undefined) {
+      continue;
+    }
+    const existing = byIndex.get(eligibleIndex);
+    if (existing === undefined) {
+      continue;
+    }
+    byIndex.set(eligibleIndex, {
+      ...existing,
+      samples: [...existing.samples, ...result.value.candidate.samples],
+      invalidSamples: [...existing.invalidSamples, ...result.value.candidate.invalidSamples],
+    });
+    findings.push(...result.value.findings);
+  }
+  return {
+    candidates: [...byIndex.values()].sort(compareCandidates),
+    findings,
+  };
+}
+
+/**
+ * Sample one claim with a bounded retry budget.
+ *
+ * @param input - claim identity and adapter settings
+ * @returns candidate with valid samples or a claim-level error
+ *
+ * @remarks
+ * Preconditions: target samples >= 1. Postconditions: success has at least one
+ * valid sample; loop iterations are bounded by `samplesPerClaim * 3`. Thrown
+ * adapter values are caught as unknown and normalized.
+ */
+async function sampleFormalizationsForClaim(input: {
+  readonly claim: Claim;
+  readonly eligibleIndex: number;
+  readonly model: string;
+  readonly samplesPerClaim: number;
+  readonly timeoutMs: number;
+}): Promise<Result<ClaimSampleResult, FormalizationError>> {
+  const validSamples: LogicIrClaim[] = [];
+  const invalidSamples: { raw: unknown; reason: string }[] = [];
+  const findings: Finding[] = [];
+  const maxAttempts = Math.max(1, input.samplesPerClaim * ADAPTER_RETRIES);
+  let terminalFailure: string | undefined;
+
+  for (let attempts = 1; attempts <= maxAttempts && validSamples.length < input.samplesPerClaim; attempts += 1) {
+    let response;
+    try {
+      response = await callOpencode({
+        model: input.model,
+        phase: "formalization",
+        prompt: buildFormalizationPrompt(input.claim),
+        retries: ADAPTER_RETRIES,
+        timeoutMs: input.timeoutMs,
+      });
+    } catch (error: unknown) {
+      return err(makeClaimError(input, describeUnknownError(error, "formalization adapter threw")));
+    }
     if (!response.ok) {
-      return err({ message: `failed to formalize claim ${input.claim.id ?? "<unnamed>"}: ${response.error.message}` });
+      if (validSamples.length > 0) {
+        terminalFailure = response.error.message;
+        break;
+      }
+      return err(makeClaimError(input, response.error.message));
     }
 
     const candidateSample = extractSamplePayload(response.value);
     const validated = validateFormalizationSample(candidateSample);
     if (!validated.ok) {
       invalidSamples.push({ raw: candidateSample, reason: validated.error.message });
-      findings.push({
-        severity: "warning",
-        category: "formalization.invalid_sample",
-        provenance: input.claim.provenance,
-        description: `Rejected invalid formalization sample: ${validated.error.message}`,
-        rationale: "Repeated invalid samples consume retry budget and reduce the effective sample count available for clustering, potentially degrading confidence in the final formalization.",
-        evidence: [
-          { kind: "claim", value: input.claim.text },
-          { kind: "attempt", value: String(attempts) },
-        ],
-        ...(input.claim.id === undefined ? {} : { relatedClaimIdentifiers: [input.claim.id] }),
-      });
+      findings.push(buildInvalidSampleFinding(input.claim, attempts, validated.error.message));
       continue;
     }
-
     validSamples.push(validated.value);
   }
 
   if (validSamples.length === 0) {
-    return err({ message: `all formalization samples invalid for claim ${input.claim.id ?? "<unnamed>"}` });
+    return err(makeClaimError(input, `all formalization samples invalid for claim ${input.claim.id ?? "<unnamed>"}`));
   }
-
+  if (validSamples.length < input.samplesPerClaim) {
+    findings.push({
+      severity: "warning",
+      category: "formalization.sample_shortfall",
+      provenance: input.claim.provenance,
+      description: terminalFailure === undefined
+        ? `Only ${String(validSamples.length)} of ${String(input.samplesPerClaim)} requested formalization samples were valid`
+        : `Additional formalization sampling stopped after an adapter failure: ${terminalFailure}`,
+      rationale: "The bounded retry budget preserved a valid candidate but did not produce the requested sample count.",
+      evidence: [
+        { kind: "valid_samples", value: String(validSamples.length) },
+        { kind: "requested_samples", value: String(input.samplesPerClaim) },
+      ],
+      ...(input.claim.id === undefined ? {} : { relatedClaimIdentifiers: [input.claim.id] }),
+    });
+  }
   return ok({
     candidate: {
       claim: input.claim,
+      eligibleIndex: input.eligibleIndex,
       samples: validSamples,
       invalidSamples,
     },
@@ -462,16 +840,14 @@ async function sampleFormalizationsForClaim(input: {
 }
 
 /**
- * Build a formalization prompt instructing the LLM to convert a claim into Logic IR JSON.
+ * Build the single-claim inline formalization prompt.
  *
- * @param claim - the claim to formalize, embedded as fenced untrusted data
- * @returns prompt string with claim text sandboxed inside XML and code fences
+ * @param claim - untrusted claim data
+ * @returns sandboxed prompt
  *
  * @remarks
- * Precondition: `claim.text` is treated as untrusted user content.
- * Postcondition: prompt instructs strict JSON output with Logic IR schema fields.
- * Invariant: claim text is never interpreted as instructions by the prompt structure.
- * Failure modes: none — pure computation.
+ * Preconditions: claim is a claim-graph value. Postconditions: claim text is
+ * fenced as data and never placed in instruction position. Failure form: none.
  */
 export function buildFormalizationPrompt(claim: Claim): string {
   return [
@@ -486,22 +862,19 @@ export function buildFormalizationPrompt(claim: Claim): string {
 }
 
 /**
- * Extract the formalization sample payload from a raw LLM response.
+ * Extract a single formalization payload from a raw adapter response.
  *
- * @param response - raw decoded LLM response object
- * @returns the nested `sample` or `formalization` field if present, otherwise the response itself
+ * @param response - untrusted decoded response
+ * @returns nested sample/formalization payload or original value
  *
  * @remarks
- * Precondition: `response` is untrusted and may be any JSON value.
- * Postcondition: returns the most specific nested payload for downstream validation.
- * Invariant: never throws; returns `response` as-is for non-object inputs.
- * Failure modes: none — pure computation.
+ * Pure and non-throwing. Non-object responses are passed through for validator
+ * diagnostics.
  */
 export function extractSamplePayload(response: unknown): unknown {
   if (typeof response !== "object" || response === null) {
     return response;
   }
-
   const record = response as { readonly sample?: unknown; readonly formalization?: unknown };
   if (record.sample !== undefined) {
     return record.sample;
@@ -509,65 +882,143 @@ export function extractSamplePayload(response: unknown): unknown {
   if (record.formalization !== undefined) {
     return record.formalization;
   }
-
+  const formalizations = (record as { readonly formalizations?: unknown }).formalizations;
+  if (Array.isArray(formalizations) && formalizations.length === 1) {
+    return formalizations[0];
+  }
   return response;
 }
 
 /**
- * Build a batch formalization prompt for multiple claims from a single spec file.
+ * Build the legacy inline batch prompt for direct callers still using it.
  *
- * @param claims - claims from one provenance file to formalize together
- * @returns prompt string with all claims sandboxed in numbered fences
+ * @param claims - claims to render
+ * @returns sandboxed positional batch prompt
  *
  * @remarks
- * Precondition: all claims share the same provenance file.
- * Postcondition: the prompt instructs the LLM to return a JSON array in claim order.
- * Failure modes: none — pure computation.
+ * This helper is retained for source compatibility and is not used by the
+ * production transport, which always uses the dedicated attached prompt.
  */
 export function buildBatchFormalizationPrompt(claims: readonly Claim[]): string {
-  const claimSections = claims.map((claim, index) => {
-    return [
-      `<claim index="${String(index)}" id=${JSON.stringify(claim.id ?? "UNNAMED")} obligation=${JSON.stringify(claim.obligation)}>`,
-      "```text",
-      claim.text,
-      "```",
-      "</claim>",
-    ].join("\n");
-  });
-
-  return [
-    BATCH_FORMALIZATION_INSTRUCTIONS,
-    FORMALIZATION_SANDBOXING,
-    `\n## Claims (${String(claims.length)} total)\n`,
-    ...claimSections,
-  ].join("\n\n");
+  const sections = claims.map((claim, index) => [
+    `<claim index="${String(index)}" id=${JSON.stringify(claim.id ?? "UNNAMED")} obligation=${JSON.stringify(claim.obligation)}>`,
+    "```text",
+    claim.text,
+    "```",
+    "</claim>",
+  ].join("\n"));
+  return [FORMALIZATION_INSTRUCTIONS, FORMALIZATION_SANDBOXING, `\n## Claims (${String(claims.length)} total)\n`, ...sections].join("\n\n");
 }
 
 /**
- * Extract an array of formalization entries from a batch LLM response.
+ * Extract the formalization entries array from a batch response.
  *
- * @param response - raw decoded LLM response object
- * @returns array of individual entry payloads (may be shorter than expected if LLM omitted entries)
+ * @param response - untrusted decoded adapter response
+ * @returns entries or an empty array for an unrecognized structure
  *
  * @remarks
- * Precondition: `response` is untrusted and may be any JSON value.
- * Postcondition: returns an array; empty array if structure is unrecognized.
- * Failure modes: none — pure computation.
+ * Pure, bounded by the response object, and never throws.
  */
 export function extractBatchPayload(response: unknown): readonly unknown[] {
   if (typeof response !== "object" || response === null) {
     return [];
   }
-
   const record = response as { readonly formalizations?: unknown };
   if (Array.isArray(record.formalizations)) {
     return record.formalizations;
   }
+  return Array.isArray(response) ? response : [];
+}
 
-  // Fallback: if the response is itself an array, treat it as the formalizations list.
-  if (Array.isArray(response)) {
-    return response;
+function buildInvalidSampleFinding(claim: Claim, attempt: number, reason: string): Finding {
+  return {
+    severity: "warning",
+    category: "formalization.invalid_sample",
+    provenance: claim.provenance,
+    description: `Rejected invalid formalization sample: ${reason}`,
+    rationale: "Repeated invalid samples consume bounded retry budget and reduce formalization confidence.",
+    evidence: [
+      { kind: "claim", value: claim.text },
+      { kind: "attempt", value: String(attempt) },
+    ],
+    ...(claim.id === undefined ? {} : { relatedClaimIdentifiers: [claim.id] }),
+  };
+}
+
+function buildCleanupWarning(batch: PhysicalClaimBatch, contextSha256: string, detail: string): Finding {
+  const firstClaim = batch.claims[0]?.claim;
+  return {
+    severity: "warning",
+    category: "formalization.temp_cleanup_failed",
+    provenance: firstClaim?.provenance ?? { file: batch.logicalFile },
+    description: `Temporary attached batch cleanup failed for ${batch.logicalFile} batch ${String(batch.ordinal)}`,
+    rationale: "Successful formalization candidates are preserved, but cleanup failure requires operational attention because the ephemeral context may remain on disk.",
+    evidence: [
+      { kind: "batch_key", value: batch.logicalFile },
+      { kind: "sub_batch_ordinal", value: String(batch.ordinal) },
+      { kind: "context_sha256", value: contextSha256 },
+      { kind: "cleanup_error", value: detail },
+    ],
+  };
+}
+
+function buildBatchEntryInvalidFinding(claim: Claim, reason: string): Finding {
+  return {
+    severity: "warning",
+    category: "formalization.batch_entry_invalid",
+    provenance: claim.provenance,
+    description: `Batch entry invalid, retrying individually: ${reason}`,
+    rationale: "A malformed indexed batch entry is retried individually so one model-response defect cannot lose the claim.",
+    evidence: [{ kind: "claim", value: claim.text }, { kind: "reason", value: reason }],
+    ...(claim.id === undefined ? {} : { relatedClaimIdentifiers: [claim.id] }),
+  };
+}
+
+function isInfrastructureErrorKind(kind: OpencodeErrorKind): boolean {
+  switch (kind) {
+    case "spawn_error":
+    case "invalid_files":
+    case "invalid_timeout":
+      return true;
+    case "timeout":
+    case "invalid_json":
+    case "schema_validation_error":
+    case "prompt_too_large":
+      return false;
+    default:
+      return assertNever(kind);
   }
+}
 
-  return [];
+function workerFailureResult(batch: PhysicalClaimBatch, error: unknown): BatchWorkResult {
+  const message = describeUnknownError(error, "formalization physical batch worker failed");
+  return {
+    candidates: [],
+    findings: [],
+    errors: batch.claims.map((claim) => makeClaimError(claim, message)),
+    batchAttempts: [],
+  };
+}
+
+function makeClaimError(
+  claim: IndexedFormalizationClaim | { readonly claim: Claim; readonly eligibleIndex: number },
+  message: string,
+): FormalizationError {
+  return {
+    message: `failed to formalize claim ${claim.claim.id ?? "<unnamed>"}: ${message}`,
+    eligibleIndex: claim.eligibleIndex,
+    ...(claim.claim.id === undefined ? {} : { claimId: claim.claim.id }),
+  };
+}
+
+function compareCandidates(left: FormalizationCandidate, right: FormalizationCandidate): number {
+  return (left.eligibleIndex ?? Number.MAX_SAFE_INTEGER) - (right.eligibleIndex ?? Number.MAX_SAFE_INTEGER);
+}
+
+function compareErrors(left: FormalizationError, right: FormalizationError): number {
+  return (left.eligibleIndex ?? Number.MAX_SAFE_INTEGER) - (right.eligibleIndex ?? Number.MAX_SAFE_INTEGER);
+}
+
+function describeUnknownError(error: unknown, fallback: string): string {
+  return error instanceof Error && error.message.length > 0 ? error.message : fallback;
 }

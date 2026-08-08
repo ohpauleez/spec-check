@@ -11,6 +11,9 @@ import { runProcess } from "./process.js";
 import { postcondition } from "../domain/assert.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { DEFAULT_TIMEOUT_MS, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS } from "../domain/timeout.js";
+import { PROMPT_ARG_MAX_BYTES } from "./opencode-limits.js";
+
+export { PROMPT_ARG_MAX_BYTES } from "./opencode-limits.js";
 
 /**
  * Closed domain of verification phases supported by the opencode invocation protocol.
@@ -26,6 +29,16 @@ export type OpencodePhase =
   | "code-derived-generation"
   | "code-derived-formalization"
   | "blind-comparison";
+
+/** Closed local taxonomy of terminal adapter failures. */
+export type OpencodeErrorKind =
+  | "spawn_error"
+  | "timeout"
+  | "invalid_json"
+  | "invalid_timeout"
+  | "schema_validation_error"
+  | "prompt_too_large"
+  | "invalid_files";
 
 /**
  * Configuration for a single opencode subprocess invocation.
@@ -53,13 +66,11 @@ export interface OpencodeCallOptions {
  * the verification step that produced it.
  */
 export interface OpencodeError {
-  readonly kind: "spawn_error" | "timeout" | "invalid_json" | "invalid_timeout" | "schema_validation_error" | "prompt_too_large" | "invalid_files";
+  readonly kind: OpencodeErrorKind;
   readonly phase: OpencodePhase;
   readonly message: string;
   readonly stderr?: string;
 }
-
-const PROMPT_ARG_MAX_BYTES = 32_768;
 
 /**
  * Call `opencode` with bounded retries and strict JSON validation.
@@ -627,6 +638,29 @@ function validatePhaseSchema(
       phase,
       message: "expected findings to be an array when present",
     });
+  }
+
+  if (phase === "formalization") {
+    const formalizations = record.formalizations;
+    if (formalizations !== undefined) {
+      if (!Array.isArray(formalizations)) {
+        return err({
+          kind: "schema_validation_error",
+          phase,
+          message: "expected formalizations to be an array when present",
+        });
+      }
+      for (const [entryIndex, entry] of formalizations.entries()) {
+        const entryRecord = asRecord(entry);
+        if (entryRecord === undefined || !Number.isSafeInteger(entryRecord.index)) {
+          return err({
+            kind: "schema_validation_error",
+            phase,
+            message: `formalization entry ${String(entryIndex)} requires a safe integer index`,
+          });
+        }
+      }
+    }
   }
 
   return ok(payload);

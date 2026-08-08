@@ -53,6 +53,7 @@ describe("formalize contract", () => {
       model: "test-model",
       samplesPerClaim: 2,
       timeoutMs: 400000,
+      logicalFileByCapability: new Map(),
     });
 
     expect(result.ok).toBe(true);
@@ -79,6 +80,7 @@ describe("formalize contract", () => {
       model: "test-model",
       samplesPerClaim: 1,
       timeoutMs: 300000,
+      logicalFileByCapability: new Map(),
     });
 
     expect(result.ok).toBe(true);
@@ -101,6 +103,7 @@ describe("formalize contract", () => {
       model: "test-model",
       samplesPerClaim: 1,
       timeoutMs: 300000,
+      logicalFileByCapability: new Map(),
     });
 
     expect(result.ok).toBe(true);
@@ -123,6 +126,7 @@ describe("formalize contract", () => {
       model: "test-model",
       samplesPerClaim: 1,
       timeoutMs: 300000,
+      logicalFileByCapability: new Map(),
     });
 
     expect(result.ok).toBe(true);
@@ -148,6 +152,7 @@ describe("formalize contract", () => {
       model: "test-model",
       samplesPerClaim: 1,
       timeoutMs: 300000,
+      logicalFileByCapability: new Map(),
     });
 
     expect(result.ok).toBe(true);
@@ -196,6 +201,7 @@ describe("formalize contract", () => {
       samplesPerClaim: 2,
       timeoutMs: 300000,
       concurrency: 1,
+      logicalFileByCapability: new Map(),
     });
 
     // Should return ok with both candidates and errors available

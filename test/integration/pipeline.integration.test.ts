@@ -254,6 +254,7 @@ describe("end-to-end integration", () => {
       model: "test-model",
       samplesPerClaim: 2,
       timeoutMs: 300000,
+      logicalFileByCapability: new Map(),
     });
 
     expect(result.ok).toBe(true);

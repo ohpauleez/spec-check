@@ -73,7 +73,7 @@ The goal is not a proof of the whole system. The goal is justified confidence: t
 |---|---|
 | [`catalog-and-parse`](openspec/specs/catalog-and-parse/spec.md) | input discovery, CLI validation, structured parsing, EARS extraction, loss-aware evidence |
 | [`claim-graph-and-coverage`](openspec/specs/claim-graph-and-coverage/spec.md) | claim normalization, obligation levels, coverage gaps, contradiction detection |
-| [`formalization-and-logic-analysis`](openspec/specs/formalization-and-logic-analysis/spec.md) | formalization sampling, equivalence clustering, SMT-LIB compilation, per-spec solver analysis |
+| [`formalization-and-logic-analysis`](openspec/specs/formalization-and-logic-analysis/spec.md) | formalization sampling, equivalence clustering, SMT-LIB compilation, per-logical-group solver analysis |
 | [`source-traceability-and-code-backwards`](openspec/specs/source-traceability-and-code-backwards/spec.md) | source tracing, code-derived specs, cross-side implication, blind comparison |
 | [`reporting-and-evidence`](openspec/specs/reporting-and-evidence/spec.md) | report rendering, evidence preservation, manifest semantics, output confinement |
 | [`spec-traceability`](openspec/specs/spec-traceability/spec.md) | canonical identifier discovery, test harness integration, coverage enforcement |
@@ -136,12 +136,12 @@ The goal is not a proof of the whole system. The goal is justified confidence: t
 | Boundary | Tool | Used By |
 |---|---|---|
 | qualitative review | `opencode` | qualitative pass 1 and pass 2 |
-| formalization sampling | `opencode` | per-claim logic IR generation |
+| formalization sampling | `opencode` | semantic-group first samples plus bounded per-claim fallback and additional samples |
 | code-derived spec generation | `opencode` | blind generation from source evidence |
 | code-derived formalization | `opencode` | formalization of generated specs |
 | blind comparison | `opencode` | explanatory rationale for cross-side classification |
 | equivalence clustering | `z3` | pairwise implication checks between samples |
-| per-spec logic analysis | `z3` | satisfiability, contradiction, completeness |
+| logical-group logic analysis | `z3` | satisfiability, contradiction, completeness |
 | code-derived logic analysis | `z3` | internal consistency of code-derived formalizations |
 | cross-side implication | `z3` | bidirectional original-vs-derived classification |
 
@@ -301,7 +301,10 @@ This split matters for assurance. The more the decision logic is isolated from t
 | **Claim graph builder** ([`src/domain/claim-graph.ts`](src/domain/claim-graph.ts)) | Normalize parsed content into typed claims with provenance and obligation | No claim exists without provenance; extraction is deterministic |
 | **Qualitative analysis** ([`src/domain/spec-forward/qualitative.ts`](src/domain/spec-forward/qualitative.ts)) | Package parsed content for LLM-backed review passes; validate response schemas | `opencode` responses are schema-validated before acceptance; exactly 2 passes on success |
 | **Coverage analysis** ([`src/domain/spec-forward/coverage.ts`](src/domain/spec-forward/coverage.ts)) | Compare proposal/design claims against capability specs | Deterministic given the same claim graph; no LLM or solver dependency |
-| **Formalization** ([`src/domain/formal/formalize.ts`](src/domain/formal/formalize.ts)) | Request LLM-backed formalization samples; validate against logic IR schema | Invalid samples rejected, not silently admitted; three-phase strategy (batch, retry, additional) |
+| **Semantic grouping** ([`src/domain/formal/grouping.ts`](src/domain/formal/grouping.ts)) | Select active merged specs for grouping, build the shared capability/logical-file map, select semantic keys, group eligible claims, and split physical batches | The map is built once and shared by formalization and solver; the grouping activity filter includes requirements or scenarios, while solver-specific filtering remains separate |
+| **Formalization** ([`src/domain/formal/formalize.ts`](src/domain/formal/formalize.ts)) | Request LLM-backed formalization samples for semantic groups; validate against the Logic IR schema; assemble indexed candidates and errors | Every eligible claim reaches a candidate or claim-level error; single-claim attempts are inline and multi-claim first samples use attached context; `samplesPerClaim > 1` adds bounded per-claim samples |
+| **Attached batch transport** ([`src/domain/formal/batch-transport.ts`](src/domain/formal/batch-transport.ts)) | Serialize, hash, write, clean up, and record metadata for ephemeral multi-claim context files | Context bytes are deterministic; files are owner-only and cleaned in `finally`; durable evidence stores pointers and a hash, never claim text |
+| **Formalization degradation** ([`src/domain/formal/degradation.ts`](src/domain/formal/degradation.ts)) | Map terminal adapter error kinds to bounded per-claim fallback or claim-level errors | Model-response failures may degrade; infrastructure failures do not receive a second fallback path; no new public error category |
 | **Validation** ([`src/domain/formal/validate.ts`](src/domain/formal/validate.ts)) | Structural validation of untrusted LLM-produced formalization samples | Deterministic, side-effect free; validates variables, functions, sorts, and assertion syntax; rejects same-claim raw variable/function overlap and duplicate same-kind declarations by sanitized symbol |
 | **Clustering** ([`src/domain/formal/clustering.ts`](src/domain/formal/clustering.ts)) | Solver-backed pairwise implication to group equivalent formalizations | Pair enumeration is deterministic; BFS-based connected components; ambiguity is a finding |
 | **Identifier sanitization** ([`src/domain/formal/identifiers.ts`](src/domain/formal/identifiers.ts)) | Encode untrusted identifiers into injective SMT-LIB-safe symbols | Fixed-width-6 `_HHHHHH` escapes are uniquely decodable and preserve non-collision guarantees |
@@ -313,7 +316,7 @@ This split matters for assurance. The more the decision logic is isolated from t
 | **Cross-side implication** ([`src/domain/code-backwards/cross-implication.ts`](src/domain/code-backwards/cross-implication.ts)) | Bidirectional solver-backed implication between original and code-derived formalizations | Primary strength classifier; greedy matching is deterministic; all queries persisted |
 | **Blind comparison** ([`src/domain/code-backwards/blind-compare.ts`](src/domain/code-backwards/blind-compare.ts)) | Explanatory LLM rationale for formal classification | Code-derived side never receives original requirement text |
 | **Report rendering** ([`src/domain/reporting/render.ts`](src/domain/reporting/render.ts)) | Render Markdown reports; replace malformed findings with `reporting.unsupported_verdict` defects | Reports never contain findings without provenance; untrusted evidence text neutralized into inert Markdown via `neutralizeMarkdownInline()` (`RAE-EVID-RENDER-SAFE`) |
-| **Manifest** ([`src/domain/reporting/manifest.ts`](src/domain/reporting/manifest.ts)) | Build entries with SHA-256 checksums; write atomically; invalidate stale manifests at run start | Manifest is the final file written |
+| **Manifest** ([`src/domain/reporting/manifest.ts`](src/domain/reporting/manifest.ts)) | Build entries with SHA-256 checksums; persist formalization `batchAttempts`; write atomically; invalidate stale manifests at run start | Manifest is the final file written; batch-attempt records retain pointer/hash evidence and cleanup outcomes without claim text |
 | **Filesystem adapter** ([`src/adapters/fs.ts`](src/adapters/fs.ts)) | Path confinement, atomic writes (temp + rename), SHA-256 checksums | All writes confined to configured output directory; `precondition` throws on traversal |
 | **Process adapter** ([`src/adapters/process.ts`](src/adapters/process.ts)) | Generic `execFile` wrapper with argv arrays, timeout handling, stdin piping | No shell interpolation; `shell: false`; ENOENT on spawn rejects the promise |
 | **`opencode` adapter** ([`src/adapters/opencode.ts`](src/adapters/opencode.ts)) | `opencode` subprocess with NDJSON event stream parsing, optional `--file` attachments, bounded retries | Bounded retries (default 3); invalid responses consume a retry; universal timeout comes from run config (default 300s) |
@@ -360,13 +363,16 @@ erDiagram
 | Entity | Meaning | Authority | Key Invariants |
 |---|---|---|---|
 | Document | A proposal, design, capability spec, or task file | input filesystem | read-only; never mutated by analysis; classified by basename |
-| Capability | A logical behavior group represented by one spec file and its purpose | active catalog | resolved from finalized specs plus at most one in-development delta; lexicographically first delta wins on conflict |
-| Merged Capability Spec | The active merged view of a capability after applying delta operations against the finalized base | merge phase | produced per capability; contains merged requirements, scenarios, findings, and provenance-preserving source file links |
+| Capability | A logical behavior identity with a merged active view and one semantic logical-file key | active catalog | resolved from finalized specs plus at most one in-development delta; lexicographically first delta wins on conflict; claims may retain multiple provenance files |
+| Merged Capability Spec | The active merged view of a capability after applying delta operations against the finalized base | merge phase | produced per capability; contains merged requirements, scenarios, findings, source-file links, and a non-empty semantic `logicalFile` |
 | Requirement | A capability-level behavioral obligation in EARS format | parsed spec file | must carry a canonical bracketed identifier; classified into one of 8 EARS types |
 | Scenario | A concrete, testable behavioral case that refines a requirement | parsed spec file | must carry a canonical bracketed identifier |
-| Claim | A normalized statement derived from requirements, scenarios, properties, or code | claim graph builder | always carries provenance, obligation level, and capability; extraction from merged specs is deterministic |
+| Claim | A normalized statement derived from requirements, scenarios, properties, or code | claim graph builder | always carries provenance and obligation level; capability and ID are optional metadata; extraction from merged specs is deterministic |
 | Finding | An analysis result with severity, rationale, provenance, and evidence | analysis phases | never exists without provenance; never silently removed; category is dot-separated hierarchical |
 | Formalization Sample | One candidate formal encoding of a claim as logic IR | LLM-backed formalization | schema-validated before acceptance; variables, functions, sorts, and assertion syntax all checked |
+| Semantic Group | Eligible requirement and scenario claims sharing one exact semantic grouping key | shared grouping helper | groups are first-key ordered; members preserve eligible input order; capability claims use mapped logical files or synthetic fallbacks |
+| Physical Claim Batch | One first-sample LLM attempt cut from one semantic group | formalization transport | stable slicing preserves key, eligible indexes, and order; `maxBatchSize=0` produces one unbounded batch per group |
+| Batch Attempt Evidence | Metadata for one attached context attempt after its temp file is deleted | formalization and reporting | records indexes, IDs, provenance files, context hash, prompt/model metadata, outcome, and cleanup; never duplicates claim text |
 | Equivalence Cluster | A group of mutually implying formalization samples | solver-backed clustering | BFS-based connected components; represents one interpretation of a claim |
 | Solver Artifact | Generated SMT-LIB file, model, unsat core, timeout result, or error diagnostic | solver analysis | persisted verbatim under the output directory |
 | Code-Derived Specification | EARS-preferring behavioral spec generated from source evidence, blind to original text | code-derived generation | persisted as Markdown in `gen_specs/` |
@@ -500,6 +506,7 @@ Every durable conclusion is evidence-backed. Evidence may include:
 - parser-preserved unmatched lines
 - raw `opencode` responses (both valid and invalid)
 - validated logic IR samples
+- attached batch-attempt metadata: semantic key, ordered eligible indexes, claim IDs, provenance files, prompt/model metadata, outcome, cleanup status, and exact-context SHA-256; claim text remains pointer-based
 - compiled SMT-LIB text
 - solver stdout/stderr, models, unsat cores, and timeouts
 - source trace links with evidence level classification (primary, secondary, supporting)
@@ -529,6 +536,11 @@ Relevant code: [`src/domain/findings.ts`](src/domain/findings.ts)
 | **D-13** | Every skipped merge operation produces exactly one finding; no silent discard | Merge finding completeness invariant | Property tests |
 | **D-14** | `compiled.claimIds` is the authoritative surviving-claim set for downstream checks | `compileSpecSmtlib()` + logic-analysis inclusion filtering | Conflict evidence cannot disagree with emitted inclusion set |
 | **D-15** | Compile groups that are structurally invalid — duplicate raw/sanitized claim IDs, or size beyond `CLAIMS_PER_GROUP_MAX` / `DECLARATIONS_PER_CLAIM_MAX` — are rejected before compile, artifact write, or solver work | `preflightGroupBounds()` composed bounds-first with `preflightGroupClaimIds()` in logic analysis | Invalid compile groups emit a group-scoped `logic.invalid_group` finding and perform zero solver work; oversized groups degrade gracefully instead of aborting the run, and `compileSpecSmtlib()` size `precondition` guards remain as unreachable backstops |
+| **D-16** | Formalization and solver grouping derive keys from one shared semantic selector: mapped `logicalFile`, synthetic `<merged-spec/{capability}>` fallback, or verbatim provenance file for capability-less claims | `selectClaimLogicalFile()`; map construction in `run-cli.ts` | Key drift or selectable batch-per-file behavior is impossible in the production path; keys use exact string equality without normalization |
+| **D-17** | Every eligible requirement or scenario claim occurs exactly once in semantic grouping; groups are first-key ordered and members preserve eligible input order | `groupFormalizationClaims()` and `splitPhysicalBatches()` | Claims are not lost or duplicated; physical chunks preserve the semantic key and terminate for every valid `maxBatchSize` |
+| **D-18** | The zero-based original eligible index is authoritative for internal response matching and additional-sample merging; claim IDs are display/evidence metadata only | indexed formalization claims; `matchAttachedBatchResponse()`; index-keyed sample merge | Missing or duplicate IDs cannot cross-merge samples or misattribute a response |
+| **D-19** | Multi-claim context is schema-versioned JSON serialized as deterministic UTF-8 bytes, with explicit indexes, `null` for missing IDs, and verbatim provenance paths | `BatchContextFile`; `serializeBatchContext()` | The exact bytes can be hashed and reconstructed; source claims and provenance are not mutated |
+| **D-20** | Attached context follows `not_created -> dir_created -> file_written -> cleanup_succeeded or cleanup_failed`; durable batch evidence contains pointers and the context hash but no claim text | `batch-transport.ts`; `FormalizationOutput.batchAttempts`; manifest writer | Cleanup is attempted for every created directory; cleanup failure after success warns without discarding candidates |
 
 **Spec references:** [`catalog-and-parse`](openspec/specs/catalog-and-parse/spec.md) -- `[CAT-PARSE-DETERMINISM]`, `[CAT-PRESERVE-LOSS]`; [`claim-graph-and-coverage`](openspec/specs/claim-graph-and-coverage/spec.md); [`reporting-and-evidence`](openspec/specs/reporting-and-evidence/spec.md) -- `[RAE-FINDING-SHAPE]`, `[RAE-FINDINGS-IMMUTABLE]`, `[RAE-ATOMIC-MANIFEST]`.
 
@@ -546,10 +558,14 @@ Relevant code: [`src/domain/findings.ts`](src/domain/findings.ts)
 | **I-4** | Solver inputs and outputs are persisted verbatim | Adapter-level persistence via `writeOutputAtomic()` |
 | **I-5** | Findings are never silently erased by later phases | `addFindings()` in `RunState` with monotonic length postcondition |
 | **I-6** | Re-running with identical inputs and fixed/cached LLM responses produces identical outputs | Deterministic core between nondeterministic boundaries; deterministic extraction order |
-| **I-7** | All writes remain confined to the configured output directory | `resolveConfinedOutputPath()` with `precondition` assertion in filesystem adapter |
+| **I-7** | All durable output writes remain confined to the configured output directory; ephemeral attached batch context is the explicit OS-temp exception and is cleaned by its own lifecycle | `resolveConfinedOutputPath()` with `precondition` assertion in filesystem adapter; `batch-transport.ts` lifecycle |
 | **I-8** | No shell interpolation in subprocess calls | `shell: false` in `process.ts`; argv-based `execFile`, never `exec` |
-| **I-9** | Prompt construction fences document content; analyzed spec text is never elevated into system-level instruction position | `sanitizeForCodeFence()` in `fence.ts`; fenced prompt construction in qualitative and formalization modules |
+| **I-9** | Prompt construction treats all analyzed document content and attached batch JSON as untrusted data; no spec text is elevated into instruction position, and attached multi-claim prompts contain no claim bodies | `sanitizeForCodeFence()` in `fence.ts`; fenced inline prompts and `ATTACHED_BATCH_FORMALIZATION_PROMPT` |
 | **I-10** | The resolved run configuration is immutable once analysis begins | CLI layer freezes `RunConfig` before pipeline starts |
+| **I-11** | Formalization and solver grouping use the same semantic key and the same map instance, with solver-specific filtering applied before grouping | `run-cli.ts`; `selectClaimLogicalFile()`; `groupFormalizationClaims()` and `groupRepresentativesBySpec()` |
+| **I-12** | Every eligible claim reaches one terminal formalization outcome: a candidate or an explicit claim-level error | indexed physical-batch results, fallback handling, and worker-failure normalization |
+| **I-13** | Attached context cleanup is attempted after every handled path that creates a temp directory; cleanup failure after successful formalization does not discard candidates | `formalizeAttachedBatch()` `finally` path and `formalization.temp_cleanup_failed` warning |
+| **I-14** | The grouping map includes merged specs with requirements or scenarios, but this broader activity filter is used only for map construction; claim-graph and solver-input filters remain narrower | `activeMergedSpecsForGrouping()`; `run-cli.ts`; solver filtering before `groupRepresentativesBySpec()` |
 
 ### 5.2 Per-Phase Contracts
 
@@ -563,7 +579,7 @@ Relevant code: [`src/domain/findings.ts`](src/domain/findings.ts)
 | Claim graph | At least one document parsed with recognizable structure | Every recognized element normalized into a typed claim with provenance | Orphaned claims surfaced as defects |
 | Qualitative analysis | Claim graph has at least one claim; `opencode` available | Schema-validated findings from exactly 2 LLM passes with severity, rationale, provenance, and evidence | `QualitativeError` after bounded retries |
 | Coverage analysis | Claims from proposal/design and at least one spec | Missing coverage, contradictions, unsupported references, and task inconsistencies reported | Deterministic; no external dependencies |
-| Formalization | Eligible claims (requirements and scenarios) exist; `opencode` available | Each claim produces validated logic IR and compiled SMT-LIB artifacts | `FormalizationError` after bounded retries |
+| Formalization | Eligible claims (requirements and scenarios) exist; the shared logical-file map is validated; `opencode` is available | Semantic groups produce indexed candidates or claim-level errors; attached-attempt metadata is available to reporting; successful candidates proceed to clustering | Terminal model-response failures may degrade per claim; infrastructure failures become claim errors; zero candidates aborts with `FormalizationError` |
 | Clustering | Formalization samples exist; `z3` available | Equivalence clusters with representative selection; ambiguity surfaced as findings | `AdapterError` on solver failure |
 | Logic analysis | Representative formalizations exist; `z3` available | Obligation-aware contradiction, completeness, and gap detection; evidence persisted verbatim | `AdapterError` on solver failure |
 | Source traceability | `--src` provided and readable | Each claim traced to source evidence or gap finding emitted; evidence levels classified | `CatalogError` on unreadable source |
@@ -709,7 +725,7 @@ stateDiagram-v2
     RunQualitative --> RunCoverage: qualitative complete
     RunQualitative --> FatalExit: zero valid responses after retries
     RunCoverage --> RunFormalization: coverage complete
-    RunFormalization --> RunClustering: candidates available
+    RunFormalization --> RunClustering: candidates available; indexed batch evidence collected
     RunFormalization --> FatalExit: zero valid candidates phase-wide
     RunClustering --> RunLogicAnalysis: representatives selected
     RunLogicAnalysis --> AnalysisComplete
@@ -725,7 +741,7 @@ stateDiagram-v2
 | qualitative pass 1 | schema-valid LLM response | exhausted retries | `QualitativeError` |
 | qualitative pass 2 | schema-valid LLM response | exhausted retries | `QualitativeError` |
 | coverage | always succeeds (deterministic) | -- | -- |
-| formalization | at least one valid candidate per claim | zero valid candidates after batch + retry + additional | `FormalizationError` |
+| formalization | each eligible claim reaches a valid candidate or an explicit claim-level error | zero valid candidates phase-wide after bounded batch, fallback, and additional work | `FormalizationError` at the CLI boundary; partial candidates and per-claim errors continue |
 | clustering | representative selected from largest stable cluster | stability threshold not met | ambiguity finding emitted |
 | logic: group preflight | claims have unique raw + sanitized IDs and fit size bounds | duplicate IDs, or size beyond `CLAIMS_PER_GROUP_MAX` / `DECLARATIONS_PER_CLAIM_MAX` | `logic.invalid_group`; zero compile/solver/write work (D-15) |
 | logic: spec-combine | claim declarations are mutually compatible | variable-sort, symbol-kind, or function-signature conflict | `logic.merge_conflict`; conflicting claim excluded, survivors are `compiled.claimIds` (D-14) |
@@ -738,7 +754,7 @@ stateDiagram-v2
 |---|---|
 | SF-1 | Qualitative passes execute sequentially; pass 2 starts only after pass 1 succeeds |
 | SF-2 | Coverage analysis is purely deterministic; no LLM or solver dependency |
-| SF-3 | Formalization uses a three-phase strategy: batch per file, individual retry, additional samples |
+| SF-3 | Formalization uses semantic grouping and stable physical batching: multi-claim first samples use attached JSON context, single-claim attempts use the inline path, model-response failures degrade to bounded per-claim inline calls, and additional samples are bounded per-claim calls |
 | SF-4 | Clustering pair enumeration is deterministic (left < right) |
 | SF-5 | Logic analysis two-phase approach: satisfiability first, unsat-core extraction only on contradiction |
 | SF-6 | Deeper pairwise guard-activation and completeness sub-checks aggregate `timeout`/`unknown` verdicts into a single `logic.inconclusive` finding, consistent with the query-level inconclusive flow |
@@ -748,10 +764,18 @@ stateDiagram-v2
 #### Safety and Liveness
 
 - Safety: no invalid formalization sample enters clustering or solver analysis.
+- Safety: formalization and solver analysis use one shared semantic grouping key; a merged capability may span multiple provenance files without splitting its logical group.
+- Safety: original eligible indexes, not optional or duplicate claim IDs, control attached response matching and additional-sample merging.
+- Safety: attached JSON is untrusted data and contains claim text only in the ephemeral context file, never in the attached prompt body or instruction position.
+- Safety: every handled formalization failure produces a candidate or an explicit claim-level error for each affected eligible claim; no worker failure drops unstarted claims.
+- Safety: attached-attempt evidence contains metadata and a context hash, not duplicated claim text; deleted context remains byte-verifiable from preserved claim pointers.
 - Safety: inconclusive solver results are preserved as findings, not treated as success.
 - Safety: structurally invalid or oversized compile groups perform zero solver work; they degrade to a `logic.invalid_group` finding instead of aborting the run.
 - Safety: spec-combine merge conflicts surface `logic.merge_conflict` findings while surviving claims continue to analysis; no conflicting declaration silently overwrites another (first-wins).
 - Liveness: each LLM call is bounded by retry count (default 3) and universal per-call timeout from run config (default 300s).
+- Liveness: each physical batch reaches a terminal lifecycle state; a created temp directory is cleaned after success, model failure, adapter failure, thrown adapter failure, or partial write failure.
+- Liveness: `timeout`, `invalid_json`, and `schema_validation_error` on an attached batch receive bounded per-claim inline degradation; `spawn_error`, `invalid_files`, and `invalid_timeout` become claim errors without futile fallback; `prompt_too_large` degrades only when every inline prompt fits the adapter limit.
+- Liveness: `maxBatchSize=0` terminates as one unbounded physical batch per semantic group; positive bounds use terminating stable slices.
 - Liveness: each solver query is bounded by per-query timeout (default 30s).
 - Liveness: deeper-check solver fan-out is bounded — pairwise checks cap at `PAIRWISE_SOLVER_CONCURRENCY` (3) plus one completeness query (per-group peak 4; global peak `concurrency × 4`).
 
@@ -995,25 +1019,33 @@ sequenceDiagram
     participant FS as Output Dir
 
     CG->>F: eligible claims (requirements + scenarios)
-    F->>OC: batch formalization prompt (per file)
-    OC-->>F: raw JSON with candidate samples
-    F->>V: validate each sample against logic IR schema
-    alt valid
-        V-->>F: LogicIrClaim
-    else invalid
-        V-->>F: validation error (consume retry)
+    F->>F: build shared semantic groups and stable physical batches
+    alt one claim in physical batch
+        F->>OC: inline formalization prompt
+    else multiple claims in physical batch
+        F->>F: serialize indexed BatchContextFile and hash exact bytes
+        F->>F: mkdtemp(spec-check-batch-) and write batch-context.json (wx, 0600)
+        F->>OC: dedicated attached-context prompt + JSON file
     end
-    F->>OC: retry failed entries individually
-    OC-->>F: additional raw samples
-    F->>V: validate retried samples
-    F-->>CL: FormalizationCandidates (valid samples per claim)
+    OC-->>F: raw JSON with explicit response indexes
+    F->>V: validate phase schema, indexes, and Logic IR entries
+    alt attached model-response failure
+        F->>F: terminal-kind policy; bounded per-claim inline degradation when allowed
+    else attached infrastructure or transport failure
+        F->>F: claim-level errors; no futile fallback
+    else valid
+        V-->>F: index-keyed LogicIrClaim results
+    end
+    F->>F: cleanup temp directory in finally; assemble pointer/hash evidence with terminal cleanup outcome
+    F->>OC: bounded inline calls for additional samples when requested
+    F-->>CL: indexed FormalizationCandidates, errors, findings, and batchAttempts
     CL->>SM: compile pairwise implication queries
     SM-->>CL: SMT-LIB for left ⇒ right and right ⇒ left
     CL->>Z: run implication checks (bounded concurrency)
     Z-->>CL: sat/unsat/timeout/unknown/error per pair
     CL->>CL: BFS connected components on mutual implication
     CL-->>LA: representative per claim from largest stable cluster
-    LA->>SM: compile per-spec combined SMT-LIB
+    LA->>SM: compile one semantic logical-group SMT-LIB
     SM-->>LA: merged assertions with named labels
     LA->>Z: Phase 1 -- check-sat
     alt sat
@@ -1030,15 +1062,20 @@ sequenceDiagram
         Z-->>LA: inconclusive
     end
     LA->>FS: persist .smt2, .stdout.txt, .stderr.txt
-    LA-->>CG: findings + report markdown
+    LA-->>CG: findings + report markdown; batchAttempts -> reporting manifest
 ```
 
 Protocol rules:
 
-- formalization uses a three-phase strategy: batch per file, individual retry for failures, additional samples for clustering
+- formalization uses one semantic grouping path: build the capability/logical-file map once, group requirements and scenarios by the shared exact-string key, and apply solver-specific filtering only before solver grouping
+- first-sample physical batches preserve semantic keys and eligible input order; `maxBatchSize=0` is one unbounded batch per semantic group, while positive values use stable slices
+- single-claim first samples stay inline; multi-claim first samples use a deterministic attached JSON context with explicit original eligible indexes; the prompt body contains no claim bodies
+- terminal attached `timeout`, `invalid_json`, and `schema_validation_error` failures degrade to bounded per-claim inline calls; `spawn_error`, `invalid_files`, and `invalid_timeout` become claim-level errors; `prompt_too_large` degrades only after an all-inline-prompts-fit pre-check
+- the original eligible index is authoritative for response matching and additional-sample merging; `claim.id` is display/evidence metadata only
+- attached context is cleaned in `finally`; attempt evidence includes the terminal cleanup outcome and is persisted to the reporting manifest as pointer/hash metadata without claim text
 - compiled SMT-LIB excludes solver commands until query execution time
 - implication queries contain exactly one `(check-sat)`
-- per-spec logic analysis uses a two-phase strategy: satisfiability first, unsat-core extraction only on contradiction
+- per-logical-group logic analysis uses a two-phase strategy: satisfiability first, unsat-core extraction only on contradiction
 - deeper checks (guard-activation contradiction and completeness-gap detection) run under bounded solver concurrency, not serially
 - solver stdout/stderr, timeout, unknown, and error diagnostics are persisted verbatim
 
@@ -1176,6 +1213,11 @@ Phase completion events include `duration_ms` and summary counts where applicabl
 
 | Failure Mode | Detection | Impact | Mitigation |
 |---|---|---|---|
+| **Semantic grouping drift** | Formalization and solver derive different keys, or a merged capability is split by provenance file | Solver conclusions no longer correspond to formalization evidence | Build the map once; use `selectClaimLogicalFile()` in both paths; preserve exact key semantics and verify parity |
+| **Claim identity drift** | Response matching or additional-sample merging uses optional or duplicate `claim.id` | Samples or formalizations can be assigned to the wrong claim | Thread original eligible indexes through grouping, context, response validation, and sample merging |
+| **Attached context prompt injection** | Claim text or JSON content is interpreted as instructions | Model behavior and formalization attribution can be manipulated | Dedicated prompt marks attached JSON as untrusted; prompt contains no claim bodies; response indexes are explicit and validated |
+| **Batch context leak** | Temp context survives a handled success, failure, or partial write | Full claim text remains on disk and evidence becomes hard to audit | Fresh `mkdtemp` directory, exclusive `0600` write, cleanup in `finally`, and cleanup warning/error classification |
+| **Unreconstructable batch evidence** | Deleted context has no durable identity or byte hash | Reviewers cannot verify what an attached attempt contained | Record ordered eligible indexes, IDs, provenance files, prompt/model metadata, outcome, cleanup, and SHA-256 over exact serialized bytes; do not duplicate claim text |
 | **False negative analysis** | Missed by tool | Undermines core product value | Multi-layer analysis (qualitative + formal + coverage) |
 | **Nondeterministic material divergence** | Repeated runs surface different findings | Weakens trust in dependability cases | Deterministic core; nondeterminism isolated at boundaries |
 | **Evidence loss** | Reports omit provenance or evidence | Weakens findings even when correct | Provenance propagation; evidence preservation invariants |
@@ -1183,8 +1225,10 @@ Phase completion events include `duration_ms` and summary counts where applicabl
 | **`z3` unavailable** | Binary absent or non-executable | Solver phases cannot complete | Fail fast with `DependencyError` at dependency check phase |
 | **Solver timeout/unknown** | No definitive sat/unsat result within 30s | Incomplete formal analysis | Preserve as findings; classify as `uncertain` or `logic.inconclusive` |
 | **Solver error diagnostic** | `(error ...)` lines in Z3 output | Malformed SMT-LIB from formalization | Surface as `logic.solver_error` finding; error overrides any verdict |
-| **Invalid LLM response** | Schema validation failure at adapter boundary | Retry consumed | Bounded retries (default 3); fail hard after exhaustion |
-| **Prompt injection** | Analyzed text elevated to system position | Distorted analysis | `sanitizeForCodeFence()` + fenced prompt construction in all LLM-backed phases |
+| **Invalid LLM response** | Schema validation failure at adapter boundary, including unknown, duplicate, missing, or non-integer attached response indexes | Batch result cannot be safely attributed | Bounded adapter retries; terminal attached `invalid_json`/`schema_validation_error`/`timeout` failures degrade per claim; unmatched indexes never fall through silently |
+| **Terminal infrastructure failure** | Attached call returns `spawn_error`, `invalid_files`, or `invalid_timeout` after adapter retries; temp creation/write fails; adapter throws | A physical batch cannot be safely retried through the same boundary | Return claim-level `FormalizationError` values for affected claims; do not issue futile per-claim fallback; normalize thrown values as `unknown` |
+| **Prompt too large** | Adapter measures instruction prompt over 32,768 UTF-8 bytes | Attached attempt or inline fallback cannot be sent | Degrade only if every per-claim inline prompt fits the same limit; otherwise return claim-level errors without fallback calls |
+| **Prompt injection** | Inline claim text or attached JSON is elevated to system position | Distorted analysis or response attribution | `sanitizeForCodeFence()` for inline content; dedicated attached prompt identifies JSON as untrusted data and excludes claim bodies |
 | **SMT-LIB syntax collision** | User-derived identifiers with reserved chars | Malformed solver inputs | `sanitizeIdentifier()` with hex escaping; reversible mapping comments |
 | **Report Markdown injection** | Untrusted evidence text contains Markdown control syntax | Findings spoof report structure, links, or emphasis | `neutralizeMarkdownInline()` neutralizes links, emphasis, code spans, table pipes, headings, block quotes, list items, and table-cell breakout (`RAE-EVID-RENDER-SAFE`) |
 | **Blind boundary violation** | Original text exposed to code-derived side | Undermines comparison methodology | Structural enforcement; violations surfaced as analysis defects |
@@ -1204,13 +1248,17 @@ Phase completion events include `duration_ms` and summary counts where applicabl
 
 **Process model flaws:** False negatives, nondeterministic divergence between runs, and blind trust in opaque heuristics.
 
-**Coordination failures:** Timeouts, retries, and optional phases can produce confusing results unless phase boundaries and skipped-scope reporting are explicit.
+**Coordination failures:** Timeouts, retries, physical batches, and optional phases can produce confusing results unless phase boundaries, identity attribution, terminal outcomes, and skipped-scope reporting are explicit.
 
 ### 8.5 Control and Recovery
 
 - Validate early: reject invalid paths, malformed config, missing dependencies, and empty input conditions before deeper processing.
+- Validate `samplesPerClaim`, optional `concurrency`, `maxBatchSize`, and shared logical-file map values before any LLM or filesystem work.
+- Apply the adapter error policy only after terminal adapter retries: degrade attached model-response failures (`timeout`, `invalid_json`, `schema_validation_error`) per claim, reject infrastructure failures (`spawn_error`, `invalid_files`, `invalid_timeout`) as claim errors, and pre-check all inline prompts before `prompt_too_large` fallback.
 - Retry bounded external calls with explicit timeouts and fail hard when required evidence-producing phases remain unavailable.
 - Preserve inconclusive states (timeouts, unknown solver responses) as findings rather than treating them as success.
+- Preserve partial formalization: a failed physical batch becomes claim-level errors while sibling batches continue; zero candidates still aborts at the CLI boundary with `PipelineAbortError("FormalizationError", ...)`.
+- Attempt cleanup in `finally`, then persist attached batch evidence with the terminal cleanup outcome; cleanup failure after successful candidates becomes `formalization.temp_cleanup_failed` without discarding those candidates.
 - Treat parser loss, unsupported references, and provenance gaps as surfaced defects rather than invisible degradation.
 - Use atomic writes plus manifest-last semantics so interrupted runs cannot impersonate complete output.
 - No automatic retry policy at the pipeline level: individual phases control their own retry behavior.
@@ -1256,6 +1304,12 @@ Relevant code: [`src/domain/result.ts`](src/domain/result.ts), [`src/domain/erro
 |-------|-----------|--------------|
 | **No analysis proceeds with incomplete catalog** | Catalog validation before deeper phases; `PipelineAbortError` on failure | Contract tests; integration tests |
 | **No claim enters the graph without provenance** | Claim graph builder validation; `detectOrphanClaims()` | Property tests; orphaned-claim detection |
+| **No key drift between formalization and solver** | One `logicalFileByCapability` map is built in `run-cli.ts`; both paths call `selectClaimLogicalFile()`; solver filtering occurs before grouping | Semantic-group contract/property tests; integration oracle; Alloy `parity_by_shared_key` check |
+| **No claim loss in formalization** | Eligible requirement/scenario claims are indexed, grouped once, physically sliced without changing keys, and converted to candidate or claim-level error on every handled path | Grouping completeness, fault-injection, worker-failure, and Alloy `all_claims_reach_terminal_outcome` checks |
+| **No claim-ID identity confusion** | Original eligible index is authoritative for attached response matching and additional-sample merging; IDs are informational metadata | Duplicate-ID and missing-ID contract/property tests |
+| **Attached claim text is never instruction authority** | Inline text is fenced; attached JSON is explicitly untrusted and absent from the prompt body; required response indexes are validated | Prompt negative and adversarial injection tests; Alloy/data-boundary review |
+| **No temp context survives without classification** | Fresh temp directory, exclusive `0600` fixed-file write, cleanup in `finally`, and explicit cleanup outcome in evidence | Lifecycle fault-injection tests; Alloy `cleanup_attempted_after_handled_terminal_states` check |
+| **Attached attempt remains auditable after deletion** | Evidence records ordered indexes, IDs, provenance, prompt/model metadata, outcome, cleanup, and SHA-256 over exact serialized bytes; claim text is pointer-based | Evidence metadata/hash/reconstruction tests; Alloy `evidence_recorded_for_every_attached_attempt` check |
 | **No formalization sample enters clustering without schema validation** | `validateFormalizationSample()` with structural checks on variables, functions, sorts, assertions | Contract tests |
 | **No solver conclusion from unvalidated formalization** | Pipeline ordering enforced by domain types; clustering only accepts validated `LogicIrClaim` | Integration tests |
 | **No blind comparison exposes original requirement text** | Structural boundary enforcement in `derive.ts` and `blind-compare.ts` | Property tests; boundary violation detection |
@@ -1263,7 +1317,7 @@ Relevant code: [`src/domain/result.ts`](src/domain/result.ts), [`src/domain/erro
 | **No manifest written before all outputs finalized** | `invalidateStaleManifest()` at start; `writeManifest()` as final I/O | Integration tests |
 | **No unsupported verdict reaches final report** | Report rendering replaces malformed findings with `reporting.unsupported_verdict` defects | Contract tests |
 | **No shell injection** | Argv-based `execFile` only with `shell: false`; no `exec` in codebase | Codebase invariant |
-| **No writes outside output directory** | `resolveConfinedOutputPath()` with `precondition` assertion | Contract tests |
+| **No durable writes outside output directory** | `resolveConfinedOutputPath()` with `precondition` assertion; ephemeral attached context is created only in a fresh OS-temp directory and is not a durable output artifact | Contract and lifecycle tests |
 | **Solver inputs/outputs always persisted** | Adapter-level persistence via `writeOutputAtomic()` | Integration tests |
 | **Findings never silently removed** | Monotonic `addFindings()` in `RunState` with length postcondition | Property tests |
 | **No archived spec participates in active analysis** | Catalog classification excludes archived paths | Contract tests |
@@ -1274,7 +1328,10 @@ Relevant code: [`src/domain/result.ts`](src/domain/result.ts), [`src/domain/erro
 | Claim | Mechanism | Bound |
 |-------|-----------|-------|
 | **Qualitative analysis completes** | If `opencode` responds with valid output within retry bounds | Bounded retries (default 3) with universal per-call timeout (default 300s) |
-| **Formalization completes** | If `opencode` responds with valid output within retry bounds | Bounded retries per claim; three-phase strategy |
+| **Formalization reaches terminal outcomes** | If each adapter/worker call returns or throws within its bounds | Semantic groups, stable physical batches, bounded adapter retries, bounded per-claim degradation, and claim-level normalization of handled failures |
+| **Attached context reaches cleanup terminal state** | If the process is not forcibly killed after a temp directory is created | `mkdtemp`/write/attach lifecycle followed by `finally` cleanup; cleanup failure is classified and surfaced |
+| **Formalization degrades without futile work** | If a model-response batch failure occurs and every inline fallback prompt fits | `timeout`, `invalid_json`, and `schema_validation_error` degrade per claim; infrastructure kinds do not; `prompt_too_large` uses an explicit UTF-8 pre-check |
+| **Batch evidence remains reconstructable** | If preserved source claims and reporting output remain available | Pointer-based metadata plus deterministic serialization and SHA-256; temp file itself is intentionally ephemeral |
 | **Solver analysis completes** | If `z3` responds within per-query timeout | Per-query timeout (default 30s) |
 | **Cross-side implication completes** | If `z3` responds within per-query timeout | Per-query timeout; pair budget bounds total work (default 200) |
 | **Pairwise deeper-check completes** | If `z3` sub-check queries respond within per-query timeout; bounded fan-out via `mapBounded` | `PAIRWISE_SOLVER_CONCURRENCY` (3) plus one completeness query per group (per-group solver peak 4; global peak `concurrency × 4`); sub-check `timeout`/`unknown` surfaces one aggregated `logic.inconclusive` warning |
@@ -1327,7 +1384,7 @@ graph BT
 
 | Layer | Coverage Focus |
 |---|---|
-| **External formal model** | Merge-structure safety invariants checked in Alloy (`openspec/changes/variable-claim-conflict/specs/formalization-and-logic-analysis/alloy/merge.als`) via manual Analyzer runs |
+| **External formal model** | Semantic grouping, physical batching, lifecycle, and claim-partition invariants checked in the single Alloy module [`openspec/changes/semantic-batching/specs/formalization-and-logic-analysis/alloy/semantic-batching.als`](../openspec/changes/semantic-batching/specs/formalization-and-logic-analysis/alloy/semantic-batching.als) via the repository-pinned Alloy 6.0.2 tool |
 | **Property-based tests** | Parser invariants, claim extraction invariants, clustering determinism, implication classification symmetry, blind boundary enforcement, manifest integrity, run-state monotonicity |
 | **Contract tests** | CLI argument handling, config merge precedence, parser structural checks, EARS classification, LLM schema validation, SMT-LIB sanitization, manifest semantics, boundary violation detection, obligation-aware severity |
 | **Integration tests** | End-to-end analyses with fixture specs plus fake `opencode` and fake `z3` adapters |
@@ -1340,7 +1397,7 @@ graph BT
 
 ### 11.3 Key Test Categories
 
-**Contract tests** validate per-spec requirements:
+**Contract tests** validate capability and logical-group requirements:
 - CLI argv parsing accepts valid flags and rejects invalid arguments
 - Config loading and merge with CLI precedence
 - Catalog discovery, classification, archived exclusion, delta conflict detection
@@ -1411,13 +1468,14 @@ The tool has no end-user authentication or authorization model because it is a l
 | Concern | Design Constraint | Implementation |
 |---|---|---|
 | subprocess invocation | argv-based execution via `execFile`; no shell interpolation | `shell: false` in [`src/adapters/process.ts`](src/adapters/process.ts) |
-| prompt injection | document content fenced in prompts; analyzed spec text never elevated into system-level instruction position | `sanitizeForCodeFence()` in [`src/domain/fence.ts`](src/domain/fence.ts); fenced prompt construction in qualitative and formalization modules |
-| filesystem overreach | all writes confined to `--output` directory; output paths resolved and validated up front | `resolveConfinedOutputPath()` with `precondition` in [`src/adapters/fs.ts`](src/adapters/fs.ts) |
+| prompt injection and attached data boundary | Inline document content is fenced; multi-claim attached JSON is explicitly untrusted data, contains the only claim bodies, and is never elevated into instruction position; the dedicated prompt contains no claim bodies | `sanitizeForCodeFence()` in [`src/domain/fence.ts`](src/domain/fence.ts); `ATTACHED_BATCH_FORMALIZATION_PROMPT` in [`src/domain/prompts/formalization.ts`](src/domain/prompts/formalization.ts) |
+| filesystem overreach | Durable output writes are confined to `--output`; ephemeral attached context is the explicit fresh-OS-temp exception, with fixed naming, exclusive mode, and cleanup | `resolveConfinedOutputPath()` with `precondition` in [`src/adapters/fs.ts`](src/adapters/fs.ts); [`src/domain/formal/batch-transport.ts`](src/domain/formal/batch-transport.ts) |
 | SMT-LIB identifier injection | user-derived identifiers sanitized before writing SMT-LIB artifacts with injective fixed-width-6 escapes | `sanitizeIdentifier()` in [`src/domain/formal/identifiers.ts`](src/domain/formal/identifiers.ts) |
 | report rendering injection | untrusted spec-derived finding text (descriptions, provenance, evidence values, related claim IDs) rendered as inert Markdown data; cannot break out of list/table context or inject links, emphasis, code spans, or block structure | `neutralizeMarkdownInline()` in [`src/domain/reporting/render.ts`](src/domain/reporting/render.ts) (`RAE-EVID-RENDER-SAFE`) |
 | blind comparison boundary | original requirement text never crosses to the code-derived comparison or generation side | Structural enforcement in [`src/domain/code-backwards/derive.ts`](src/domain/code-backwards/derive.ts) and [`src/domain/code-backwards/blind-compare.ts`](src/domain/code-backwards/blind-compare.ts) |
 | subprocess output | captured via stdout/stderr arrays; no ambient shell risk | Chunked accumulation in [`src/adapters/process.ts`](src/adapters/process.ts) |
-| evidence integrity | solver inputs/outputs persisted verbatim; LLM responses preserved with full content | Adapter-level persistence in analysis modules |
+| evidence integrity | Solver inputs/outputs and model responses are preserved; attached attempts persist claim-text pointers, exact-context SHA-256, prompt/model metadata, outcome, and cleanup status without duplicating claim text | `BatchAttemptEvidence` in [`src/domain/formal/batch-transport.ts`](src/domain/formal/batch-transport.ts); `writeManifest()` in [`src/domain/reporting/manifest.ts`](src/domain/reporting/manifest.ts) |
+| temp context hygiene | Attached context is ephemeral, created in a fresh `spec-check-batch-` directory, written as `batch-context.json` with exclusive `0600` permissions, and removed after every handled terminal state | [`src/domain/formal/batch-transport.ts`](src/domain/formal/batch-transport.ts); `finally` cleanup in [`src/domain/formal/formalize.ts`](src/domain/formal/formalize.ts) |
 | output-inside-source prevention | output directory must not be inside source directory | `[CAT-CLI-OUTSRC]` check in [`src/cli/config.ts`](src/cli/config.ts) |
 
 ---
@@ -1432,6 +1490,7 @@ The tool has no end-user authentication or authorization model because it is a l
 | human diagnostics | normalized first-line stderr in the form `[spec-check] <Category>: <message>` with optional indented details |
 | evidence visibility | per-phase reports preserved; provenance, identifiers, and evidence references visible |
 | intermediate artifacts | solver files, clustering inputs, formalization samples, comparison artifacts preserved under output directory |
+| formalization batch attempts | semantic batch key, ordered eligible indexes, IDs, provenance files, prompt/model metadata, outcome, cleanup outcome, and exact-context SHA-256 persisted in the manifest; claim text is reconstructable by pointer and not duplicated | `FormalizationOutput.batchAttempts` -> `writeManifest()` |
 | run completion | manifest presence is the atomic completion marker; stale manifests removed at run start |
 
 ### 14.2 Deployment and Rollout
@@ -1495,11 +1554,14 @@ src/
       qualitative.ts            LLM-backed review passes (2 sequential)
       coverage.ts               deterministic coverage analysis (5 sub-analyses)
     formal/
-      formalize.ts              LLM-backed formalization sampling (3-phase)
-      validate.ts               logic IR schema validation
-      clustering.ts             solver-backed equivalence clustering (BFS)
-      smtlib.ts                 SMT-LIB compilation and sanitization
-      logic-analysis.ts         per-spec solver analysis (2-phase)
+      grouping.ts                shared semantic grouping and physical-batch slicing
+      formalize.ts               LLM-backed semantic-group sampling and degradation
+      batch-transport.ts         attached context serialization, cleanup, and evidence
+      degradation.ts             terminal adapter-error degradation policy
+      validate.ts                logic IR schema validation
+      clustering.ts              solver-backed equivalence clustering (BFS)
+      smtlib.ts                  SMT-LIB compilation and sanitization
+      logic-analysis.ts          per-logical-group solver analysis (2-phase)
       logic-analysis-sexpr.ts   s-expression parsing utilities
       logic-analysis-checks.ts  guard-activation and completeness checks
     code-backwards/
@@ -1528,7 +1590,7 @@ src/
     z3.ts                       solver subprocess with stdin piping, classification
     concurrency.ts              bounded parallel map with deterministic ordering
 test/
-  contract/                     per-spec requirement tests
+   contract/                     per-capability and logical-group contract tests
   property/                     invariant tests over generated inputs
   invariant/                    repository-wide safety rules
   integration/                  multi-phase pipeline tests

@@ -1,5 +1,10 @@
 ## ADDED Requirements
 
+#### Requirement model
+
+The executable Alloy model for the grouping, transport lifecycle, evidence, and
+claim-partition requirements is [`alloy/semantic-batching.als`](alloy/semantic-batching.als).
+
 ### Requirement: Shared Semantic Logical-File Grouping [FLA-SEMANTIC-GROUPING]
 WHEN the spec-check tool groups formalizable claims (claims with `kind` equal to `requirement` or `scenario`) for formalization or for solver analysis, THE spec-check tool SHALL derive each claim's semantic grouping key from one shared key helper, where a capability-bearing claim keys to the mapped merged capability `logicalFile` or to the synthetic fallback `<merged-spec/{capability}>` when unmapped, and a capability-less claim keys to its `claim.provenance.file`. Semantic keys SHALL be compared by exact string equality without normalization, logical groups SHALL be ordered by first occurrence of the semantic key in eligible-claim order, and claims within each logical group SHALL preserve eligible input order.
 

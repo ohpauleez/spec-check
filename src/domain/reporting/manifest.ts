@@ -12,6 +12,7 @@ import { join } from "node:path";
 
 import { writeOutputAtomic, sha256Hex } from "../../adapters/fs.js";
 import { toRelativePath, type OutputDirPath } from "../branded.js";
+import type { BatchAttemptEvidence } from "../formal/batch-transport.js";
 
 /**
  * A single entry in the output manifest describing one rendered artifact.
@@ -36,6 +37,7 @@ export interface ManifestEntry {
  */
 export interface ManifestFile {
   readonly files: readonly ManifestEntry[];
+  readonly formalizationBatchAttempts?: readonly BatchAttemptEvidence[];
 }
 
 /**
@@ -77,6 +79,8 @@ export function buildManifestEntries(
  *
  * @param outputDir - branded absolute directory path where the manifest is written
  * @param entries - manifest entries for all rendered artifacts
+ * @param formalizationBatchAttempts - optional pointer/hash metadata for attached
+ *   formalization attempts; records contain no claim text
  * @returns resolves when the manifest has been written successfully
  *
  * @remarks
@@ -86,6 +90,8 @@ export function buildManifestEntries(
  *
  * Postconditions:
  * - A `manifest.json` file exists in `outputDir` with the serialized entries.
+ * - When supplied, attached formalization evidence is persisted under
+ *   `formalizationBatchAttempts`.
  * - The write is atomic (write-to-temp then rename).
  *
  * Failure modes:
@@ -103,8 +109,14 @@ export function buildManifestEntries(
  * // Writes manifest.json atomically to the output directory
  * ```
  */
-export async function writeManifest(outputDir: OutputDirPath, entries: readonly ManifestEntry[]): Promise<void> {
-  const manifest: ManifestFile = { files: entries };
+export async function writeManifest(
+  outputDir: OutputDirPath,
+  entries: readonly ManifestEntry[],
+  formalizationBatchAttempts?: readonly BatchAttemptEvidence[],
+): Promise<void> {
+  const manifest: ManifestFile = formalizationBatchAttempts === undefined
+    ? { files: entries }
+    : { files: entries, formalizationBatchAttempts };
   await writeOutputAtomic(outputDir, toRelativePath("manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 }
 

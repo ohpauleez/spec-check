@@ -7,6 +7,7 @@
  */
 import type { RunConfig } from "./config.js";
 import type { Finding } from "../domain/findings.js";
+import type { BatchAttemptEvidence } from "../domain/formal/batch-transport.js";
 import type { LogicIrClaim } from "../domain/logic-ir.js";
 import type { ClaimGraphOutput } from "../domain/claim-graph.js";
 import type { PipelineContext, IngestionResult, AnalysisResult } from "./pipeline-types.js";
@@ -33,6 +34,7 @@ import {
   groupRepresentativesBySpec,
   runCodeBackwardsWork,
 } from "./pipeline-helpers.js";
+import { activeMergedSpecsForGrouping, buildLogicalFileByCapability } from "../domain/formal/grouping.js";
 
 export { PipelineAbortError } from "./pipeline-types.js";
 
@@ -99,6 +101,7 @@ export async function runCli(config: RunConfig): Promise<RunState> {
   let srcTraceFindings: readonly Finding[] | undefined;
   let srcLogicFindings: readonly Finding[] | undefined;
   let compareFindings: readonly Finding[] | undefined;
+  let codeBatchAttempts: readonly BatchAttemptEvidence[] | undefined;
 
   if (config.src !== undefined) {
     // Extract known capability names from catalog for informalization suggestions.
@@ -122,10 +125,19 @@ export async function runCli(config: RunConfig): Promise<RunState> {
     srcTraceFindings = srcResult.srcTraceFindings;
     srcLogicFindings = srcResult.srcLogicFindings;
     compareFindings = srcResult.compareFindings;
+    codeBatchAttempts = srcResult.batchAttempts;
   }
 
   // Phase 11: generate reports and manifest.
-  state = await runReportingPhase(config, state, analysis, srcTraceFindings, srcLogicFindings, compareFindings);
+  state = await runReportingPhase(
+    config,
+    state,
+    analysis,
+    srcTraceFindings,
+    srcLogicFindings,
+    compareFindings,
+    codeBatchAttempts,
+  );
 
   return state;
 }
@@ -247,6 +259,15 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
   };
   state = addFindings(state, ctx.mergedSpecs.flatMap((spec) => spec.findings));
 
+  const logicalFileResult = buildLogicalFileByCapability(activeMergedSpecsForGrouping(ctx.mergedSpecs));
+  if (!logicalFileResult.ok) {
+    throw new PipelineAbortError(
+      "ValidationError",
+      logicalFileResult.error.map((error) => error.message).join("; "),
+    );
+  }
+  const logicalFileByCapability = logicalFileResult.value;
+
   // Phase 4: Build claim graph and analyze coverage.
   const claimGraphResult = await runPhaseWithResult("claim-graph", state, async () => {
     return runClaimGraphPhase(ctx);
@@ -277,6 +298,7 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
       model: config.model,
       samplesPerClaim: 1,
       timeoutMs: config.timeoutMs,
+      logicalFileByCapability,
     });
     if (!result.ok) {
       throw new PipelineAbortError("FormalizationError", result.error.map((e) => e.message).join("; "));
@@ -296,11 +318,10 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
 
   // Phase 8: Run formal logic analysis on per-spec combined SMT-LIB.
   const logicResult = await runPhaseWithResult("logic", state, async () => {
-    const nonEmptyMergedSpecs = ctx.mergedSpecs.filter((spec) => spec.requirements.length > 0);
     const groups = groupRepresentativesBySpec(
       formalResult.value.candidates,
       clusterResult.value.representatives,
-      nonEmptyMergedSpecs,
+      logicalFileByCapability,
     );
     const output = await runLogicAnalysis({
       groups,
@@ -317,6 +338,10 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
     clusterResult: clusterResult.value,
     qualResult: qualResult.value,
     logicResult: logicResult.value,
+    formalization: {
+      batchAttempts: formalResult.value.batchAttempts,
+      errors: formalResult.value.errors,
+    },
   };
 }
 
@@ -353,6 +378,7 @@ async function runReportingPhase(
   srcTraceFindings: readonly Finding[] | undefined,
   srcLogicFindings: readonly Finding[] | undefined,
   compareFindings: readonly Finding[] | undefined,
+  codeBatchAttempts: readonly BatchAttemptEvidence[] | undefined,
 ): Promise<RunState> {
   const skippedPhases = computeSkippedPhases(config);
 
@@ -372,7 +398,14 @@ async function runReportingPhase(
       allFindings: state.findings,
       skippedPhases,
     });
-    await writeManifest(config.output, buildManifestEntries([...phaseFiles, summaryFile]));
+    await writeManifest(
+      config.output,
+      buildManifestEntries([...phaseFiles, summaryFile]),
+      [
+        ...(analysis.formalization?.batchAttempts ?? []),
+        ...(codeBatchAttempts ?? []),
+      ],
+    );
   });
 }
 
@@ -416,6 +449,7 @@ async function runSourcePhases(
   readonly srcTraceFindings: readonly Finding[];
   readonly srcLogicFindings: readonly Finding[];
   readonly compareFindings: readonly Finding[];
+  readonly batchAttempts: readonly BatchAttemptEvidence[];
 }> {
   let state = initialState;
 
@@ -463,5 +497,6 @@ async function runSourcePhases(
     srcTraceFindings: [...traceResult.value.traceOutput.findings, ...traceResult.value.taskFindings],
     srcLogicFindings: codeResult.value.logicFindings,
     compareFindings: codeResult.value.compareFindings,
+    batchAttempts: codeResult.value.batchAttempts,
   };
 }

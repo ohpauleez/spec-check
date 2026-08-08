@@ -63,4 +63,26 @@ describe("manifest semantics", () => {
     const removed = await invalidateStaleManifest(toOutputDirPath(outDir));
     expect(removed).toBe(false);
   });
+
+  it("persists typed formalization batch-attempt evidence", async () => {
+    const outDir = await mkdtemp(join(tmpdir(), "spec-check-manifest-evidence-"));
+    const evidence = {
+      schemaVersion: 1 as const,
+      batchKey: "<merged-spec/auth>",
+      claimIndexes: [0, 1],
+      claimIds: ["AUTH-REQ-1", null],
+      provenanceFiles: ["base/auth.md", "delta/auth.md"],
+      contextSha256: "a".repeat(64),
+      promptVariant: "attached-context-v1",
+      model: "test-model",
+      subBatchOrdinal: 0,
+      outcome: { kind: "success" as const },
+      cleanup: "succeeded" as const,
+    };
+    await writeManifest(toOutputDirPath(outDir), [], [evidence]);
+    const manifest = JSON.parse(await readFile(join(outDir, "manifest.json"), "utf8")) as {
+      readonly formalizationBatchAttempts?: readonly typeof evidence[];
+    };
+    expect(manifest.formalizationBatchAttempts).toEqual([evidence]);
+  });
 });

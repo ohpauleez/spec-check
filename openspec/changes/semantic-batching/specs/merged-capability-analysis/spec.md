@@ -1,5 +1,10 @@
 ## ADDED Requirements
 
+#### Requirement model
+
+The shared grouping and merged-capability map requirements are modeled by
+[`../formalization-and-logic-analysis/alloy/semantic-batching.als`](../formalization-and-logic-analysis/alloy/semantic-batching.als).
+
 ### Requirement: Shared Logical-File Grouping Authority [MCA-GROUP-KEY]
 THE spec-check tool SHALL treat merged capability logical-file keys as the shared grouping authority for both requirement claims and scenario claims: the logical-file map SHALL map every provided merged capability to its non-empty `logicalFile`, the map-building step SHALL validate that each provided `spec.logicalFile` is a non-empty string, and scenario-only merged specs (specs with at least one scenario and no requirements) SHALL contribute logical-file map entries. The scenario-only rule is defensive: in the current merge domain model, merged scenarios derive only from requirement blocks, so a scenario-only merged spec cannot be produced; the rule exists to keep grouping correct if the domain model ever admits standalone scenario claims. Capability uniqueness within the map follows from the merge layer's `capabilityOrder` first-occurrence deduplication and is not re-enforced by the map builder.
 

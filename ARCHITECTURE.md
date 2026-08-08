@@ -221,17 +221,26 @@ Prompt text can also be overridden in the config.
 
 - `logic-ir.ts`: typed logic intermediate representation
 - `formal/validate.ts`: schema validation for formalization samples
-- `formal/formalize.ts`: batch and per-claim formalization sampling through `opencode`
+- `formal/grouping.ts`: `activeMergedSpecsForGrouping()`, `buildLogicalFileByCapability()`, shared semantic key selection, eligible-claim grouping, and stable physical-batch slicing
+- `formal/formalize.ts`: semantic-group formalization sampling through `opencode`, indexed response matching, bounded degradation, and terminal candidate/error assembly
+- `formal/batch-transport.ts`: deterministic attached JSON context serialization, SHA-256 hashing, temp-directory lifecycle, cleanup, and pointer-only batch-attempt evidence
+- `formal/degradation.ts`: terminal `OpencodeError.kind` policy for per-claim degradation versus claim-level errors
 - `formal/identifiers.ts`: canonical injective SMT-LIB identifier sanitization (with compatibility re-export from `smtlib.ts`)
 - `formal/smtlib.ts`: SMT-LIB compilation, merge conflict detection, unsat-core label handling, and parse helpers
 - `formal/clustering.ts`: pairwise implication checks and equivalence clustering for alternate formalizations
-- `formal/logic-analysis.ts`: per-spec combined solver analysis, contradiction detection, conditional contradiction checks, and completeness-gap detection
+- `formal/logic-analysis.ts`: per-logical-group combined solver analysis, contradiction detection, conditional contradiction checks, and completeness-gap detection
 - `formal/logic-analysis-checks.ts`: bounded pairwise contradiction and completeness helper checks
 - `formal/logic-analysis-sexpr.ts`: implication parsing and declaration preamble helpers
 
 This area is the formal core of the product.
 
 The key architectural choice is that ambiguity is not hidden. Multiple candidate formalizations are sampled, clustered, and either reduced to a stable representative or surfaced as ambiguity.
+
+Formalization and solver grouping have one production grouping path. `run-cli.ts` builds the capability-to-`logicalFile` map once from merged specs active for grouping (`requirements.length > 0 || scenarios.length > 0`) and passes the same map to both phases. This broader map filter is used only for map construction; claim-graph and solver-input activity filters remain separate. `selectClaimLogicalFile()` assigns a capability-bearing claim to its mapped logical file or the synthetic `<merged-spec/{capability}>` fallback; a capability-less claim uses its verbatim `provenance.file`. Keys use exact string equality without normalization. Solver-specific filtering happens before the shared key is selected, so filtering policy cannot drift into the key helper. Historical file grouping is only an emergent result when semantic keys happen to equal provenance files.
+
+The original zero-based eligible-claim index is the authoritative production identity. It is carried through semantic groups, physical batches, attached context, explicit response `index` validation, candidate/error attribution, and additional-sample merging. `claim.id` remains optional display and evidence metadata and is never sufficient for matching because it may be absent or duplicated.
+
+Multi-claim first-sample batches use an ephemeral schema-versioned JSON context. The dedicated prompt says the attachment is untrusted data, contains no claim bodies, requires one output entry per claim, and requires an explicit matching `index`. Single-claim first samples remain inline. The context lifecycle is `not_created` -> `dir_created` -> `file_written` -> `cleanup_succeeded` or `cleanup_failed`: `mkdtemp()` uses the `spec-check-batch-` prefix, the fixed `batch-context.json` file is written with exclusive `0600` permissions, and cleanup is attempted in `finally`. Batch-attempt evidence records the semantic key, ordered indexes, IDs, provenance files, exact-context SHA-256, prompt/model metadata, outcome, and cleanup status without copying claim text; `batchAttempts` is threaded to the manifest.
 
 If you are changing solver semantics, contradiction severity, SMT generation, or clustering rules, these modules are more important than the CLI layer.
 
@@ -252,9 +261,11 @@ If you are changing `--src` behavior, capability matching, or the relationship b
 #### Reporting
 
 - `reporting/render.ts`: phase report rendering and summary report generation; neutralizes untrusted evidence text into inert Markdown at render time (`RAE-EVID-RENDER-SAFE`)
-- `reporting/manifest.ts`: manifest entry construction, manifest-last completion semantics, and stale-manifest invalidation
+- `reporting/manifest.ts`: manifest entry construction, manifest-last completion semantics, stale-manifest invalidation, and persistence of formalization `batchAttempts` metadata
 
 This is where analysis results turn into repository-facing artifacts.
+
+The manifest's `formalizationBatchAttempts` field contains pointer/hash metadata for attached attempts. It does not retain claim text or temp-file contents.
 
 If you need to change output filenames, report structure, or completion semantics, start here.
 
@@ -406,7 +417,7 @@ Primary code:
 - qualitative review passes
 - formalization
 - clustering
-- combined per-spec solver analysis
+- combined semantic-group solver analysis
 
 Primary code:
 
@@ -454,11 +465,34 @@ These are the most important things to preserve when changing the code.
 - Everything between parsing and reporting should stay inspectable and typed.
 - New subprocess usage should go through `src/adapters/process.ts` or an adapter built on top of it.
 
+### Semantic Grouping Rule
+
+- Formalization and solver grouping use the same `selectClaimLogicalFile()` helper and the same map instance built in `run-cli.ts`.
+- Capability-bearing claims use the merged `logicalFile`, or `<merged-spec/{capability}>` when the capability is not mapped; capability-less claims use `claim.provenance.file` verbatim.
+- Keys are compared by exact string equality. There is no selectable raw-file grouping mode; legacy file grouping is only an emergent equivalence.
+- Groups are ordered by first key occurrence and claims preserve eligible input order. Stable physical slicing never changes a claim's semantic key.
+
+### Identity Rule
+
+- The original eligible index is authoritative for production response matching, output attribution, and additional-sample merging.
+- `claim.id` is optional and may be duplicated. It is retained for display and evidence, but it is not an internal identity key.
+- Attached response entries must carry a known, unique, safe-integer `index`; array position and claim ID are not authoritative.
+
+### Attached Context Rule
+
+- Multi-claim first-sample context is an ephemeral schema-versioned JSON file; single-claim first samples remain inline.
+- Attached JSON is untrusted data, not instructions. Claim bodies are absent from the prompt body and travel only in the attachment.
+- Context files are written in a fresh `spec-check-batch-` directory to fixed `batch-context.json` with UTF-8, exclusive `wx`, and mode `0600`.
+- The lifecycle is `not_created` -> `dir_created` -> `file_written` -> `cleanup_succeeded` or `cleanup_failed`; cleanup is attempted for every created directory in `finally`.
+- Terminal attached `timeout`, `invalid_json`, and `schema_validation_error` failures may degrade to bounded inline calls. `spawn_error`, `invalid_files`, and `invalid_timeout` produce claim-level errors without fallback; `prompt_too_large` degrades only when every inline prompt fits the adapter byte limit.
+- `BatchAttemptEvidence` records pointers and metadata plus the exact-context SHA-256, never claim text, and is persisted through the reporting manifest.
+
 ### Output Confinement Rule
 
 - All generated artifacts must stay under the configured output directory.
 - Output writes should go through `src/adapters/fs.ts`.
 - Manifest presence is the completion marker; manifest absence means the run is incomplete.
+- Ephemeral multi-claim context is the explicit OS-temp exception: it uses a fresh `spec-check-batch-` directory, fixed `batch-context.json`, exclusive `0600` creation, and cleanup before the attempt is returned.
 
 ### Finding Preservation Rule
 

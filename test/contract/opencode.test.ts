@@ -88,6 +88,57 @@ describe("opencode adapter contract", () => {
     expect(mocked).not.toHaveBeenCalled();
   });
 
+  it("requires an explicit index on formalization batch entries", async () => {
+    traceSpec("FLA-ATTACHP-INDEX-VALID");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    vi.mocked(runProcess).mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      stdout: JSON.stringify({
+        type: "text",
+        part: { text: JSON.stringify({ formalizations: [{ claimId: "R1" }] }) },
+      }),
+      stderr: "",
+      timedOut: false,
+    });
+
+    const result = await callOpencode({
+      model: "m",
+      phase: "formalization",
+      prompt: "attached context",
+      retries: 1,
+    });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("schema_validation_error");
+    expect(result.error.message).toContain("requires a safe integer index");
+  });
+
+  it("accepts indexed formalization batch entries", async () => {
+    traceSpec("FLA-ATTACHP-MATCHING");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    vi.mocked(runProcess).mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      stdout: JSON.stringify({
+        type: "text",
+        part: { text: JSON.stringify({ formalizations: [{ index: 0, claimId: "R1" }] }) },
+      }),
+      stderr: "",
+      timedOut: false,
+    });
+
+    const result = await callOpencode({
+      model: "m",
+      phase: "formalization",
+      prompt: "attached context",
+      retries: 1,
+    });
+
+    expect(result.ok).toBe(true);
+  });
+
   it("returns ok with parsed JSON from a single text event", async () => {
     traceSpec("CAT-DEPS-OPENCODE");
     const { runProcess } = await import("../../src/adapters/process.js");

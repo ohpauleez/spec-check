@@ -13,6 +13,7 @@ import { formalizeClaims } from "../formal/formalize.js";
 import { clusterFormalizationSamples } from "../formal/clustering.js";
 import { compileSmtlib } from "../formal/smtlib.js";
 import type { LogicIrClaim } from "../logic-ir.js";
+import type { BatchAttemptEvidence } from "../formal/batch-transport.js";
 
 /**
  * A single formalized claim from the code-derived spec pipeline with its SMT artifact path.
@@ -40,6 +41,7 @@ export interface GeneratedFormalization {
 export interface GeneratedFormalizationOutput {
   readonly claims: readonly GeneratedFormalization[];
   readonly findings: readonly Finding[];
+  readonly batchAttempts: readonly BatchAttemptEvidence[];
 }
 
 /**
@@ -70,6 +72,7 @@ export async function formalizeGeneratedSpecs(input: {
 }): Promise<GeneratedFormalizationOutput> {
   const findings: Finding[] = [];
   const outputClaims: GeneratedFormalization[] = [];
+  const batchAttempts: BatchAttemptEvidence[] = [];
 
   for (const spec of input.generatedSpecs) {
     // Use actual requirement text from informalization (not tautological templates).
@@ -88,6 +91,7 @@ export async function formalizeGeneratedSpecs(input: {
       model: input.model,
       samplesPerClaim: 1,
       timeoutMs: input.timeoutMs,
+      logicalFileByCapability: new Map<string, string>(),
     });
 
     // formalizeClaims always returns ok; check for errors in the output.
@@ -103,6 +107,8 @@ export async function formalizeGeneratedSpecs(input: {
       });
       continue;
     }
+
+    batchAttempts.push(...formalized.value.batchAttempts);
 
     // Record complete failure (no candidates at all) as error-severity finding.
     if (formalized.value.errors.length > 0 && formalized.value.candidates.length === 0) {
@@ -156,5 +162,6 @@ export async function formalizeGeneratedSpecs(input: {
   return {
     claims: outputClaims,
     findings,
+    batchAttempts,
   };
 }

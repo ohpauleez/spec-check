@@ -10,6 +10,7 @@
 import type { Finding } from "../findings.js";
 import { writeOutputAtomic } from "../../adapters/fs.js";
 import { toRelativePath, type OutputDirPath } from "../branded.js";
+import type { BatchAttemptEvidence } from "../formal/formalize.js";
 
 /**
  * Neutralize untrusted Markdown data so evidence renders as inert text.
@@ -265,6 +266,28 @@ export async function writeSummaryReport(input: {
   const content = `${lines.join("\n")}\n`;
   await writeOutputAtomic(input.outputDir, toRelativePath("report_summary.md"), content);
   return { path: "report_summary.md", phase: "summary", content };
+}
+
+/**
+ * Write durable formalization batch attempt evidence as JSON.
+ *
+ * @param input - configuration object with output directory and batch attempts
+ * @returns output descriptor for the written evidence file
+ *
+ * @remarks
+ * Precondition: `outputDir` exists and is writable.
+ * Postcondition: `evidence/formalization-batch-attempts.json` is written with
+ *   a JSON array of {@link BatchAttemptEvidence} records.
+ * Invariant: claim text is never duplicated in the records; only indexes,
+ *   IDs, provenance files, and the context hash are persisted.
+ */
+export async function writeFormalizationEvidence(input: {
+  readonly outputDir: OutputDirPath;
+  readonly batchAttempts: readonly BatchAttemptEvidence[];
+}): Promise<{ readonly path: string; readonly phase: string; readonly content: string }> {
+  const content = `${JSON.stringify(input.batchAttempts, null, 2)}\n`;
+  await writeOutputAtomic(input.outputDir, toRelativePath("evidence/formalization-batch-attempts.json"), content);
+  return { path: "evidence/formalization-batch-attempts.json", phase: "formalization", content };
 }
 
 /**

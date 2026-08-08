@@ -59,7 +59,7 @@ export interface OpencodeError {
   readonly stderr?: string;
 }
 
-const PROMPT_ARG_MAX_BYTES = 32_768;
+export const PROMPT_ARG_MAX_BYTES = 32_768;
 
 /**
  * Call `opencode` with bounded retries and strict JSON validation.

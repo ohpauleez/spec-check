@@ -548,7 +548,7 @@ Relevant code: [`src/domain/findings.ts`](src/domain/findings.ts)
 | **I-6** | Re-running with identical inputs and fixed/cached LLM responses produces identical outputs | Deterministic core between nondeterministic boundaries; deterministic extraction order |
 | **I-7** | All writes remain confined to the configured output directory | `resolveConfinedOutputPath()` with `precondition` assertion in filesystem adapter |
 | **I-8** | No shell interpolation in subprocess calls | `shell: false` in `process.ts`; argv-based `execFile`, never `exec` |
-| **I-9** | Prompt construction fences document content; analyzed spec text is never elevated into system-level instruction position | `sanitizeForCodeFence()` in `fence.ts`; fenced prompt construction in qualitative and formalization modules |
+| **I-9** | Prompt construction fences document content; analyzed spec text is never elevated into system-level instruction position | `sanitizeForCodeFence()` in `fence.ts`; fenced prompt construction in qualitative and formalization modules; attached batch context is explicitly marked as untrusted data, never as instruction text |
 | **I-10** | The resolved run configuration is immutable once analysis begins | CLI layer freezes `RunConfig` before pipeline starts |
 
 ### 5.2 Per-Phase Contracts
@@ -563,7 +563,7 @@ Relevant code: [`src/domain/findings.ts`](src/domain/findings.ts)
 | Claim graph | At least one document parsed with recognizable structure | Every recognized element normalized into a typed claim with provenance | Orphaned claims surfaced as defects |
 | Qualitative analysis | Claim graph has at least one claim; `opencode` available | Schema-validated findings from exactly 2 LLM passes with severity, rationale, provenance, and evidence | `QualitativeError` after bounded retries |
 | Coverage analysis | Claims from proposal/design and at least one spec | Missing coverage, contradictions, unsupported references, and task inconsistencies reported | Deterministic; no external dependencies |
-| Formalization | Eligible claims (requirements and scenarios) exist; `opencode` available | Each claim produces validated logic IR and compiled SMT-LIB artifacts | `FormalizationError` after bounded retries |
+| Formalization | Eligible claims (requirements and scenarios) exist; `opencode` available | Claims share one semantic key helper across formalization and solver grouping; multi-claim first-sample batches use file-attached transport, single-claim batches stay inline; each claim produces validated logic IR, compiled SMT-LIB artifacts, and a `batchAttempts` evidence record per attached attempt | `FormalizationError` or bounded per-claim inline retry after terminal adapter failures; `PromptTooLargeError` handled only when every per-claim inline prompt fits |
 | Clustering | Formalization samples exist; `z3` available | Equivalence clusters with representative selection; ambiguity surfaced as findings | `AdapterError` on solver failure |
 | Logic analysis | Representative formalizations exist; `z3` available | Obligation-aware contradiction, completeness, and gap detection; evidence persisted verbatim | `AdapterError` on solver failure |
 | Source traceability | `--src` provided and readable | Each claim traced to source evidence or gap finding emitted; evidence levels classified | `CatalogError` on unreadable source |
@@ -1256,11 +1256,14 @@ Relevant code: [`src/domain/result.ts`](src/domain/result.ts), [`src/domain/erro
 |-------|-----------|--------------|
 | **No analysis proceeds with incomplete catalog** | Catalog validation before deeper phases; `PipelineAbortError` on failure | Contract tests; integration tests |
 | **No claim enters the graph without provenance** | Claim graph builder validation; `detectOrphanClaims()` | Property tests; orphaned-claim detection |
-| **No formalization sample enters clustering without schema validation** | `validateFormalizationSample()` with structural checks on variables, functions, sorts, assertions | Contract tests |
+| **No formalization sample enters clustering without schema validation** | `validateFormalizationSample()` with structural checks on variables, functions, sorts, assertions; multi-claim responses validated against eligible indexes before attribution | Contract tests |
 | **No solver conclusion from unvalidated formalization** | Pipeline ordering enforced by domain types; clustering only accepts validated `LogicIrClaim` | Integration tests |
 | **No blind comparison exposes original requirement text** | Structural boundary enforcement in `derive.ts` and `blind-compare.ts` | Property tests; boundary violation detection |
 | **No code-derived generation exposes original requirement text** | Generation receives only source evidence and capability name suggestions | Property tests |
 | **No manifest written before all outputs finalized** | `invalidateStaleManifest()` at start; `writeManifest()` as final I/O | Integration tests |
+| **No claim is attributed to the wrong formalization response** | Shared `eligibleIndex` threaded through grouping, attached context, and response validation; `index` field required on every batch entry | Contract tests |
+| **No attached batch context is elevated into instructions** | Attached-context prompt states the JSON file is untrusted data, not instructions; prompt contains no claim bodies | Contract tests; prompt-content negative tests |
+| **No temp context directory leaks after attached attempt** | Lifecycle with `mkdtemp()` prefix, fixed filename, exclusive write, `finally` cleanup; cleanup failure emits warning but preserves candidates | Contract tests; fault-injection tests |
 | **No unsupported verdict reaches final report** | Report rendering replaces malformed findings with `reporting.unsupported_verdict` defects | Contract tests |
 | **No shell injection** | Argv-based `execFile` only with `shell: false`; no `exec` in codebase | Codebase invariant |
 | **No writes outside output directory** | `resolveConfinedOutputPath()` with `precondition` assertion | Contract tests |
@@ -1274,7 +1277,7 @@ Relevant code: [`src/domain/result.ts`](src/domain/result.ts), [`src/domain/erro
 | Claim | Mechanism | Bound |
 |-------|-----------|-------|
 | **Qualitative analysis completes** | If `opencode` responds with valid output within retry bounds | Bounded retries (default 3) with universal per-call timeout (default 300s) |
-| **Formalization completes** | If `opencode` responds with valid output within retry bounds | Bounded retries per claim; three-phase strategy |
+| **Formalization completes** | If `opencode` responds with valid output within retry bounds | Shared semantic grouping; file-attached multi-claim first-sample batches; bounded per-claim inline retry for degradable failures; three-phase strategy; every attempt produces a `BatchAttemptEvidence` record |
 | **Solver analysis completes** | If `z3` responds within per-query timeout | Per-query timeout (default 30s) |
 | **Cross-side implication completes** | If `z3` responds within per-query timeout | Per-query timeout; pair budget bounds total work (default 200) |
 | **Pairwise deeper-check completes** | If `z3` sub-check queries respond within per-query timeout; bounded fan-out via `mapBounded` | `PAIRWISE_SOLVER_CONCURRENCY` (3) plus one completeness query per group (per-group solver peak 4; global peak `concurrency × 4`); sub-check `timeout`/`unknown` surfaces one aggregated `logic.inconclusive` warning |

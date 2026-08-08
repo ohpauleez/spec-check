@@ -17,7 +17,7 @@ import { runQualitativePasses } from "../domain/spec-forward/qualitative.js";
 import { formalizeClaims } from "../domain/formal/formalize.js";
 import { runLogicAnalysis } from "../domain/formal/logic-analysis.js";
 import { writeManifest, buildManifestEntries, invalidateStaleManifest } from "../domain/reporting/manifest.js";
-import { writePhaseReports, writeSummaryReport } from "../domain/reporting/render.js";
+import { writePhaseReports, writeSummaryReport, writeFormalizationEvidence } from "../domain/reporting/render.js";
 import { traceClaimsToSource } from "../domain/code-backwards/trace.js";
 import { analyzeTaskSourceConsistency } from "../domain/tasks-analysis.js";
 import { PipelineAbortError } from "./pipeline-types.js";
@@ -32,6 +32,8 @@ import {
   runMergePhase,
   groupRepresentativesBySpec,
   runCodeBackwardsWork,
+  activeMergedSpecsForGrouping,
+  buildLogicalFileByCapability,
 } from "./pipeline-helpers.js";
 
 export { PipelineAbortError } from "./pipeline-types.js";
@@ -270,6 +272,14 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
   });
   state = addFindings(qualResult.state, [...qualResult.value.pass1Findings, ...qualResult.value.pass2Findings]);
 
+  // Build the shared logical-file map once for grouping authority.
+  const groupingSpecs = activeMergedSpecsForGrouping(ctx.mergedSpecs);
+  const logicalFileResult = buildLogicalFileByCapability(groupingSpecs);
+  if (!logicalFileResult.ok) {
+    throw new PipelineAbortError("FormalizationError", logicalFileResult.error.map((e) => e.message).join("; "));
+  }
+  const logicalFileByCapability = logicalFileResult.value;
+
   // Phase 6: Formalize claims via LLM.
   const formalResult = await runPhaseWithResult("formalization", state, async () => {
     const result = await formalizeClaims({
@@ -277,6 +287,7 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
       model: config.model,
       samplesPerClaim: 1,
       timeoutMs: config.timeoutMs,
+      logicalFileByCapability,
     });
     if (!result.ok) {
       throw new PipelineAbortError("FormalizationError", result.error.map((e) => e.message).join("; "));
@@ -316,6 +327,11 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
     claimGraphResult: claimGraphResult.value,
     clusterResult: clusterResult.value,
     qualResult: qualResult.value,
+    formalResult: {
+      candidates: formalResult.value.candidates,
+      batchAttempts: formalResult.value.batchAttempts,
+      findings: formalResult.value.findings,
+    },
     logicResult: logicResult.value,
   };
 }
@@ -367,12 +383,16 @@ async function runReportingPhase(
       ...(srcLogicFindings === undefined ? {} : { srcLogicReport: srcLogicFindings }),
       ...(compareFindings === undefined ? {} : { compareReport: compareFindings }),
     });
+    const evidenceFile = await writeFormalizationEvidence({
+      outputDir: config.output,
+      batchAttempts: analysis.formalResult.batchAttempts,
+    });
     const summaryFile = await writeSummaryReport({
       outputDir: config.output,
       allFindings: state.findings,
       skippedPhases,
     });
-    await writeManifest(config.output, buildManifestEntries([...phaseFiles, summaryFile]));
+    await writeManifest(config.output, buildManifestEntries([...phaseFiles, evidenceFile, summaryFile]));
   });
 }
 

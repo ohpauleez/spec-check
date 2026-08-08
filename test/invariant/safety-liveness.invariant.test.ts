@@ -127,7 +127,98 @@ describe("safety properties", () => {
     expect(classifyRelationship("inconclusive", "inconclusive")).toBe("uncertain");
   });
 
-  it("SAFE-9: claims with non-standard obligation produce only informational findings", () => {
+  it("SAFE-8: formalization batch evidence is always self-describing", async () => {
+    traceSpec("FLA-EVIDENCE-METADATA");
+    const { callOpencode } = await import("../../src/adapters/opencode.js");
+    const { formalizeClaims } = await import("../../src/domain/formal/formalize.js");
+
+    vi.mocked(callOpencode).mockResolvedValue({
+      ok: true,
+      value: {
+        formalizations: [{
+          claimId: "R1",
+          obligation: "mandatory",
+          variables: [{ name: "S", sort: "Bool" }],
+          functions: [],
+          assertions: [{ id: "A1", expr: "true" }],
+          index: 0,
+        }],
+      },
+    });
+
+    const result = await formalizeClaims({
+      claims: [
+        {
+          id: toClaimId("R1"),
+          kind: "requirement",
+          text: "WHEN x, THE system SHALL y.",
+          obligation: "mandatory",
+          provenance: { file: "spec.md", heading: "R1" },
+          references: [],
+        },
+        {
+          id: toClaimId("R2"),
+          kind: "requirement",
+          text: "WHEN y, THE system SHALL z.",
+          obligation: "mandatory",
+          provenance: { file: "spec.md", heading: "R2" },
+          references: [],
+        },
+      ],
+      model: "test-model",
+      samplesPerClaim: 1,
+      timeoutMs: 300000,
+      logicalFileByCapability: new Map(),
+      concurrency: 1,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    expect(result.value.batchAttempts.length).toBeGreaterThan(0);
+    for (const attempt of result.value.batchAttempts) {
+      expect(attempt.schemaVersion).toBeDefined();
+      expect(attempt.claimIds.length).toBeGreaterThan(0);
+      expect(attempt.provenanceFiles.length).toBe(attempt.claimIds.length);
+      expect(attempt.promptVariant).toBe("attached-batch-v1");
+      expect(attempt.outcome.kind).toMatch(/^(?:success|failure)$/u);
+      expect(attempt.contextSha256).toMatch(/^[a-f0-9]{64}$/u);
+    }
+  });
+
+  it("SAFE-9: no formalization batch loses the original claim ordering", async () => {
+    traceSpec("FLA-SEMGRP-ORDER");
+    const { callOpencode } = await import("../../src/adapters/opencode.js");
+    const { formalizeClaims } = await import("../../src/domain/formal/formalize.js");
+
+    vi.mocked(callOpencode).mockResolvedValue({
+      ok: true,
+      value: {
+        formalizations: [
+          { claimId: "R1", obligation: "mandatory", variables: [{ name: "S", sort: "Bool" }], functions: [], assertions: [{ id: "A1", expr: "true" }], index: 0 },
+          { claimId: "R2", obligation: "mandatory", variables: [{ name: "S", sort: "Bool" }], functions: [], assertions: [{ id: "A2", expr: "true" }], index: 1 },
+        ],
+      },
+    });
+
+    const result = await formalizeClaims({
+      claims: [
+        { id: toClaimId("R1"), kind: "requirement", text: "first.", obligation: "mandatory", provenance: { file: "spec.md", heading: "R1" }, references: [] },
+        { id: toClaimId("R2"), kind: "requirement", text: "second.", obligation: "mandatory", provenance: { file: "spec.md", heading: "R2" }, references: [] },
+      ],
+      model: "test-model",
+      samplesPerClaim: 1,
+      timeoutMs: 300000,
+      logicalFileByCapability: new Map(),
+      concurrency: 1,
+    });
+
+    expect(result.ok).toBe(true);
+    if (!result.ok) return;
+    const ids = result.value.candidates.map((c) => c.claim.id);
+    expect(ids).toEqual(["R1", "R2"]);
+  });
+
+  it("SAFE-10: claims with non-standard obligation produce only informational findings", () => {
     traceSpec("CGC-OBLIGATION-LEVEL", "CGC-OBLIG-INFO");
     const spec: ParsedSpec = {
       file: "spec.md",
@@ -204,6 +295,7 @@ describe("liveness properties", () => {
       model: "test-model",
       samplesPerClaim: 1,
       timeoutMs: 300000,
+      logicalFileByCapability: new Map(),
     });
 
     expect(result.ok).toBe(true);

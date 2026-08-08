@@ -9,6 +9,11 @@ import type { RunConfig } from "./config.js";
 import type { Finding } from "../domain/findings.js";
 import type { ClaimGraphOutput } from "../domain/claim-graph.js";
 import type { LogicIrClaim } from "../domain/logic-ir.js";
+import {
+  activeMergedSpecsForGrouping as activeMergedSpecsForGroupingImpl,
+  buildLogicalFileByCapability as buildLogicalFileByCapabilityImpl,
+  selectClaimLogicalFile,
+} from "../domain/formal/grouping.js";
 import type { SourceTrace } from "../domain/code-backwards/trace.js";
 import type { FormalizationCandidate } from "../domain/formal/formalize.js";
 import type { SpecClaimGroup } from "../domain/formal/logic-analysis.js";
@@ -342,6 +347,9 @@ export async function runClusteringPhase(
  *
  * Failure modes: none — pure computation over in-memory data, cannot throw.
  */
+export { activeMergedSpecsForGroupingImpl as activeMergedSpecsForGrouping };
+export { buildLogicalFileByCapabilityImpl as buildLogicalFileByCapability };
+
 export function groupRepresentativesBySpec(
   candidates: readonly FormalizationCandidate[],
   representatives: readonly LogicIrClaim[],
@@ -349,23 +357,21 @@ export function groupRepresentativesBySpec(
 ): SpecClaimGroup[] {
   const groups = new Map<string, { claims: LogicIrClaim[]; logicalFile: string; artifactKey: string }>();
   const order: string[] = [];
-  const logicalFileByCapability = new Map<string, string>();
+  let logicalFileByCapability: ReadonlyMap<string, string> = new Map<string, string>();
   if (mergedSpecs !== undefined) {
-    for (const spec of mergedSpecs) {
-      logicalFileByCapability.set(spec.capability, spec.logicalFile);
+    const mapResult = buildLogicalFileByCapabilityImpl(activeMergedSpecsForGroupingImpl(mergedSpecs));
+    if (mapResult.ok) {
+      logicalFileByCapability = mapResult.value;
     }
   }
 
   for (let i = 0; i < representatives.length; i++) {
     const representative = representatives[i]!;
     const candidate = candidates[i]!;
-    const capability = candidate.claim.capability;
-    if (mergedSpecs !== undefined && capability === undefined) {
+    const logicalFile = selectClaimLogicalFile(candidate.claim, logicalFileByCapability);
+    if (mergedSpecs !== undefined && candidate.claim.capability === undefined) {
       continue;
     }
-    const logicalFile = capability === undefined
-      ? candidate.claim.provenance.file
-      : (logicalFileByCapability.get(capability) ?? `<merged-spec/${capability}>`);
     const groupKey = logicalFile;
     let group = groups.get(groupKey);
     if (group === undefined) {

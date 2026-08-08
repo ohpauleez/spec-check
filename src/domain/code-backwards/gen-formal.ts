@@ -83,11 +83,13 @@ export async function formalizeGeneratedSpecs(input: {
       capability: toCapabilityName(spec.capability),
     }));
 
+    const syntheticCapabilityMap = new Map<string, string>([[spec.capability, `<merged-spec/${spec.capability}>`]]);
     const formalized = await formalizeClaims({
       claims: syntheticClaims,
       model: input.model,
       samplesPerClaim: 1,
       timeoutMs: input.timeoutMs,
+      logicalFileByCapability: syntheticCapabilityMap,
     });
 
     // formalizeClaims always returns ok; check for errors in the output.

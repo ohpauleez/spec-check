@@ -9,6 +9,8 @@ import {
 import type { Claim } from "../../src/domain/claim-graph.js";
 import { toClaimId } from "../../src/domain/branded.js";
 
+const EMPTY_LOGICAL_FILE_MAP = new Map<string, string>();
+
 vi.mock("../../src/adapters/opencode.js", () => ({
   callOpencode: vi.fn(),
 }));
@@ -51,6 +53,7 @@ describe("formalize contract", () => {
     const result = await formalizeClaims({
       claims: [makeClaim()],
       model: "test-model",
+      logicalFileByCapability: EMPTY_LOGICAL_FILE_MAP,
       samplesPerClaim: 2,
       timeoutMs: 400000,
     });
@@ -77,6 +80,7 @@ describe("formalize contract", () => {
     const result = await formalizeClaims({
       claims: [makeClaim()],
       model: "test-model",
+      logicalFileByCapability: EMPTY_LOGICAL_FILE_MAP,
       samplesPerClaim: 1,
       timeoutMs: 300000,
     });
@@ -99,6 +103,7 @@ describe("formalize contract", () => {
     const result = await formalizeClaims({
       claims: [makeClaim()],
       model: "test-model",
+      logicalFileByCapability: EMPTY_LOGICAL_FILE_MAP,
       samplesPerClaim: 1,
       timeoutMs: 300000,
     });
@@ -121,6 +126,7 @@ describe("formalize contract", () => {
     const result = await formalizeClaims({
       claims: [makeClaim()],
       model: "test-model",
+      logicalFileByCapability: EMPTY_LOGICAL_FILE_MAP,
       samplesPerClaim: 1,
       timeoutMs: 300000,
     });
@@ -146,6 +152,7 @@ describe("formalize contract", () => {
         makeClaim({ kind: "assumption", id: toClaimId("A1") }),
       ],
       model: "test-model",
+      logicalFileByCapability: EMPTY_LOGICAL_FILE_MAP,
       samplesPerClaim: 1,
       timeoutMs: 300000,
     });
@@ -170,29 +177,30 @@ describe("formalize contract", () => {
     traceSpec("FLA-FORMALIZE-CLAIMS", "FLA-FORMAL-PARTIAL");
     const { callOpencode } = await import("../../src/adapters/opencode.js");
     const mocked = vi.mocked(callOpencode);
-    // Put claims in different files so they go to separate batches with concurrency: 1.
-    // Batch 1 (R1) succeeds via batch response; batch 2 (R2) fails entirely.
+    // Put claims in the same file so they share one multi-claim attached batch.
+    // The batch response includes only R1; R2 falls back to inline retry and fails.
     let callCount = 0;
     mocked.mockImplementation(async () => {
       callCount += 1;
       if (callCount === 1) {
-        // Batch call for R1's file: valid batch response
+        // Multi-claim batch: valid response for R1 only
         return { ok: true, value: { formalizations: [makeValidSample("R1").sample] } };
       }
       if (callCount === 2) {
         // Additional sample for R1 (samplesPerClaim: 2)
         return { ok: true, value: makeValidSample("R1") };
       }
-      // Batch call and fallback for R2's file: all fail
+      // Fallback for R2 and any further attempts: all fail
       return { ok: false, error: { kind: "spawn_error", phase: "formalization", message: "binary not found" } };
     });
 
     const result = await formalizeClaims({
       claims: [
         makeClaim({ id: toClaimId("R1"), provenance: { file: "spec-a.md", heading: "R1" } }),
-        makeClaim({ id: toClaimId("R2"), provenance: { file: "spec-b.md", heading: "R2" } }),
+        makeClaim({ id: toClaimId("R2"), provenance: { file: "spec-a.md", heading: "R2" } }),
       ],
       model: "test-model",
+      logicalFileByCapability: EMPTY_LOGICAL_FILE_MAP,
       samplesPerClaim: 2,
       timeoutMs: 300000,
       concurrency: 1,

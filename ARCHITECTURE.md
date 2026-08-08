@@ -221,7 +221,9 @@ Prompt text can also be overridden in the config.
 
 - `logic-ir.ts`: typed logic intermediate representation
 - `formal/validate.ts`: schema validation for formalization samples
-- `formal/formalize.ts`: batch and per-claim formalization sampling through `opencode`
+- `formal/formalize.ts`: shared semantic grouping, file-attached transport, and first-sample/per-claim/retry formalization through `opencode`
+- `formal/grouping.ts`: shared semantic key helpers used by both formalization and solver analysis (`selectClaimLogicalFile`, `groupBySemanticKey`, `splitPhysicalBatches`)
+- `formal/transport.ts`: deterministic batch-context construction, byte-stable serialization, temp directory lifecycle helpers, and dedicated attached-context prompt assembly
 - `formal/identifiers.ts`: canonical injective SMT-LIB identifier sanitization (with compatibility re-export from `smtlib.ts`)
 - `formal/smtlib.ts`: SMT-LIB compilation, merge conflict detection, unsat-core label handling, and parse helpers
 - `formal/clustering.ts`: pairwise implication checks and equivalence clustering for alternate formalizations
@@ -230,6 +232,13 @@ Prompt text can also be overridden in the config.
 - `formal/logic-analysis-sexpr.ts`: implication parsing and declaration preamble helpers
 
 This area is the formal core of the product.
+
+Key identity, ordering, and evidence rules:
+
+1. Semantic grouping is shared: `selectClaimLogicalFile()` derives every eligible claim's key from its capability (mapped to a merged-spec `logicalFile` or the synthetic `<merged-spec/{capability}>` fallback) or from its provenance file when it has no capability. This same helper is used for formalization batches and solver groups.
+2. Original eligible indexes are authoritative: they are assigned before grouping, threaded through sub-batching and context construction, and used to match batch formalization responses back to claims.
+3. Multi-claim first-sample batches use a temp-attached context file (`batch-context.json` in a `mkdtemp("spec-check-batch-XXXXXX")` directory), a dedicated untrusted-data prompt, and explicit `index` fields in the response. Single-claim first-sample batches stay inline.
+4. Every attached attempt produces a `BatchAttemptEvidence` record with claim-text pointers (eligible indexes, IDs, provenance files), a SHA-256 over the exact serialized context bytes, and the temp lifecycle outcome.
 
 The key architectural choice is that ambiguity is not hidden. Multiple candidate formalizations are sampled, clustered, and either reduced to a stable representative or surfaced as ambiguity.
 
@@ -470,6 +479,22 @@ These are the most important things to preserve when changing the code.
 - Every meaningful finding should carry provenance and evidence.
 - Parser modules preserve unmatched lines rather than silently dropping them.
 - Unsupported conclusions should be suppressed into explicit reporting defects rather than rendered as if trustworthy.
+- Batch formalization evidence uses claim-text pointers (`eligibleIndex`, `claimIds`, `provenanceFiles`, and a SHA-256 over the exact attached context bytes) so the record survives even if the temp context file is cleaned up.
+
+### Semantic Grouping Parity Rule
+
+- Formalization grouping and solver grouping must derive the same semantic key for the same claim inputs.
+- Use the shared helpers in `src/domain/formal/grouping.ts` for both phases rather than maintaining parallel grouping logic.
+
+### Identity and Ordering Rule
+
+- Eligible indexes, not `claim.id`, are the authoritative identity during batch formalization. Claims may have missing or duplicate IDs.
+- Sub-batching preserves eligible input order and never changes a claim's semantic key.
+
+### Temp Context Lifecycle Rule
+
+- Multi-claim attached batches create a `spec-check-batch-` temp directory, write `batch-context.json` exclusively with `wx` and mode `0o600`, and attempt cleanup in a `finally` path.
+- Cleanup failure after a successful model response must not discard results; it is surfaced as a warning `Finding`.
 
 ### Blind Comparison Rule
 

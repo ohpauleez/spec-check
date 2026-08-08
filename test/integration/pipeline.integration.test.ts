@@ -252,6 +252,7 @@ describe("end-to-end integration", () => {
         references: [],
       }],
       model: "test-model",
+      logicalFileByCapability: new Map(),
       samplesPerClaim: 2,
       timeoutMs: 300000,
     });

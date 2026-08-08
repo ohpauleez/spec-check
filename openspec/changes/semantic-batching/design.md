@@ -451,11 +451,11 @@ Each safety and liveness claim in this design maps to concrete evidence:
 
 | Property | Evidence |
 |---|---|
-| No key drift | Contract grouping parity test; integration oracle; Alloy embedded check (`parity_by_shared_key`) |
-| No eligible claim loss | Property grouping completeness; fault-injection terminal-outcome tests; Alloy embedded check (`grouping_is_partition`) |
+| No key drift | Contract grouping parity test; integration oracle; Alloy model check (`parity_by_shared_key`) |
+| No eligible claim loss | Property grouping completeness; fault-injection terminal-outcome tests; Alloy model check (`grouping_partitioned`) |
 | Key determinism | Property key determinism; contract exact group tests; Alloy embedded check (`parity_by_shared_key`) |
 | Group and claim ordering | Property grouping-order tests only (first-occurrence group order, eligible-order claim order); not covered by the Alloy model (ordering requires sequences, deliberately out of model scope) |
-| Deterministic sub-batching | Property sub-batch invariant |
+| Deterministic sub-batching | Property sub-batch invariant; Alloy model check (`batches_within_one_group`) |
 | Claim provenance immutability | Property provenance immutability |
 | Attached text not treated as instructions | Dedicated prompt negative tests and adversarial prompt-injection test |
 | Temp cleanup after handled terminal states | Alloy model check (`cleanup_attempted_after_handled_terminal_states`); fault-injection cleanup tests per terminal state |
@@ -478,18 +478,15 @@ The new safety and liveness claims introduced by this change are also registered
 
 ### Formal Model
 
-The temp context file lifecycle, attempt outcomes, degradation policy, and claim-partition properties are modeled and machine-checked in Alloy 6 at [`specs/formalization-and-logic-analysis/alloy/semantic-batching.als`](specs/formalization-and-logic-analysis/alloy/semantic-batching.als) (validated with `tooling/alloy_v6.0.2.jar`). The model verifies, with no counterexamples within scope:
+All modeling for this change lives in one Alloy 6 module: [`specs/formalization-and-logic-analysis/alloy/semantic-batching.als`](specs/formalization-and-logic-analysis/alloy/semantic-batching.als) (validated with `tooling/alloy_v6.0.2.jar`: 9 run witnesses SAT, 16 checks UNSAT). The spec deltas reference the module from `#### Requirement model` pointers; no Alloy is embedded in the spec.md files.
 
-- cleanup is attempted after every handled terminal state (liveness, under an explicit fairness premise mirroring the implementation's `finally`);
-- cleanup is terminal (a context file never survives a completed cleanup);
-- cleanup failure after success never discards candidates;
-- evidence is recorded for every attached attempt;
-- every eligible claim eventually reaches a candidate or claim error (liveness, under fairness);
-- claim outcomes are stable once assigned and never span two batches.
+The module has two layers. Modeling discipline: **facts are used only for genuinely universal domain truths** (key-space construction, partition-by-key, transport arity, merge-layer capability uniqueness); **conditional claims are predicates**, and each `check` shows the property holds within the predicate's stated conditions.
 
-The grouping and grouping-map structural invariants are modeled as embedded `#### Requirement model` fragments in the spec deltas: semantic grouping partition/parity/fallback totality in `specs/formalization-and-logic-analysis/spec.md` (under `FLA-SEMANTIC-GROUPING`), and grouping-map completeness/coverage in `specs/merged-capability-analysis/spec.md` (under `MCA-GROUP-KEY`). Both fragments are validated with the same Alloy JAR (all assertions UNSAT, sanity witnesses SAT).
+- **Structural layer** — semantic grouping and the grouping map. Checks: `grouping_partitioned`, `parity_by_shared_key`, `kind_irrelevant`, `fallback_total` (grouping, unconditional under the partition construction); `grouping_map_covers_solver_inputs` (under `scenariosImplyRequirements` and `mapCoversActiveSpecs`), `scenario_only_specs_mapped` (under `mapCoversActiveSpecs` alone — load-bearing in a future domain, not vacuous), `empty_specs_excluded` (under `mapCoversActiveSpecs`).
+- **Temporal layer** — temp context lifecycle, attempt outcomes, degradation, claim partition. Safety checks (unconditional): `resolved_attached_batches_created_dir`, `cleanup_is_terminal`, `cleanup_failure_preserves_candidates`, `evidence_recorded_for_every_attached_attempt`, `outcomes_are_stable`, `no_cross_batch_outcomes`. Liveness checks (under explicit fairness predicates): `cleanup_attempted_after_handled_terminal_states` under `cleanupFairness`, `all_claims_reach_terminal_outcome` under `progressFairness`.
+- **Cross-layer invariant**: `batches_within_one_group` — every physical batch lies within exactly one logical group (sub-batching never crosses groups). Folding the fragments into one module made this link between the structural grouping and the temporal batches expressible; it was previously only implicit.
 
-One modeling insight worth recording: "cleanup is always attempted" is genuinely a *liveness* property, not a safety invariant — without a fairness premise (no infinite stuttering of an enabled cleanup event), a trace can reach a terminal resolution and then stutter forever without cleaning up. The implementation discharges this premise via cleanup in `finally`; the model states it explicitly rather than assuming it.
+One modeling insight worth recording: "cleanup is always attempted" is genuinely a *liveness* property, not a safety invariant — without a fairness premise (no infinite stuttering of an enabled cleanup event), a trace can reach a terminal resolution and then stutter forever without cleaning up. The implementation discharges this premise via cleanup in `finally`; the model states it explicitly (`cleanupFairness`) rather than assuming it.
 
 ### Pipeline Integration Verification
 

@@ -143,7 +143,7 @@ WHEN a multi-claim attached batch is issued, THE prompt SHALL state that each ou
 **Postcondition:** Response-to-claim attribution is explicit; array position alone and `claim.id` are never authoritative.
 
 #### Scenario: Response Index Validated [FLA-ATTACHP-INDEX-VALID]
-IF a returned batch entry carries an `index` that is missing, duplicated, or does not match any attached claim index for that physical batch, THEN THE spec-check tool SHALL treat the response as a `schema_validation_error` failure and SHALL degrade to per-claim inline retry.
+IF a returned batch entry carries an `index` that is missing, duplicated, or does not match any attached claim index for that physical batch, or the number of returned entries differs from the attached claim count, THEN THE spec-check tool SHALL treat the response as a `schema_validation_error` failure and SHALL degrade to per-claim inline retry.
 
 **Postcondition:** Misattributed responses become detectable schema failures, never silent corruption.
 

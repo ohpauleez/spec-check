@@ -40,9 +40,12 @@ import { validateFormalizationSample } from "./validate.js";
 
 const FORMALIZATION_CONCURRENCY_DEFAULT = 3;
 // Fallback workers execute inside worker slots of the outer
-// `mapBounded(batches, concurrency)` pool, so total in-flight adapter calls
-// stay bounded by the configured budget; 2 pipelines one claim's retry with
-// the next claim's first attempt without adding adapter pressure.
+// `mapBounded(batches, concurrency)` pool. A degraded batch can therefore run
+// up to INLINE_FALLBACK_CONCURRENCY adapter calls within a single outer slot,
+// so the worst-case in-flight bound is concurrency * INLINE_FALLBACK_CONCURRENCY
+// on the degradation path and `concurrency` otherwise. The value 2 pipelines
+// one claim's retry with the next claim's first attempt while keeping the
+// multiplier a fixed constant, never the batch size.
 const INLINE_FALLBACK_CONCURRENCY = 2;
 const ADAPTER_RETRIES = 3;
 const MAX_BATCH_SIZE_DEFAULT = 0;
@@ -796,8 +799,10 @@ function readBatchEntryIndex(entry: unknown): number | undefined {
  * are partitioned one per worker, each claim has a single writer, and results
  * are joined by eligible index, so any interleaving of workers yields the
  * same candidates and errors. These workers run inside slots of the outer
- * `mapBounded(batches, concurrency)` pool, so a degraded batch cannot amplify
- * adapter load beyond the configured budget. A worker that throws is caught
+ * `mapBounded(batches, concurrency)` pool, so a degraded batch amplifies
+ * adapter load by at most the fixed factor `INLINE_FALLBACK_CONCURRENCY`:
+ * the worst-case in-flight bound is `concurrency * INLINE_FALLBACK_CONCURRENCY`,
+ * never scaled by batch size. A worker that throws is caught
  * per claim and normalized to an error, so one bad claim cannot discard the
  * other claims' results. Postcondition: every input claim contributes exactly
  * one candidate or one error. Inputs are never mutated.

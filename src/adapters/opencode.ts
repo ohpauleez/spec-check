@@ -758,6 +758,14 @@ function validatePhaseSchema(
           message: "expected every formalizations entry to be an object with a safe integer index",
         });
       }
+      const index = entryRecord.index;
+      if (typeof index === "number" && index < 0) {
+        return err({
+          kind: "schema_validation_error",
+          phase,
+          message: "expected every formalizations entry index to be a non-negative safe integer",
+        });
+      }
     }
   }
 

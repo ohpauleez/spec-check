@@ -378,7 +378,7 @@ WHEN the spec-check tool attaches source files for code-derived generation, THE 
 **Postcondition:** File-based transport preserves the same blind boundary as inline transport.
 
 ##### Evidence
-- Implementation: [derive.ts:319 buildInformalizationPrompt](/src/domain/code-backwards/derive.ts#L319)
+- Implementation: [derive.ts:330 buildInformalizationPrompt](/src/domain/code-backwards/derive.ts#L330)
 - Test: [derive.test.ts:109 generated output contains source-derived text only (no original requirements)](/test/contract/derive.test.ts#L109)
 
 ### Requirement: Generate Code-Derived Specifications From Source [STC-GEN-SPECS]
@@ -406,7 +406,7 @@ WHEN generating code-derived specifications, THE spec-check tool SHALL provide t
 **Postcondition:** The LLM receives structural metadata (capability names only) that improves naming alignment without violating the blind boundary.
 
 ##### Evidence
-- Implementation: [derive.ts:319 buildInformalizationPrompt](/src/domain/code-backwards/derive.ts#L319)
+- Implementation: [derive.ts:330 buildInformalizationPrompt](/src/domain/code-backwards/derive.ts#L330)
 - Test: [derive.test.ts:246 includes suggested capability names in LLM prompt when provided](/test/contract/derive.test.ts#L246)
 
 #### Scenario: EARS Preference With Structured Fallback [STC-GEN-EARS]
@@ -415,7 +415,7 @@ WHEN code semantics support EARS decomposition, THE spec-check tool SHALL genera
 **Postcondition:** Generated specs prefer EARS format but do not force unnatural EARS encoding at the expense of accuracy.
 
 ##### Evidence
-- Implementation: [derive.ts:96 deriveSpecsFromSource](/src/domain/code-backwards/derive.ts#L96), [derive.ts:540 formatCapabilityMarkdown](/src/domain/code-backwards/derive.ts#L540)
+- Implementation: [derive.ts:96 deriveSpecsFromSource](/src/domain/code-backwards/derive.ts#L96), [derive.ts:551 formatCapabilityMarkdown](/src/domain/code-backwards/derive.ts#L551)
 - Test: [derive.test.ts:57 produces EARS-preferring markdown from LLM informalization response](/test/contract/derive.test.ts#L57)
 
 #### Scenario: Insufficient Source Evidence [STC-GEN-INSUFFICIENT]
@@ -433,10 +433,10 @@ WHEN generating code-derived specifications, THE spec-check tool SHALL NOT provi
 **Postcondition:** Code-derived specs reflect what the code actually guarantees rather than restating original intent.
 
 ##### Evidence
-- Implementation: [derive.ts:319 buildInformalizationPrompt](/src/domain/code-backwards/derive.ts#L319)
+- Implementation: [derive.ts:330 buildInformalizationPrompt](/src/domain/code-backwards/derive.ts#L330)
 - Test: [derive.test.ts:109 generated output contains source-derived text only (no original requirements)](/test/contract/derive.test.ts#L109)
 - Test (property): [code-derived.property.test.ts:12 formalization prompts never include original proposal/design text verbatim](/test/property/code-derived.property.test.ts#L12)
-- Test (integration): [global.invariant.test.ts:160 INV-14: code-derived spec generation never receives original requirement text](/test/invariant/global.invariant.test.ts#L160)
+- Test (integration): [global.invariant.test.ts:161 INV-14: code-derived spec generation never receives original requirement text](/test/invariant/global.invariant.test.ts#L161)
 
 #### Scenario: Restrict Unsupported Evidence [STC-GEN-SCOPE]
 IF a candidate code-derived guarantee depends on evidence outside the provided source scope, THEN THE spec-check tool SHALL exclude that unsupported evidence and SHALL surface the resulting limitation.
@@ -519,8 +519,8 @@ WHEN formalization sampling for a code-derived claim produces an equivalence clu
 **Postcondition:** Code-derived claims have representative formalizations suitable for cross-side implication analysis.
 
 ##### Evidence
-- Implementation: [gen-formal.ts:64 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L64)
-- Test: [gen-formal.test.ts:40 applies formalizeClaims with schema validation (same pipeline as specs-forward)](/test/contract/gen-formal.test.ts#L40), [gen-formal.test.ts:65 applies clustering with stability threshold 0.6](/test/contract/gen-formal.test.ts#L65)
+- Implementation: [gen-formal.ts:71 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L71)
+- Test: [gen-formal.test.ts:58 applies formalizeClaims with schema validation (same pipeline as specs-forward)](/test/contract/gen-formal.test.ts#L58), [gen-formal.test.ts:83 applies clustering with stability threshold 0.6](/test/contract/gen-formal.test.ts#L83)
 
 #### Scenario: Ambiguous Code-Derived Formalization [STC-FORMAL-AMBIG]
 IF no equivalence cluster meets the stability threshold for a code-derived claim, THEN THE spec-check tool SHALL emit an ambiguity finding and SHALL preserve the distinct interpretations as evidence.
@@ -528,8 +528,8 @@ IF no equivalence cluster meets the stability threshold for a code-derived claim
 **Postcondition:** Ambiguity in code-derived meaning is surfaced rather than hidden behind an arbitrary selection.
 
 ##### Evidence
-- Implementation: [gen-formal.ts:64 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L64)
-- Test: [gen-formal.test.ts:115 with single sample clustering never produces ambiguity finding](/test/contract/gen-formal.test.ts#L115)
+- Implementation: [gen-formal.ts:71 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L71)
+- Test: [gen-formal.test.ts:133 with single sample clustering never produces ambiguity finding](/test/contract/gen-formal.test.ts#L133)
 
 #### Scenario: Code-Derived Formalization Failure [STC-FORMAL-FAIL]
 IF all formalization samples for a code-derived claim are invalid after bounded retries, THEN THE spec-check tool SHALL record the failure as an error-severity finding for that capability and SHALL continue with remaining capabilities. THE tool SHALL NOT abort the entire pipeline for a per-capability formalization failure.
@@ -537,8 +537,8 @@ IF all formalization samples for a code-derived claim are invalid after bounded 
 **Postcondition:** Per-capability formalization failures are surfaced as error findings; remaining capabilities proceed to cross-side analysis.
 
 ##### Evidence
-- Implementation: [gen-formal.ts:64 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L64)
-- Test: [gen-formal.test.ts:138 records error finding on formalization failure (all samples invalid)](/test/contract/gen-formal.test.ts#L138)
+- Implementation: [gen-formal.ts:71 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L71)
+- Test: [gen-formal.test.ts:156 records error finding on formalization failure (all samples invalid)](/test/contract/gen-formal.test.ts#L156)
 
 #### Scenario: Universal LLM Timeout For Code-Derived Formalization [STC-FORMAL-TIMEOUT]
 WHEN the spec-check tool invokes an external LLM to formalize generated claims, THE spec-check tool SHALL use the run-configured universal timeout budget.
@@ -546,8 +546,8 @@ WHEN the spec-check tool invokes an external LLM to formalize generated claims, 
 **Postcondition:** Indirect code-derived formalization follows the same timeout policy as direct specs-forward formalization.
 
 ##### Evidence
-- Implementation: [gen-formal.ts:64 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L64) (passes timeoutMs to formalizeClaims)
-- Test: [gen-formal.test.ts:40 applies formalizeClaims with schema validation (same pipeline as specs-forward)](/test/contract/gen-formal.test.ts#L40)
+- Implementation: [gen-formal.ts:71 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L71) (passes timeoutMs to formalizeClaims)
+- Test: [gen-formal.test.ts:58 applies formalizeClaims with schema validation (same pipeline as specs-forward)](/test/contract/gen-formal.test.ts#L58)
 
 #### Requirement model
 
@@ -689,7 +689,7 @@ WHEN the solver confirms that original claim A implies code-derived claim B and 
 - Implementation: [cross-implication-smt.ts:203 classifyRelationship](/src/domain/code-backwards/cross-implication-smt.ts#L203)
 - Test: [cross-implication.test.ts:39 mutual unsat classifies as same](/test/contract/cross-implication.test.ts#L39)
 - Test (property): [cross-implication.property.test.ts:8 classification is deterministic and symmetric by inverse strength labels](/test/property/cross-implication.property.test.ts#L8)
-- Test (integration): [safety-liveness.invariant.test.ts:246 LIVE-13: if z3 responds within timeout, cross-side implication completes](/test/invariant/safety-liveness.invariant.test.ts#L246)
+- Test (integration): [safety-liveness.invariant.test.ts:386 LIVE-13: if z3 responds within timeout, cross-side implication completes](/test/invariant/safety-liveness.invariant.test.ts#L386)
 - Example:
 ```typescript
 const { classifyRelationship } = await import("./src/domain/code-backwards/cross-implication-smt.ts");
@@ -759,7 +759,7 @@ WHEN cross-side implication checks complete, THE spec-check tool SHALL persist a
 **Postcondition:** Every cross-side classification is auditable through preserved solver evidence.
 
 ##### Evidence
-- Implementation: [cross-implication.ts:117 runCrossImplication](/src/domain/code-backwards/cross-implication.ts#L117)
+- Implementation: [cross-implication.ts:66 runCrossImplication](/src/domain/code-backwards/cross-implication.ts#L66)
 - Test: [cross-implication.test.ts:131 persists forward/reverse queries and outputs](/test/contract/cross-implication.test.ts#L131)
 
 #### Scenario: Single Solver Command Per Cross-Side Query [STC-IMPLY-QUERY]
@@ -967,7 +967,7 @@ WHEN cross-side implication results are available and conclusive (same, stronger
 
 ##### Evidence
 - Implementation: [cross-implication-smt.ts:203 classifyRelationship](/src/domain/code-backwards/cross-implication-smt.ts#L203)
-- Test: [cross-implication.test.ts:39 mutual unsat classifies as same](/test/contract/cross-implication.test.ts#L39), [safety-liveness.invariant.test.ts:117 SAFE-7: no cross-side classification is produced from unvalidated inputs](/test/invariant/safety-liveness.invariant.test.ts#L117)
+- Test: [cross-implication.test.ts:39 mutual unsat classifies as same](/test/contract/cross-implication.test.ts#L39), [safety-liveness.invariant.test.ts:145 SAFE-7: no cross-side classification is produced from unvalidated inputs](/test/invariant/safety-liveness.invariant.test.ts#L145)
 
 #### Scenario: Blind Comparison As Explanatory Rationale [STC-COMPARE-EXPLAIN]
 WHEN both solver implication results and blind LLM comparison results are available, THE spec-check tool SHALL attach the blind comparison rationale as supporting evidence that explains the formal classification in human-readable terms.
@@ -1013,7 +1013,7 @@ IF the blind comparison boundary would expose original requirement text to the c
 - Implementation: [blind-compare.ts:133 buildBlindPrompt](/src/domain/code-backwards/blind-compare.ts#L133)
 - Test: [blind-compare.test.ts:87 emits blind_boundary_violation error when generated context is missing](/test/contract/blind-compare.test.ts#L87), [blind-compare.test.ts:101 buildBlindPrompt contains only generated-side context](/test/contract/blind-compare.test.ts#L101)
 - Test (property): [blind-compare.property.test.ts:12 buildBlindPrompt never exposes original requirement text](/test/property/blind-compare.property.test.ts#L12)
-- Test (integration): [global.invariant.test.ts:179 INV-15: blind comparison prompts never expose original requirement text](/test/invariant/global.invariant.test.ts#L179), [safety-liveness.invariant.test.ts:99 SAFE-5: no blind comparison exposes original requirement text](/test/invariant/safety-liveness.invariant.test.ts#L99)
+- Test (integration): [global.invariant.test.ts:180 INV-15: blind comparison prompts never expose original requirement text](/test/invariant/global.invariant.test.ts#L180), [safety-liveness.invariant.test.ts:127 SAFE-5: no blind comparison exposes original requirement text](/test/invariant/safety-liveness.invariant.test.ts#L127)
 
 #### Scenario: Sanitize Untrusted Content In Code Fences [STC-COMPARE-FENCE]
 WHEN the spec-check tool embeds untrusted document content inside markdown code fences for comparison prompts, THE spec-check tool SHALL sanitize runs of three or more backticks in the content to prevent premature fence closure.

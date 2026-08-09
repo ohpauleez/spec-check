@@ -1693,15 +1693,27 @@ WHEN a merged capability spec contains at least one scenario and no requirements
 
 **Postcondition:** Scenario-level claims of the capability receive the merged logical file as their semantic key.
 
+##### Evidence
+- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [grouping.ts:136 buildLogicalFileByCapability()](/src/domain/formal/grouping.ts#L136)
+- Test: [semantic-grouping.test.ts:56 selects requirement and defensive scenario-only specs in input order](/test/contract/semantic-grouping.test.ts#L56), [semantic-grouping.test.ts:68 maps every supplied capability without normalizing logical files](/test/contract/semantic-grouping.test.ts#L68)
+
 #### Scenario: Empty Logical File Rejected [MCA-GROUP-KEY-EMPTY]
 IF a merged capability spec supplied to the map builder has an empty `logicalFile` string, THEN THE spec-check tool SHALL reject it as a validation failure.
 
 **Postcondition:** Empty logical-file values never silently enter the grouping map.
 
+##### Evidence
+- Implementation: [grouping.ts:136 buildLogicalFileByCapability()](/src/domain/formal/grouping.ts#L136), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Test: [semantic-grouping.test.ts:87 returns every empty logical-file value as validation data](/test/contract/semantic-grouping.test.ts#L87)
+
 #### Scenario: Every Provided Capability Mapped [MCA-GROUP-KEY-COMPLETE]
 WHEN the map builder receives a set of merged capability specs, THE resulting map SHALL contain exactly one entry for every provided capability, consistent with merge-layer capability uniqueness invariants.
 
 **Postcondition:** No provided capability is silently omitted from the map.
+
+##### Evidence
+- Implementation: [grouping.ts:136 buildLogicalFileByCapability()](/src/domain/formal/grouping.ts#L136), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Test: [semantic-grouping.test.ts:68 maps every supplied capability without normalizing logical files](/test/contract/semantic-grouping.test.ts#L68)
 
 ### Requirement: Active Merged Specs For Grouping [MCA-ACTIVE-SPECS]
 WHEN the spec-check tool selects merged specs for grouping-map construction, THE spec-check tool SHALL include a merged spec when it has at least one requirement or at least one scenario, and SHALL express this filtering in a dedicated, explicitly named helper rather than hiding it inside the map builder. This helper is used only for grouping-map construction; it SHALL NOT replace the claim-graph or solver-input activity filters (at least one requirement), so the grouping map can only be broader than the set of specs that contribute claims — never narrower. The scenarios clause is defensive: unreachable under the current merge domain model. If standalone scenario claims are ever admitted, this clause becomes load-bearing and the claim-graph activity filter must be broadened in the same change.
@@ -1777,15 +1789,28 @@ WHEN a merged spec has at least one requirement, THE spec-check tool SHALL treat
 
 **Postcondition:** The spec is included in grouping-map construction.
 
+##### Evidence
+- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Test: [semantic-grouping.test.ts:56 selects requirement and defensive scenario-only specs in input order](/test/contract/semantic-grouping.test.ts#L56)
+- Test (integration): [semantic-batching.integration.test.ts:173 aligns merged grouping, provenance, bounds, prompt, cleanup, and evidence](/test/integration/semantic-batching.integration.test.ts#L173)
+
 #### Scenario: Scenario-Only Spec Is Active [MCA-ACTIVE-SCEN]
 WHEN a merged spec has at least one scenario and no requirements (a defensive case that is unreachable in the current merge domain model), THE spec-check tool SHALL treat it as active for grouping.
 
 **Postcondition:** Scenario-only capabilities keep their semantic grouping key.
 
+##### Evidence
+- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Test: [semantic-grouping.test.ts:56 selects requirement and defensive scenario-only specs in input order](/test/contract/semantic-grouping.test.ts#L56)
+
 #### Scenario: Empty Spec Is Inactive [MCA-ACTIVE-EMPTY]
 WHEN a merged spec has zero requirements and zero scenarios, THE spec-check tool SHALL exclude it from grouping-map construction.
 
 **Postcondition:** Vacuous specs contribute no grouping entries.
+
+##### Evidence
+- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Test: [semantic-grouping.test.ts:56 selects requirement and defensive scenario-only specs in input order](/test/contract/semantic-grouping.test.ts#L56)
 
 ### Requirement: Solver Grouping Calls Shared Key Helper [MCA-SOLVER-SHARED-KEY]
 WHEN the spec-check tool groups claims for solver analysis, THE solver grouping path SHALL obtain each claim's grouping key from the same shared semantic key helper used by formalization grouping, SHALL NOT duplicate capability fallback logic locally, SHALL consume the same logical-file map instance that the pipeline constructs once and passes to both phases, and SHALL perform any solver-specific claim filtering before grouping and document that filtering independently of the key function.
@@ -1897,7 +1922,18 @@ WHEN solver grouping computes a claim's grouping key, THE key SHALL be produced 
 
 **Postcondition:** The capability fallback rule has a single authoritative implementation.
 
+##### Evidence
+- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [pipeline-helpers.ts:356 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L356), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Test: [semantic-grouping.test.ts:112 selects mapped, provenance, and synthetic fallback keys exactly](/test/contract/semantic-grouping.test.ts#L112)
+- Test (property): [semantic-batching.property.test.ts:179 matches solver grouping after the same explicit filtering](/test/property/semantic-batching.property.test.ts#L179)
+- Test (integration): [merge-liveness.integration.test.ts:199 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L199)
+
 #### Scenario: Filtering Precedes Grouping [MCA-SOLVER-FILTER-FIRST]
 WHEN solver analysis excludes claims (for example, non-spec claims), THE spec-check tool SHALL apply those exclusions before grouping and SHALL NOT encode solver-specific policy inside the shared key helper.
 
 **Postcondition:** The key function remains policy-free and identical across phases.
+
+##### Evidence
+- Implementation: [pipeline-helpers.ts:356 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L356), [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185)
+- Test: [pipeline-helpers.test.ts:218 excludes non-spec claims from capability-grouped logic path](/test/contract/pipeline-helpers.test.ts#L218)
+- Test (property): [semantic-batching.property.test.ts:179 matches solver grouping after the same explicit filtering](/test/property/semantic-batching.property.test.ts#L179)

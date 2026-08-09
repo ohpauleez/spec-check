@@ -130,9 +130,9 @@ WHEN the provided input paths yield zero recognized proposal, design, or spec do
 **Postcondition:** The CLI can distinguish irrelevant or incorrect inputs from archive-policy filtering.
 
 ##### Evidence
-- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:58 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L58)
-- Test: [catalog.test.ts:101 returns no_recognized_docs for directories without OpenSpec docs](/test/contract/catalog.test.ts#L101), [cli.test.ts:169 formats no_recognized_docs with input count](/test/contract/cli.test.ts#L169)
-- Test (integration): [catalog-abort.integration.test.ts:52 aborts pipeline on no_recognized_docs](/test/integration/catalog-abort.integration.test.ts#L52)
+- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:68 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L68)
+- Test: [catalog.test.ts:101 returns no_recognized_docs for directories without OpenSpec docs](/test/contract/catalog.test.ts#L101), [cli.test.ts:184 formats no_recognized_docs with input count](/test/contract/cli.test.ts#L184)
+- Test (integration): [catalog-abort.integration.test.ts:53 aborts pipeline on no_recognized_docs](/test/integration/catalog-abort.integration.test.ts#L53)
 
 #### Scenario: Archived-Only Recognized Documents [CAT-EMPTY-ARCHIVE]
 WHILE archived inputs are not explicitly allowed, WHEN all recognized documents are archived, THE spec-check tool SHALL classify the empty catalog result as `all_archived`.
@@ -140,9 +140,9 @@ WHILE archived inputs are not explicitly allowed, WHEN all recognized documents 
 **Postcondition:** The CLI can recommend `--allow-archive` as a remediation only when it is actually relevant.
 
 ##### Evidence
-- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:58 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L58)
-- Test: [catalog.test.ts:27 excludes archived change specs by default](/test/contract/catalog.test.ts#L27), [cli.test.ts:176 formats all_archived with archived count and --allow-archive guidance](/test/contract/cli.test.ts#L176)
-- Test (integration): [catalog-abort.integration.test.ts:81 aborts pipeline on all_archived](/test/integration/catalog-abort.integration.test.ts#L81)
+- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:68 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L68)
+- Test: [catalog.test.ts:27 excludes archived change specs by default](/test/contract/catalog.test.ts#L27), [cli.test.ts:191 formats all_archived with archived count and --allow-archive guidance](/test/contract/cli.test.ts#L191)
+- Test (integration): [catalog-abort.integration.test.ts:82 aborts pipeline on all_archived](/test/integration/catalog-abort.integration.test.ts#L82)
 
 #### Scenario: Policy-Excluded Recognized Documents [CAT-EMPTY-FILTERED]
 IF recognized documents are present but another admission or filtering policy removes all of them from the active catalog, THEN THE spec-check tool SHALL classify the empty catalog result as `all_filtered` and SHALL preserve the filtering rationale.
@@ -150,9 +150,9 @@ IF recognized documents are present but another admission or filtering policy re
 **Postcondition:** Empty-catalog reporting remains extensible to future filtering policies without collapsing into a generic message.
 
 ##### Evidence
-- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:58 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L58)
-- Test: [catalog.test.ts:113 returns all_filtered when all recognized docs are excluded by capability resolution](/test/contract/catalog.test.ts#L113), [catalog.test.ts:134 reports correct filteredCount when inputs contain both archived and unresolvable docs](/test/contract/catalog.test.ts#L134), [cli.test.ts:183 formats all_filtered with count and filter reason](/test/contract/cli.test.ts#L183)
-- Test (integration): [catalog-abort.integration.test.ts:110 aborts pipeline on all_filtered](/test/integration/catalog-abort.integration.test.ts#L110)
+- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:68 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L68)
+- Test: [catalog.test.ts:113 returns all_filtered when all recognized docs are excluded by capability resolution](/test/contract/catalog.test.ts#L113), [catalog.test.ts:134 reports correct filteredCount when inputs contain both archived and unresolvable docs](/test/contract/catalog.test.ts#L134), [cli.test.ts:198 formats all_filtered with count and filter reason](/test/contract/cli.test.ts#L198)
+- Test (integration): [catalog-abort.integration.test.ts:111 aborts pipeline on all_filtered](/test/integration/catalog-abort.integration.test.ts#L111)
 
 ### Requirement: CLI Argument Validation [CAT-CLI-ARGS]
 THE spec-check CLI SHALL accept positional input paths and optional `--output`, `--src`, `--caps`, `--z3`, `--config`, `--timeout-ms`, `--max-batch-size`, `--allow-archive`, `--help`, and `--version` flags, and SHALL reject unrecognized flags or missing required inputs with exit code `2` before any analysis begins.
@@ -169,8 +169,8 @@ WHEN the user invokes `spec-check --help` or `spec-check -h`, THE spec-check CLI
 **Postcondition:** No output directory is created and no analysis phases run.
 
 ##### Evidence
-- Implementation: [index.ts:42 main()](/src/index.ts#L42), [index.ts:161 printHelp()](/src/index.ts#L161)
-- Test: [cli.test.ts:79 parses help and version flags](/test/contract/cli.test.ts#L79)
+- Implementation: [index.ts:42 main()](/src/index.ts#L42), [index.ts:163 printHelp()](/src/index.ts#L163)
+- Test: [cli.test.ts:81 parses help and version flags](/test/contract/cli.test.ts#L81)
 - Example:
 ```typescript
 const { parseArgv } = await import("./src/cli/parse-argv.ts");
@@ -187,7 +187,7 @@ WHEN the user invokes `spec-check --version` or `spec-check -v`, THE spec-check 
 
 ##### Evidence
 - Implementation: [index.ts:42 main()](/src/index.ts#L42), [version.ts:16 SPEC_CHECK_VERSION](/src/version.ts#L16)
-- Test: [cli.test.ts:79 parses help and version flags](/test/contract/cli.test.ts#L79)
+- Test: [cli.test.ts:81 parses help and version flags](/test/contract/cli.test.ts#L81)
 - Example:
 ```typescript
 const { parseArgv } = await import("./src/cli/parse-argv.ts");
@@ -203,8 +203,8 @@ IF the user invokes `spec-check` with no positional input paths and no `--help` 
 **Postcondition:** No analysis output is produced.
 
 ##### Evidence
-- Implementation: [config.ts:181 resolveRunConfig()](/src/cli/config.ts#L181), [index.ts:127 parseConfigError()](/src/index.ts#L127)
-- Test: [cli.test.ts:65 resolveRunConfig rejects empty inputs with missing_inputs error](/test/contract/cli.test.ts#L65)
+- Implementation: [config.ts:196 resolveRunConfig()](/src/cli/config.ts#L196), [index.ts:127 parseConfigError()](/src/index.ts#L127)
+- Test: [cli.test.ts:67 resolveRunConfig rejects empty inputs with missing_inputs error](/test/contract/cli.test.ts#L67)
 
 #### Scenario: Unrecognized Flag Rejected [CAT-CLI-BADFLAG]
 IF the user supplies an unrecognized flag, THEN THE spec-check CLI SHALL exit with code `2` and a diagnostic message naming the unrecognized flag.
@@ -212,8 +212,8 @@ IF the user supplies an unrecognized flag, THEN THE spec-check CLI SHALL exit wi
 **Postcondition:** No analysis output is produced.
 
 ##### Evidence
-- Implementation: [parse-argv.ts:134 parseArgv()](/src/cli/parse-argv.ts#L134), [index.ts:103 parseArgParseError()](/src/index.ts#L103)
-- Test: [cli.test.ts:46 rejects unrecognized flags](/test/contract/cli.test.ts#L46)
+- Implementation: [parse-argv.ts:135 parseArgv()](/src/cli/parse-argv.ts#L135), [index.ts:103 parseArgParseError()](/src/index.ts#L103)
+- Test: [cli.test.ts:48 rejects unrecognized flags](/test/contract/cli.test.ts#L48)
 - Example:
 ```typescript
 const { parseArgv } = await import("./src/cli/parse-argv.ts");
@@ -229,8 +229,8 @@ WHEN the user supplies a flag using `--flag=value` syntax, THE spec-check CLI SH
 **Postcondition:** Both `--flag value` and `--flag=value` syntaxes are accepted interchangeably.
 
 ##### Evidence
-- Implementation: [parse-argv.ts:134 parseArgv()](/src/cli/parse-argv.ts#L134)
-- Test: [cli.test.ts:103 supports equals syntax for flag values](/test/contract/cli.test.ts#L103)
+- Implementation: [parse-argv.ts:135 parseArgv()](/src/cli/parse-argv.ts#L135)
+- Test: [cli.test.ts:105 supports equals syntax for flag values](/test/contract/cli.test.ts#L105)
 - Example:
 ```typescript
 const { parseArgv } = await import("./src/cli/parse-argv.ts");
@@ -246,8 +246,8 @@ IF the resolved `--output` directory is a descendant of or equal to the resolved
 **Postcondition:** The read-only source guarantee and output confinement constraints cannot conflict.
 
 ##### Evidence
-- Implementation: [config.ts:181 resolveRunConfig()](/src/cli/config.ts#L181)
-- Test: [cli.test.ts:121 rejects output directory inside source directory](/test/contract/cli.test.ts#L121), [cli.test.ts:137 rejects output directory equal to source directory](/test/contract/cli.test.ts#L137), [cli.test.ts:153 accepts output directory outside source directory](/test/contract/cli.test.ts#L153)
+- Implementation: [config.ts:196 resolveRunConfig()](/src/cli/config.ts#L196)
+- Test: [cli.test.ts:136 rejects output directory inside source directory](/test/contract/cli.test.ts#L136), [cli.test.ts:152 rejects output directory equal to source directory](/test/contract/cli.test.ts#L152), [cli.test.ts:168 accepts output directory outside source directory](/test/contract/cli.test.ts#L168)
 
 #### Scenario: Timeout Flag Accepted [CAT-CLI-TIMEOUT]
 WHEN the user supplies `--timeout-ms` with an integer value within the configured allowed range, THE spec-check CLI SHALL accept the value as the universal timeout for all external LLM calls in the run.
@@ -255,7 +255,7 @@ WHEN the user supplies `--timeout-ms` with an integer value within the configure
 **Postcondition:** A single validated timeout policy is available to every LLM-backed phase.
 
 ##### Evidence
-- Implementation: [config.ts:354 parseTimeoutMs()](/src/cli/config.ts#L354), [config.ts:386 validateTimeoutMs()](/src/cli/config.ts#L386)
+- Implementation: [config.ts:377 parseTimeoutMs()](/src/cli/config.ts#L377), [config.ts:409 validateTimeoutMs()](/src/cli/config.ts#L409)
 - Test: [config.test.ts:76 rejects timeout below minimum](/test/contract/config.test.ts#L76), [config.test.ts:91 rejects non-integer timeout](/test/contract/config.test.ts#L91), [config.test.ts:125 rejects timeout above maximum](/test/contract/config.test.ts#L125)
 - Example:
 ```typescript
@@ -271,7 +271,7 @@ WHEN the user supplies a JSON config file containing a valid numeric `timeoutMs`
 **Postcondition:** Runtime timeout policy can be sourced from either CLI or config file, with CLI taking precedence.
 
 ##### Evidence
-- Implementation: [config.ts:181 resolveRunConfig()](/src/cli/config.ts#L181), [config.ts:354 parseTimeoutMs()](/src/cli/config.ts#L354)
+- Implementation: [config.ts:196 resolveRunConfig()](/src/cli/config.ts#L196), [config.ts:377 parseTimeoutMs()](/src/cli/config.ts#L377)
 - Test: [config.test.ts:106 accepts config file timeoutMs without CLI override](/test/contract/config.test.ts#L106)
 
 #### Scenario: Archive Admission Flag Accepted [CAT-CLI-ALLOW-ARCH]
@@ -280,8 +280,8 @@ WHEN the user supplies `--allow-archive`, THE spec-check CLI SHALL enable admiss
 **Postcondition:** Archive admission changes only for explicitly provided archived inputs.
 
 ##### Evidence
-- Implementation: [parse-argv.ts:134 parseArgv()](/src/cli/parse-argv.ts#L134), [config.ts:181 resolveRunConfig()](/src/cli/config.ts#L181)
-- Test: [cli.test.ts:113 parses allow-archive as boolean flag](/test/contract/cli.test.ts#L113)
+- Implementation: [parse-argv.ts:135 parseArgv()](/src/cli/parse-argv.ts#L135), [config.ts:196 resolveRunConfig()](/src/cli/config.ts#L196)
+- Test: [cli.test.ts:128 parses allow-archive as boolean flag](/test/contract/cli.test.ts#L128)
 - Example:
 ```typescript
 const { parseArgv } = await import("./src/cli/parse-argv.ts");
@@ -426,7 +426,7 @@ WHEN a valid config file is loaded and CLI flags are also present, THE spec-chec
 **Postcondition:** The resolved run configuration reflects CLI precedence.
 
 ##### Evidence
-- Implementation: [config.ts:181 resolveRunConfig()](/src/cli/config.ts#L181)
+- Implementation: [config.ts:196 resolveRunConfig()](/src/cli/config.ts#L196)
 - Test: [config.test.ts:11 uses CLI flags over config values](/test/contract/config.test.ts#L11)
 
 #### Scenario: Invalid Config Rejected [CAT-CONFIG-FAIL]
@@ -435,7 +435,7 @@ IF the `--config` file exists but contains invalid JSON or violates the expected
 **Postcondition:** No analysis output is produced from an invalid configuration.
 
 ##### Evidence
-- Implementation: [config.ts:251 loadConfigFile()](/src/cli/config.ts#L251), [config.ts:301 isConfigFileShape()](/src/cli/config.ts#L301)
+- Implementation: [config.ts:272 loadConfigFile()](/src/cli/config.ts#L272), [config.ts:322 isConfigFileShape()](/src/cli/config.ts#L322)
 - Test: [config.test.ts:54 rejects invalid config JSON](/test/contract/config.test.ts#L54)
 
 #### Requirement model
@@ -562,9 +562,9 @@ IF no active documents survive recognition and catalog admission, THEN THE spec-
 **Postcondition:** No qualitative, formal, or reporting phase runs against a vacuous active catalog.
 
 ##### Evidence
-- Implementation: [run-cli.ts:158 runIngestionPhases()](/src/cli/run-cli.ts#L158), [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:58 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L58)
-- Test: [cli.test.ts:194 formats each empty-catalog variant with contextual details](/test/contract/cli.test.ts#L194)
-- Test (integration): [catalog-abort.integration.test.ts:52 aborts pipeline on no_recognized_docs](/test/integration/catalog-abort.integration.test.ts#L52), [catalog-abort.integration.test.ts:81 aborts pipeline on all_archived](/test/integration/catalog-abort.integration.test.ts#L81), [catalog-abort.integration.test.ts:110 aborts pipeline on all_filtered](/test/integration/catalog-abort.integration.test.ts#L110)
+- Implementation: [run-cli.ts:225 runIngestionPhases()](/src/cli/run-cli.ts#L225), [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:68 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L68)
+- Test: [cli.test.ts:209 formats each empty-catalog variant with contextual details](/test/contract/cli.test.ts#L209)
+- Test (integration): [catalog-abort.integration.test.ts:53 aborts pipeline on no_recognized_docs](/test/integration/catalog-abort.integration.test.ts#L53), [catalog-abort.integration.test.ts:82 aborts pipeline on all_archived](/test/integration/catalog-abort.integration.test.ts#L82), [catalog-abort.integration.test.ts:111 aborts pipeline on all_filtered](/test/integration/catalog-abort.integration.test.ts#L111)
 
 #### Requirement model
 
@@ -725,7 +725,7 @@ IF `opencode` is required for the selected analysis mode and is not available or
 **Postcondition:** No LLM-backed analysis proceeds without a working `opencode` binary.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:57 checkDependencies()](/src/cli/pipeline-helpers.ts#L57), [process.ts:44 isCommandAvailable()](/src/adapters/process.ts#L44)
+- Implementation: [pipeline-helpers.ts:58 checkDependencies()](/src/cli/pipeline-helpers.ts#L58), [process.ts:44 isCommandAvailable()](/src/adapters/process.ts#L44)
 
 #### Scenario: Missing Z3 Rejected [CAT-DEPS-Z3]
 IF `z3` is required for the selected analysis mode and is not available at the default path or the `--z3` path, THEN THE spec-check tool SHALL exit with code `2` and a diagnostic message naming the missing dependency.
@@ -733,7 +733,7 @@ IF `z3` is required for the selected analysis mode and is not available at the d
 **Postcondition:** No solver-backed analysis proceeds without a working `z3` binary.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:57 checkDependencies()](/src/cli/pipeline-helpers.ts#L57), [process.ts:44 isCommandAvailable()](/src/adapters/process.ts#L44)
+- Implementation: [pipeline-helpers.ts:58 checkDependencies()](/src/cli/pipeline-helpers.ts#L58), [process.ts:44 isCommandAvailable()](/src/adapters/process.ts#L44)
 
 #### Requirement model
 
@@ -825,9 +825,9 @@ WHEN a requirement or scenario header violates the canonical identifier format o
 **Postcondition:** Reviewers can identify the failing structural rule without re-parsing the document manually.
 
 ##### Evidence
-- Implementation: [spec.ts:141 parseRequirement()](/src/domain/parser/spec.ts#L141), [spec.ts:236 parseScenario()](/src/domain/parser/spec.ts#L236), [pipeline-helpers.ts:195 collectParserFindings()](/src/cli/pipeline-helpers.ts#L195)
+- Implementation: [spec.ts:141 parseRequirement()](/src/domain/parser/spec.ts#L141), [spec.ts:236 parseScenario()](/src/domain/parser/spec.ts#L236), [pipeline-helpers.ts:196 collectParserFindings()](/src/cli/pipeline-helpers.ts#L196)
 - Test: [parser.test.ts:15 validates heading extraction](/test/contract/parser.test.ts#L15), [parser.test.ts:119 flags non-EARS requirement](/test/contract/parser.test.ts#L119)
-- Test (integration): [pipeline.integration.test.ts:48 structural violations produce expected findings](/test/integration/pipeline.integration.test.ts#L48)
+- Test (integration): [pipeline.integration.test.ts:53 structural violations produce expected findings](/test/integration/pipeline.integration.test.ts#L53)
 
 #### Scenario: Reject Content With No Headings [CAT-STRUCT-FAIL]
 IF an input file contains no recognizable headings, THEN THE spec-check tool SHALL emit a parse-error finding for that file and SHALL exclude that file from downstream phases unless no parseable inputs remain.
@@ -836,7 +836,7 @@ IF an input file contains no recognizable headings, THEN THE spec-check tool SHA
 
 ##### Evidence
 - Implementation: [spec.ts:43 parseSpec()](/src/domain/parser/spec.ts#L43)
-- Test (integration): [pipeline.integration.test.ts:48 structural violations produce expected findings](/test/integration/pipeline.integration.test.ts#L48)
+- Test (integration): [pipeline.integration.test.ts:53 structural violations produce expected findings](/test/integration/pipeline.integration.test.ts#L53)
 
 #### Scenario: Validate Canonical Identifier Format [CAT-STRUCT-IDFORMAT]
 WHEN a requirement or scenario declares a bracketed identifier, THE spec-check tool SHALL validate that the identifier matches the canonical format: uppercase letters, digits, and hyphens enclosed in square brackets (e.g., `[UPPER-KEBAB-123]`).
@@ -1121,7 +1121,7 @@ WHEN a document contains extra content outside recognized fields, THE spec-check
 **Postcondition:** Analysts can inspect every parser loss boundary as part of the evidence set.
 
 ##### Evidence
-- Implementation: [shared.ts:136 collectUnparsedLines()](/src/domain/parser/shared.ts#L136), [pipeline-helpers.ts:195 collectParserFindings()](/src/cli/pipeline-helpers.ts#L195)
+- Implementation: [shared.ts:136 collectUnparsedLines()](/src/domain/parser/shared.ts#L136), [pipeline-helpers.ts:196 collectParserFindings()](/src/cli/pipeline-helpers.ts#L196)
 - Test: [parser.test.ts:27 recognizes EARS and preserves unparsed lines deterministically](/test/contract/parser.test.ts#L27)
 - Test (property): [parser.property.test.ts:12 is deterministic and preserves unmatched lines](/test/property/parser.property.test.ts#L12)
 

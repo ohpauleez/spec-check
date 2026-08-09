@@ -548,8 +548,7 @@ WHEN a finding depends on solver analysis or sampled formalization output, THE s
 
 ##### Evidence
 - Implementation: [pipeline-helpers.ts:458 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L458)
-- Test: [coverage-gaps.test.ts:44 solver and model artifacts are preserved](/test/contract/coverage-gaps.test.ts#L44)
-- Test (invariant): [global.invariant.test.ts:207 INV-4 + INV-13: solver artifacts are persisted](/test/invariant/global.invariant.test.ts#L207)
+- Test: [coverage-gaps.test.ts:44 solver and model artifacts are preserved](/test/contract/coverage-gaps.test.ts#L44), [global.invariant.test.ts:207 INV-4 + INV-13: solver artifacts are persisted](/test/invariant/global.invariant.test.ts#L207)
 
 #### Scenario: Preserve Cross-Side Implication Evidence [RAE-EVID-CROSSIMPLY]
 WHEN a code-backwards classification depends on cross-side implication analysis, THE spec-check tool SHALL preserve the implication queries, solver results, and classification rationale as evidence attached to the finding.
@@ -558,7 +557,7 @@ WHEN a code-backwards classification depends on cross-side implication analysis,
 
 ##### Evidence
 - Implementation: [pipeline-helpers.ts:558 runBoundedPairwiseComparison()](/src/cli/pipeline-helpers.ts#L558)
-- Test (invariant): [global.invariant.test.ts:207 INV-4 + INV-13: solver artifacts are persisted](/test/invariant/global.invariant.test.ts#L207)
+- Test: [global.invariant.test.ts:207 INV-4 + INV-13: solver artifacts are persisted](/test/invariant/global.invariant.test.ts#L207)
 - Test (integration): [pipeline.integration.test.ts:273 cross-side comparison pipeline](/test/integration/pipeline.integration.test.ts#L273)
 
 #### Scenario: Prevent Unsupported Verdict [RAE-EVID-FAIL]
@@ -579,7 +578,7 @@ WHEN a finding depends on an LLM-backed analysis response, THE spec-check tool S
 - Implementation: [qualitative.ts:30 rawResponses](/src/domain/spec-forward/qualitative.ts#L30)
 - Test: [qualitative.test.ts:21 runQualitativePasses returns merged findings](/test/contract/qualitative.test.ts#L21)
 - Test (property): [code-derived.property.test.ts:40 qualitative review prompts fence all documents](/test/property/code-derived.property.test.ts#L40)
-- Test (invariant): [global.invariant.test.ts:126 INV-11: prompts fence document content](/test/invariant/global.invariant.test.ts#L126), [safety-liveness.invariant.test.ts:156 LIVE-10: qualitative analysis completes](/test/invariant/safety-liveness.invariant.test.ts#L156)
+- Test: [global.invariant.test.ts:126 INV-11: prompts fence document content](/test/invariant/global.invariant.test.ts#L126), [safety-liveness.invariant.test.ts:156 LIVE-10: qualitative analysis completes](/test/invariant/safety-liveness.invariant.test.ts#L156)
 
 #### Scenario: Render Evidence Values As Inert Markdown Data [RAE-EVID-RENDER-SAFE]
 WHEN the spec-check tool renders finding descriptions, provenance, related claim identifiers, or evidence values into Markdown reports, THE spec-check tool SHALL neutralize inline Markdown control syntax in those raw values so they cannot render as links, emphasis, inline code spans, headings, list items, block quotes, or extra table cells.
@@ -737,8 +736,7 @@ WHEN a finding is created, THE spec-check tool SHALL populate severity, category
 
 ##### Evidence
 - Implementation: [findings.ts:49 Finding](/src/domain/findings.ts#L49), [render.ts:295 enforceFindingSupport()](/src/domain/reporting/render.ts#L295)
-- Test: [reporting.test.ts:128 passes finding with all required fields including rationale](/test/contract/reporting.test.ts#L128)
-- Test (invariant): [global.invariant.test.ts:50 INV-2: every finding has provenance](/test/invariant/global.invariant.test.ts#L50)
+- Test: [reporting.test.ts:128 passes finding with all required fields including rationale](/test/contract/reporting.test.ts#L128), [global.invariant.test.ts:50 INV-2: every finding has provenance](/test/invariant/global.invariant.test.ts#L50)
 
 #### Scenario: Missing Required Field Rejected [RAE-SHAPE-FAIL]
 IF a finding would be emitted without a required field, THEN THE spec-check tool SHALL treat this as an analysis defect and surface it rather than emitting an incomplete finding.
@@ -969,7 +967,7 @@ WHEN a later analysis phase runs after earlier findings exist, THE spec-check to
 - Implementation: [run-state.ts:66 addFindings()](/src/domain/run-state.ts#L66)
 - Test: [run-state.test.ts:23 appends findings preserving prior entries](/test/contract/run-state.test.ts#L23)
 - Test (property): [run-state.property.test.ts:20 findings are never removed by later phases](/test/property/run-state.property.test.ts#L20)
-- Test (invariant): [global.invariant.test.ts:79 INV-6: findings are never silently removed](/test/invariant/global.invariant.test.ts#L79)
+- Test: [global.invariant.test.ts:79 INV-6: findings are never silently removed](/test/invariant/global.invariant.test.ts#L79)
 - Example:
 ```typescript
 const { createInitialRunState, addFindings } = await import("./src/domain/run-state.ts");
@@ -990,7 +988,7 @@ IF a later phase determines that a prior finding should be superseded, THEN THE 
 
 ##### Evidence
 - Implementation: [run-state.ts:66 addFindings()](/src/domain/run-state.ts#L66)
-- Test (invariant): [global.invariant.test.ts:79 INV-6: findings are never silently removed](/test/invariant/global.invariant.test.ts#L79)
+- Test: [global.invariant.test.ts:79 INV-6: findings are never silently removed](/test/invariant/global.invariant.test.ts#L79)
 
 #### Requirement model
 
@@ -1076,10 +1074,19 @@ WHEN a run completes successfully after producing one or more `FormalizationAtte
 
 **Postcondition:** Manifest presence marks the last successful run and mechanically binds all durable attempt evidence to it.
 
+##### Evidence
+- Implementation: [run-cli.ts:518 runReportingPhase()](/src/cli/run-cli.ts#L518), [formalization-evidence.ts:205 writeFormalizationAttemptSet()](/src/domain/reporting/formalization-evidence.ts#L205)
+- Test: [manifest.test.ts:73 lists formalization evidence as an ordinary checksummed file without embedding attempts](/test/contract/manifest.test.ts#L73)
+- Test (integration): [merge-liveness.integration.test.ts:436 removes stale formalization evidence at run start and checksums the replacement](/test/integration/merge-liveness.integration.test.ts#L436)
+
 #### Scenario: Attempt Evidence Alone Is Not Completion [RAE-MANIFEST-ATTEMPT-INCOMPLETE]
 IF attempt-evidence files exist but the run fails or terminates before `manifest.json` is written, THEN consumers SHALL treat the run as incomplete.
 
 **Postcondition:** Atomic evidence survival does not weaken manifest-last completion semantics.
+
+##### Evidence
+- Implementation: [run-cli.ts:381 runFormalizationPhaseWithEvidence()](/src/cli/run-cli.ts#L381), [run-cli.ts:518 runReportingPhase()](/src/cli/run-cli.ts#L518)
+- Test (integration): [merge-liveness.integration.test.ts:356 still aborts when every formalization claim fails](/test/integration/merge-liveness.integration.test.ts#L356)
 
 #### Scenario: Mark Complete Run [RAE-MANIFEST-DONE]
 WHEN all selected outputs are written successfully, THE spec-check tool SHALL write a manifest that lists the produced files and their checksums after all prior outputs have been finalized.
@@ -1340,10 +1347,28 @@ WHEN one specs-forward or generated-spec formalization invocation produces attem
 
 **Postcondition:** A complete evidence file contains attempts from one invocation and one claim-index namespace only.
 
+##### Evidence
+- Implementation: [formalization-evidence.ts:58 buildFormalizationAttemptSet()](/src/domain/reporting/formalization-evidence.ts#L58), [formalization-evidence.ts:159 formalizationAttemptSetPath()](/src/domain/reporting/formalization-evidence.ts#L159), [formalization-evidence.ts:205 writeFormalizationAttemptSet()](/src/domain/reporting/formalization-evidence.ts#L205), [gen-formal.ts:71 formalizeGeneratedSpecs()](/src/domain/code-backwards/gen-formal.ts#L71)
+- Test: [batch-evidence.test.ts:121 records complete pointer-only evidence, cleans up, and persists no claim text](/test/contract/batch-evidence.test.ts#L121), [manifest.test.ts:102 uses deterministic discriminated paths and collision-free generated ordinals](/test/contract/manifest.test.ts#L102)
+- Test (property): [semantic-batching.property.test.ts:414 keeps attempt evidence isolated between two concurrent invocations](/test/property/semantic-batching.property.test.ts#L414)
+- Test (integration): [merge-liveness.integration.test.ts:436 removes stale formalization evidence at run start and checksums the replacement](/test/integration/merge-liveness.integration.test.ts#L436)
+- Example:
+```typescript
+const { buildFormalizationAttemptSet, formalizationAttemptSetPath } = await import("./src/domain/reporting/formalization-evidence.ts");
+const attemptSet = buildFormalizationAttemptSet({ kind: "generated_spec", ordinal: 0, capability: "billing" }, []); //=> type Object
+attemptSet.claimSet.kind; //=> generated_spec
+attemptSet.attempts.length; //=> 0
+formalizationAttemptSetPath(attemptSet.claimSet).includes("generated_spec_000000"); //=> true
+```
+
 #### Scenario: Failed Run May Retain Attempt Evidence [RAE-FORMAL-ATTEMPT-FAILED-RUN]
 IF a run fails or the process terminates after an attempt-set evidence file is atomically finalized, THEN THE file MAY remain while `manifest.json` is absent.
 
 **Postcondition:** Surviving attempt evidence is auditable partial-run output and cannot be mistaken for a successful run.
+
+##### Evidence
+- Implementation: [run-cli.ts:381 runFormalizationPhaseWithEvidence()](/src/cli/run-cli.ts#L381), [run-cli.ts:400 runFormalizationPhaseWithEvidence()](/src/cli/run-cli.ts#L400)
+- Test (integration): [merge-liveness.integration.test.ts:356 still aborts when every formalization claim fails](/test/integration/merge-liveness.integration.test.ts#L356)
 
 ### Requirement: Manifest Content Schema [RAE-MANIFEST-SCHEMA]
 THE spec-check tool SHALL write the manifest as a UTF-8 JSON file containing an array of output file entries, each with `path` (relative to output directory), `checksum` (SHA-256 hex), and `phase` (originating phase name) fields.
@@ -1358,9 +1383,8 @@ WHEN the manifest is written, every entry SHALL reference a file that exists und
 
 ##### Evidence
 - Implementation: [manifest.ts:65 buildManifestEntries()](/src/domain/reporting/manifest.ts#L65)
-- Test: [manifest.test.ts:34 manifest entries match actual file checksums](/test/contract/manifest.test.ts#L34)
+- Test: [manifest.test.ts:34 manifest entries match actual file checksums](/test/contract/manifest.test.ts#L34), [global.invariant.test.ts:113 INV-8: manifest entries have correct checksums](/test/invariant/global.invariant.test.ts#L113)
 - Test (property): [manifest.property.test.ts:9 every manifest entry has correct checksum](/test/property/manifest.property.test.ts#L9)
-- Test (invariant): [global.invariant.test.ts:113 INV-8: manifest entries have correct checksums](/test/invariant/global.invariant.test.ts#L113)
 - Example:
 ```typescript
 const { buildManifestEntries } = await import("./src/domain/reporting/manifest.ts");
@@ -1449,8 +1473,7 @@ WHEN an output path resolves to a location within the configured output director
 
 ##### Evidence
 - Implementation: [fs.ts:32 resolveConfinedOutputPath()](/src/adapters/fs.ts#L32)
-- Test: [fs.test.ts:11 allows path within output directory](/test/contract/fs.test.ts#L11)
-- Test (invariant): [global.invariant.test.ts:102 INV-7: all writes are confined](/test/invariant/global.invariant.test.ts#L102)
+- Test: [fs.test.ts:11 allows path within output directory](/test/contract/fs.test.ts#L11), [global.invariant.test.ts:102 INV-7: all writes are confined](/test/invariant/global.invariant.test.ts#L102)
 - Example:
 ```typescript
 const { resolveConfinedOutputPath } = await import("./src/adapters/fs.ts");
@@ -1465,8 +1488,7 @@ IF an output path resolves to a location outside the configured output directory
 
 ##### Evidence
 - Implementation: [fs.ts:32 resolveConfinedOutputPath()](/src/adapters/fs.ts#L32)
-- Test: [fs.test.ts:17 rejects path traversal at branding boundary](/test/contract/fs.test.ts#L17), [fs.test.ts:23 rejects absolute path at branding boundary](/test/contract/fs.test.ts#L23)
-- Test (invariant): [global.invariant.test.ts:102 INV-7: all writes are confined](/test/invariant/global.invariant.test.ts#L102)
+- Test: [fs.test.ts:17 rejects path traversal at branding boundary](/test/contract/fs.test.ts#L17), [fs.test.ts:23 rejects absolute path at branding boundary](/test/contract/fs.test.ts#L23), [global.invariant.test.ts:102 INV-7: all writes are confined](/test/invariant/global.invariant.test.ts#L102)
 - Example:
 ```typescript
 const { resolveConfinedOutputPath } = await import("./src/adapters/fs.ts");
@@ -1527,8 +1549,7 @@ WHEN an output file write completes successfully, THE spec-check tool SHALL rena
 
 ##### Evidence
 - Implementation: [fs.ts:66 writeOutputAtomic()](/src/adapters/fs.ts#L66)
-- Test: [fs.test.ts:35 writes atomic output file with correct content](/test/contract/fs.test.ts#L35)
-- Test (invariant): [global.invariant.test.ts:197 INV-3: writeOutputAtomic produces correct content via atomic rename](/test/invariant/global.invariant.test.ts#L197)
+- Test: [fs.test.ts:35 writes atomic output file with correct content](/test/contract/fs.test.ts#L35), [global.invariant.test.ts:197 INV-3: writeOutputAtomic produces correct content via atomic rename](/test/invariant/global.invariant.test.ts#L197)
 - Example:
 ```typescript
 const { writeOutputAtomic } = await import("./src/adapters/fs.ts");

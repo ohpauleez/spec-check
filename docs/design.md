@@ -179,7 +179,7 @@ graph TD
         Claims["claim-graph.ts<br/>Normalization + obligation"]
         Coverage["spec-forward/coverage.ts<br/>Gap and contradiction detection"]
         Qualitative["spec-forward/qualitative.ts<br/>LLM-backed review passes"]
-        Formalize["formal/formalize.ts<br/>LLM-backed sampling"]
+        Formalize["formal/formalize.ts +<br/>findings/evidence modules<br/>Semantic batching + sampling"]
         Validate["formal/validate.ts<br/>Schema validation"]
         Cluster["formal/clustering.ts<br/>Equivalence clustering"]
         Identifiers["formal/identifiers.ts<br/>Injective identifier sanitization"]
@@ -301,7 +301,7 @@ This split matters for assurance. The more the decision logic is isolated from t
 | **Claim graph builder** ([`src/domain/claim-graph.ts`](src/domain/claim-graph.ts)) | Normalize parsed content into typed claims with provenance and obligation | No claim exists without provenance; extraction is deterministic |
 | **Qualitative analysis** ([`src/domain/spec-forward/qualitative.ts`](src/domain/spec-forward/qualitative.ts)) | Package parsed content for LLM-backed review passes; validate response schemas | `opencode` responses are schema-validated before acceptance; exactly 2 passes on success |
 | **Coverage analysis** ([`src/domain/spec-forward/coverage.ts`](src/domain/spec-forward/coverage.ts)) | Compare proposal/design claims against capability specs | Deterministic given the same claim graph; no LLM or solver dependency |
-| **Formalization** ([`src/domain/formal/formalize.ts`](src/domain/formal/formalize.ts)) | Group eligible requirement and scenario claims by the shared semantic logical-file key; request LLM-backed samples; validate against logic IR schema | Formalization and solver grouping use the same key helper and map; candidate and claim-error indexes are disjoint and exhaust eligible indexes under handled completion; additional-sample failure preserves its candidate and emits only a warning; original eligible index, not `claim.id`, is authoritative identity |
+| **Formalization** ([`src/domain/formal/formalize.ts`](src/domain/formal/formalize.ts), [`formalization-findings.ts`](src/domain/formal/formalization-findings.ts), [`batch-evidence.ts`](src/domain/formal/batch-evidence.ts)) | Group eligible requirement and scenario claims by the shared semantic logical-file key; request LLM-backed samples; validate against logic IR schema; orchestration (`formalize.ts`) is split from pure finding/error builders and response matching (`formalization-findings.ts`) and from immutable attempt-evidence staging (`batch-evidence.ts`) | Formalization and solver grouping use the same key helper and map; candidate and claim-error indexes are disjoint and exhaust eligible indexes under handled completion; additional-sample failure preserves its candidate and emits only a warning; original eligible index, not `claim.id`, is authoritative identity |
 | **Validation** ([`src/domain/formal/validate.ts`](src/domain/formal/validate.ts)) | Structural validation of untrusted LLM-produced formalization samples | Deterministic, side-effect free; validates variables, functions, sorts, and assertion syntax; rejects same-claim raw variable/function overlap and duplicate same-kind declarations by sanitized symbol |
 | **Clustering** ([`src/domain/formal/clustering.ts`](src/domain/formal/clustering.ts)) | Solver-backed pairwise implication to group equivalent formalizations | Pair enumeration is deterministic; BFS-based connected components; ambiguity is a finding |
 | **Identifier sanitization** ([`src/domain/formal/identifiers.ts`](src/domain/formal/identifiers.ts)) | Encode untrusted identifiers into injective SMT-LIB-safe symbols | Fixed-width-6 `_HHHHHH` escapes are uniquely decodable and preserve non-collision guarantees |
@@ -777,6 +777,7 @@ stateDiagram-v2
 - Safety: structurally invalid or oversized compile groups perform zero solver work; they degrade to a `logic.invalid_group` finding instead of aborting the run.
 - Safety: spec-combine merge conflicts surface `logic.merge_conflict` findings while surviving claims continue to analysis; no conflicting declaration silently overwrites another (first-wins).
 - Liveness: each LLM call is bounded by retry count (default 3) and universal per-call timeout from run config (default 300s).
+- Liveness: formalization concurrency is bounded — worst-case in-flight adapter calls are `concurrency × INLINE_FALLBACK_CONCURRENCY (2)` on the degradation path, because fallback workers execute inside slots of the outer `mapBounded(batches, concurrency)` pool, and `concurrency` otherwise; the bound is a fixed multiple of the configured concurrency and never scales with batch size.
 - Liveness: stable physical sub-batching terminates for every valid `maxBatchSize`, and every eligible claim reaches exactly one candidate-or-error partition member under handled adapter outcomes.
 - Liveness: each solver query is bounded by per-query timeout (default 30s).
 - Liveness: deeper-check solver fan-out is bounded — pairwise checks cap at `PAIRWISE_SOLVER_CONCURRENCY` (3) plus one completeness query (per-group peak 4; global peak `concurrency × 4`).
@@ -1353,7 +1354,7 @@ Relevant code: [`src/domain/result.ts`](src/domain/result.ts), [`src/domain/erro
 | Claim | Mechanism | Bound |
 |-------|-----------|-------|
 | **Qualitative analysis completes** | If `opencode` responds with valid output within retry bounds | Bounded retries (default 3) with universal per-call timeout (default 300s) |
-| **Formalization reaches terminal outcomes** | Under handled adapter outcomes, candidate and claim-error indexes exactly and disjointly partition eligible indexes; sibling physical batches continue after localized failure | Bounded adapter retries, bounded degradation, and bounded concurrency |
+| **Formalization reaches terminal outcomes** | Under handled adapter outcomes, candidate and claim-error indexes exactly and disjointly partition eligible indexes; sibling physical batches continue after localized failure | Bounded adapter retries (3); worst-case in-flight adapter calls are `concurrency × INLINE_FALLBACK_CONCURRENCY (2)` on the degradation path and `concurrency` otherwise |
 | **Physical sub-batching terminates** | Pure stable slicing advances through each finite logical group | Every valid `maxBatchSize`; `0` produces one chunk and positive values bound chunk size |
 | **Attached temp cleanup is attempted** | Every handled attached terminal path that reaches lifecycle finalization enters `finally`; directory-creation failure owes no cleanup | After success, model failure, adapter-return failure, thrown failure, or partial write; excludes process termination |
 | **Solver analysis completes** | If `z3` responds within per-query timeout | Per-query timeout (default 30s) |
@@ -1408,12 +1409,12 @@ graph BT
 | Layer | Coverage Focus |
 |---|---|
 | **External formal models** | Merge-structure safety invariants (`openspec/changes/variable-claim-conflict/specs/formalization-and-logic-analysis/alloy/merge.als`) and semantic grouping, batch lifecycle, and claim-partition invariants (`openspec/changes/semantic-batching/specs/formalization-and-logic-analysis/alloy/semantic-batching.als`) checked in Alloy via Analyzer runs |
-| **Property-based tests** | Parser invariants, claim extraction invariants, clustering determinism, implication classification symmetry, blind boundary enforcement, manifest integrity, run-state monotonicity |
+| **Property-based tests** | Parser invariants, claim extraction invariants, clustering determinism, implication classification symmetry, blind boundary enforcement, manifest integrity, run-state monotonicity, temp-lifecycle histories, attached-response matching, degradation decision machine, outcome determinism under shuffled completion, evidence isolation across concurrent invocations |
 | **Contract tests** | CLI argument handling, config merge precedence, parser structural checks, EARS classification, LLM schema validation, SMT-LIB sanitization, manifest semantics, boundary violation detection, obligation-aware severity |
 | **Integration tests** | End-to-end analyses with fixture specs plus fake `opencode` and fake `z3` adapters |
 | **Determinism tests** | Re-run with fixed inputs and cached responses, then diff outputs byte-for-byte |
 | **Invariant tests** | Repository-wide safety and liveness rules |
-| **Fault injection tests** | Graceful degradation when adapters fail or timeout |
+| **Fault injection tests** | Graceful degradation when adapters fail or timeout; atomic-write rename failure with temp-orphan cleanup |
 | **Adversarial input tests** | Malformed, hostile, or boundary-case inputs handled without crash or misleading results |
 | **Oracle/golden tests** | Expected logic encodings and parser outputs as permanent fixtures |
 | **Regression fixtures** | Every discovered ambiguity pattern, counterexample, and parser-loss issue as a permanent fixture |
@@ -1449,6 +1450,10 @@ graph BT
 - Blind boundary: original requirement text never exposed to code-derived side
 - Cross-side classification: deterministic and symmetric
 - Greedy matching: deterministic given same classification scores
+- Temp lifecycle: cleanup is attempted iff a directory was created; evidence `cleanup` classification matches the terminal lifecycle state, and cleanup failure never masks the attempt outcome
+- Attached response matching: the envelope fails iff the entry count differs or an index is unsafe, unknown, or duplicated; on success the matched key set equals the claim index set; extra model-hallucinated entry fields are tolerated
+- Degradation: the decision depends only on (terminal error kind, inline-prompt fit); `maxBatchSize = 0` and `Number.MAX_SAFE_INTEGER` each yield one chunk
+- Metamorphic formalization: terminal candidate/error index sets and finding categories are identical under shuffled completion order; attempt evidence stays isolated between concurrent invocations
 
 **Spec traceability:** Every testable requirement in `openspec/specs/` carries a bracketed identifier (e.g., `[CAT-PARSE-EARS]`). Contract tests reference these identifiers via `traceSpec(...)`, and the traceability tooling validates coverage.
 
@@ -1577,7 +1582,10 @@ src/
       qualitative.ts            LLM-backed review passes (2 sequential)
       coverage.ts               deterministic coverage analysis (5 sub-analyses)
     formal/
-      formalize.ts              semantic grouping, physical batching, bounded degradation and sampling
+      formalize.ts              orchestration: semantic grouping, physical batching, bounded degradation and sampling
+      formalization-types.ts    shared candidate/error/output/result types
+      formalization-findings.ts pure finding/error builders and attached response matching
+      batch-evidence.ts         immutable attempt-evidence staging (metadata, draft, finalize)
       validate.ts               logic IR schema validation
       clustering.ts             solver-backed equivalence clustering (BFS)
       smtlib.ts                 SMT-LIB compilation and sanitization

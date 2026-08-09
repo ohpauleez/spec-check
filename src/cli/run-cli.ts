@@ -8,7 +8,10 @@
 import type { RunConfig } from "./config.js";
 import type { Finding } from "../domain/findings.js";
 import type { LogicIrClaim } from "../domain/logic-ir.js";
-import type { Claim, ClaimGraph } from "../domain/claim-graph.js";import type { PipelineContext, IngestionResult, AnalysisResult } from "./pipeline-types.js";
+import type { Claim, ClaimGraph } from "../domain/claim-graph.js";
+import type { CapabilityName } from "../domain/branded.js";
+import type { CatalogDocument } from "../domain/model.js";
+import type { PipelineContext, IngestionResult, AnalysisResult } from "./pipeline-types.js";
 import { createInitialRunState, addFindings, type RunState } from "../domain/run-state.js";
 import { buildCatalog, inferCapabilityName, type CatalogEmptyReason } from "../domain/parser/catalog.js";
 import { assertNever, precondition } from "../domain/assert.js";
@@ -169,8 +172,8 @@ export async function runCli(config: RunConfig): Promise<RunState> {
     const knownCapabilities = [
       ...new Set(
         ingestion.catalogResult.catalog.documents
-          .filter((d) => d.capability !== undefined)
-          .map((d) => d.capability as string),
+          .filter((d): d is CatalogDocument & { readonly capability: CapabilityName } => d.capability !== undefined)
+          .map((d) => d.capability),
       ),
     ].sort();
 
@@ -419,7 +422,7 @@ async function runFormalizationPhaseWithEvidence(
 }
 
 // ---------------------------------------------------------------------------
-// Phase group: Reporting (Phase 11)
+// Phase group: Merge and grouping map
 // ---------------------------------------------------------------------------
 
 /**

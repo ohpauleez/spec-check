@@ -1,8 +1,8 @@
-import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, readdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { traceSpec } from "../support/spec-trace.js";
 import { removeOutputTree, resolveConfinedOutputPath, writeOutputAtomic, sha256Hex } from "../../src/adapters/fs.js";
 import { toOutputDirPath, toRelativePath } from "../../src/domain/branded.js";
@@ -64,5 +64,66 @@ describe("filesystem adapter contracts", () => {
     expect(() => toRelativePath("data/../secret.txt")).toThrow("invalid relative path");
     expect(() => toRelativePath("../escape")).toThrow("invalid relative path");
     expect(() => toRelativePath("a/b/../../c")).toThrow("invalid relative path");
+  });
+
+  it("propagates a rename failure and removes the orphan temp file", async () => {
+    traceSpec("RAE-OUTPUT-ATOMIC");
+    const dir = await mkdtemp(join(tmpdir(), "spec-check-fs-rename-"));
+
+    // Mock only `rename`; every other fs/promises export stays real so the
+    // temp file is genuinely written and genuinely unlinked.
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => {
+      const actual = await vi.importActual("node:fs/promises");
+      return {
+        ...actual,
+        rename: vi.fn(async () => {
+          throw new Error("EXDEV: cross-device rename");
+        }),
+      };
+    });
+    try {
+      const { writeOutputAtomic: mockedWrite } = await import("../../src/adapters/fs.js");
+      await expect(
+        mockedWrite(toOutputDirPath(dir), toRelativePath("atomic.md"), "payload\n"),
+      ).rejects.toThrow("EXDEV");
+
+      // The temp orphan must be cleaned up: no `.tmp-` file may remain.
+      const leftover = (await readdir(dir)).filter((name) => name.includes(".tmp-"));
+      expect(leftover).toEqual([]);
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  });
+
+  it("propagates the rename error even when temp cleanup also fails", async () => {
+    traceSpec("RAE-OUTPUT-ATOMIC");
+    const dir = await mkdtemp(join(tmpdir(), "spec-check-fs-rename-unlink-"));
+
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => {
+      const actual = await vi.importActual("node:fs/promises");
+      return {
+        ...actual,
+        rename: vi.fn(async () => {
+          throw new Error("EXDEV: rename failed");
+        }),
+        unlink: vi.fn(async () => {
+          throw new Error("EBUSY: unlink failed");
+        }),
+      };
+    });
+    try {
+      const { writeOutputAtomic: mockedWrite } = await import("../../src/adapters/fs.js");
+      // The primary rename error propagates; the secondary unlink failure is
+      // swallowed (documented) and must not mask the primary error.
+      await expect(
+        mockedWrite(toOutputDirPath(dir), toRelativePath("atomic.md"), "payload\n"),
+      ).rejects.toThrow("EXDEV: rename failed");
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
   });
 });

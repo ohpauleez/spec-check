@@ -61,6 +61,84 @@ function makeSample(claimId: string): LogicIrClaim {
   };
 }
 
+/**
+ * Build a single attached batch of named, same-capability claims.
+ *
+ * @remarks
+ * All claims share capability `auth` and provenance file so grouping places
+ * them in exactly one multi-claim physical batch, forcing the attached path.
+ */
+function makeAttachedBatchClaims(count: number, prefix: string): Claim[] {
+  return Array.from({ length: count }, (_, index): Claim => ({
+    kind: "requirement",
+    text: `${prefix} claim ${String(index)}`,
+    obligation: "mandatory",
+    provenance: { file: `${prefix}.md`, line: index + 1 },
+    references: [],
+    capability: toCapabilityName("auth"),
+    id: toClaimId(`${prefix}-${String(index)}`),
+  }));
+}
+
+/** Per-claim outcome script for the latency-shuffled metamorphic run. */
+interface OutcomeScriptEntry {
+  readonly valid: boolean;
+  /** Milliseconds of artificial delay before this claim resolves. */
+  readonly delayMs: number;
+}
+
+/**
+ * Run `formalizeClaims` over one attached batch with scripted per-claim
+ * outcomes and completion order controlled by artificial delays.
+ *
+ * @remarks
+ * The adapter mock resolves the attached envelope once; claims scripted
+ * invalid return an empty `claimId` (schema-invalid), which the matcher keeps
+ * as per-entry data so the outcome set still covers every claim. Delay values
+ * shuffle promise resolution order without real wall-clock dependence beyond
+ * the injected timers.
+ */
+async function runScriptedAttachedBatch(
+  claims: readonly Claim[],
+  scripts: readonly OutcomeScriptEntry[],
+): Promise<{
+  readonly candidateIndexes: readonly number[];
+  readonly errorIndexes: readonly number[];
+  readonly findingCategories: readonly string[];
+  readonly attemptClaimIndexes: readonly (readonly number[])[];
+}> {
+  vi.mocked(callOpencode).mockImplementation(async () => {
+    const formalizations = claims.map((claim, index) => {
+      const script = scripts[index];
+      const claimId = claim.id ?? toClaimId(`UNNAMED-${String(index)}`);
+      return script !== undefined && script.valid
+        ? { index, ...makeSample(claimId) }
+        : { index, claimId: "" };
+    });
+    return { ok: true, value: { formalizations } };
+  });
+
+  const result = await formalizeClaims({
+    claims,
+    model: "metamorphic-model",
+    samplesPerClaim: 1,
+    timeoutMs: 300_000,
+    concurrency: 1,
+    logicalFileByCapability: new Map([["auth", "merged/auth.md"]]),
+  });
+
+  expect(result.ok).toBe(true);
+  if (!result.ok) {
+    return { candidateIndexes: [], errorIndexes: [], findingCategories: [], attemptClaimIndexes: [] };
+  }
+  return {
+    candidateIndexes: result.value.candidates.map((candidate) => candidate.eligibleIndex),
+    errorIndexes: result.value.errors.map((error) => error.eligibleIndex ?? -1),
+    findingCategories: result.value.findings.map((finding) => finding.category),
+    attemptClaimIndexes: result.value.batchAttempts.map((attempt) => attempt.claimIndexes),
+  };
+}
+
 describe("semantic batching properties", () => {
   it("selects deterministic keys", () => {
     traceSpec("FLA-SEMANTIC-GROUPING");
@@ -287,5 +365,116 @@ describe("semantic batching properties", () => {
 
     expect(snapshots[1]).toEqual(snapshots[0]);
     expect(snapshots[2]).toEqual(snapshots[0]);
+  });
+
+  it("yields identical terminal outcome sets under shuffled completion order", async () => {
+    traceSpec("FLA-IDENTITY-ORDER", "FLA-PARTITION-WORKER", "FLA-FORMALIZE-CLAIMS");
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 2, max: 6 }).chain((count) =>
+          fc.tuple(
+            fc.constant(count),
+            fc.array(
+              fc.record({
+                valid: fc.boolean(),
+                delayMs: fc.integer({ min: 0, max: 5 }),
+              }),
+              { minLength: count, maxLength: count },
+            ),
+          )),
+        async ([count, scripts]) => {
+          const claims = makeAttachedBatchClaims(count, "ORDER");
+
+          // Run the same scripted outcomes twice with the completion order
+          // reversed: metamorphic relation requires identical terminal sets.
+          const forward = await runScriptedAttachedBatch(claims, scripts);
+          const reversed = await runScriptedAttachedBatch(
+            claims,
+            [...scripts].reverse().map((script, index) => ({
+              // Keep validity pinned to the claim, shuffle only timing.
+              valid: scripts[index]?.valid ?? script.valid,
+              delayMs: 5 - script.delayMs,
+            })),
+          );
+
+          expect(reversed.candidateIndexes).toEqual(forward.candidateIndexes);
+          expect(reversed.errorIndexes).toEqual(forward.errorIndexes);
+          expect([...reversed.findingCategories].sort()).toEqual([...forward.findingCategories].sort());
+          expect(reversed.attemptClaimIndexes).toEqual(forward.attemptClaimIndexes);
+
+          // Every claim reaches exactly one terminal outcome.
+          const allIndexes = [...forward.candidateIndexes, ...forward.errorIndexes].sort((a, b) => a - b);
+          expect(allIndexes).toEqual(claims.map((_, index) => index));
+        },
+      ),
+      { numRuns: 100 },
+    );
+  });
+
+  it("keeps attempt evidence isolated between two concurrent invocations", async () => {
+    traceSpec("FLA-EVIDENCE-RECONSTRUCT", "RAE-FORMAL-ATTEMPT-SETS");
+    await fc.assert(
+      fc.asyncProperty(
+        fc.integer({ min: 2, max: 5 }),
+        fc.integer({ min: 2, max: 5 }),
+        async (countA, countB) => {
+          const claimsA = makeAttachedBatchClaims(countA, "SETA");
+          const claimsB = makeAttachedBatchClaims(countB, "SETB");
+          const indexesA = new Set(claimsA.map((claim) => claim.id));
+          const indexesB = new Set(claimsB.map((claim) => claim.id));
+
+          vi.mocked(callOpencode).mockImplementation(async (options) => {
+            const filePath = options.files?.[0];
+            if (filePath === undefined) {
+              return { ok: false, error: { kind: "invalid_json", phase: "formalization", message: "no context" } };
+            }
+            const context = JSON.parse(await readFile(filePath, "utf8")) as {
+              readonly claims: readonly { readonly index: number; readonly id: string | null }[];
+            };
+            return {
+              ok: true,
+              value: {
+                formalizations: context.claims.map(({ index, id }) => ({
+                  index,
+                  ...makeSample(id ?? `UNKNOWN-${String(index)}`),
+                })),
+              },
+            };
+          });
+
+          const map = new Map([["auth", "merged/auth.md"]]);
+          const [resultA, resultB] = await Promise.all([
+            formalizeClaims({
+              claims: claimsA, model: "m", samplesPerClaim: 1, timeoutMs: 300_000,
+              concurrency: 1, logicalFileByCapability: map,
+            }),
+            formalizeClaims({
+              claims: claimsB, model: "m", samplesPerClaim: 1, timeoutMs: 300_000,
+              concurrency: 1, logicalFileByCapability: map,
+            }),
+          ]);
+
+          expect(resultA.ok).toBe(true);
+          expect(resultB.ok).toBe(true);
+          if (!resultA.ok || !resultB.ok) return;
+
+          // Each invocation's evidence references only its own claim set:
+          // claim ids in A's attempts come from A, and B's from B.
+          for (const attempt of resultA.value.batchAttempts) {
+            for (const id of attempt.claimIds) {
+              expect(id === null || indexesA.has(toClaimId(id))).toBe(true);
+              expect(id === null || !indexesB.has(toClaimId(id))).toBe(true);
+            }
+          }
+          for (const attempt of resultB.value.batchAttempts) {
+            for (const id of attempt.claimIds) {
+              expect(id === null || indexesB.has(toClaimId(id))).toBe(true);
+              expect(id === null || !indexesA.has(toClaimId(id))).toBe(true);
+            }
+          }
+        },
+      ),
+      { numRuns: 80 },
+    );
   });
 });

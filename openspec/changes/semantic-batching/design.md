@@ -29,7 +29,7 @@
 - No path normalization of `claim.provenance.file`.
 - No change to the claim-graph and solver-input activity filters (`requirements.length > 0`); `activeMergedSpecsForGrouping()` is used only for grouping-map construction.
 - No support for standalone scenario claims outside requirement blocks; the scenario-only activity clause is defensive only (unreachable in the current merge domain model, where merged scenarios derive only from requirement blocks).
-- `maxBatchSize` remains internal/test-only; no public configuration surface.
+- `maxBatchSize` is a public configuration surface (`--max-batch-size` CLI flag, config file `maxBatchSize`, built-in default `32`); `0` is an explicit opt-in to unbounded single-chunk groups.
 
 ## Proposed Design
 
@@ -182,7 +182,7 @@ interface BatchContextFile {
 Validity rules:
 
 - `samplesPerClaim`, `concurrency`: safe integers `>= 1`; invalid → `err(readonly FormalizationError[])` before `mapBounded`. `concurrency` is validated only when supplied; the pipeline currently omits it (default applies).
-- `maxBatchSize`: safe integer `>= 0`; default `0` (unbounded: one chunk per logical group); negative/`NaN`/`Infinity`/fractional → `err(...)`.
+- `maxBatchSize`: safe integer `>= 0`; resolved from `--max-batch-size`, config file `maxBatchSize`, or the built-in default `32`; `0` means unbounded (one chunk per logical group); negative/`NaN`/`Infinity`/fractional → `err(...)`. The default of `32` bounds each attached `formalizations` response below the model output-token threshold that otherwise truncates the JSON into `invalid_json` and forces a full per-claim inline fallback.
 - `logicalFileByCapability`: required in the pipeline path; empty map allowed; empty values rejected with `err(...)`. Invariant: the map covers every capability present on any eligible claim — the synthetic fallback guarantees a key even when a capability is unmapped, so a missing entry is never fatal, but map construction from `activeMergedSpecsForGrouping` makes it findable.
 - Empty `claims` array → empty successful output.
 
@@ -254,7 +254,7 @@ formalizeClaims(input: {
   readonly timeoutMs: number;                             // existing adapter timeout domain
   readonly concurrency?: number;                          // safe integer >= 1 when supplied
   readonly logicalFileByCapability: ReadonlyMap<string, string>; // required; empty map allowed
-  readonly maxBatchSize?: number;                         // safe integer >= 0; default 0 (unbounded)
+  readonly maxBatchSize?: number;                         // safe integer >= 0; default 32 (0 = unbounded)
 }): Promise<Result<FormalizationOutput, readonly FormalizationError[]>>
 ```
 
@@ -262,7 +262,7 @@ formalizeClaims(input: {
 
 `formalizeClaims` contract:
 
-- **Inputs**: `claims` (readonly), `model`, `samplesPerClaim >= 1`, `timeoutMs` (adapter domain), `concurrency >= 1` when supplied, `logicalFileByCapability` (required in pipeline path), `maxBatchSize >= 0` (default `0`).
+- **Inputs**: `claims` (readonly), `model`, `samplesPerClaim >= 1`, `timeoutMs` (adapter domain), `concurrency >= 1` when supplied, `logicalFileByCapability` (required in pipeline path), `maxBatchSize >= 0` (default `32`; `0` = unbounded).
 - **Eligibility**: only `kind === "requirement"` or `kind === "scenario"`.
 - **Postconditions**: at handled completion, candidate and claim-error indexes are disjoint and their union is the eligible-index set; no mutation of inputs; groups ordered by first key occurrence; claims in group preserve eligible order; sub-batches preserve group and claim order; candidates/errors emitted in eligible input order where practical, otherwise outputs carry explicit claim/index identity; findings ordered by phase of discovery, each with provenance and evidence; additional-sample failure preserves an existing candidate, emits a warning, and emits no claim error; the invocation contributes one attempt record per attached attempt (including failed attempts).
 
@@ -322,13 +322,13 @@ Thrown adapter failures are caught as `unknown` and normalized to claim-level `F
 
 ### Deployment and Rollout
 
-- Behavior change is internal to formalization/grouping; no configuration surface is added (`maxBatchSize` stays internal/test-only).
+- Behavior change is internal to formalization/grouping; the only new configuration surface is `maxBatchSize` (`--max-batch-size` CLI flag, config file `maxBatchSize`, default `32`, `0` = unbounded).
 - Rollout is gated by the full verification stack (contract, property, fault-injection, evidence, integration) plus `npm run lint` and `npm test`.
 - Rollback: revert the change; no persistent data migration exists.
 
 ### Capacity and Scaling
 
-- **First-sample call count is monotonically non-increasing relative to file grouping.** Semantic groups are unions of same-capability provenance-file groups: a capability whose claims span a base spec plus delta specs previously cost one batch call per provenance file and now costs one attached batch call per logical group. Capability-less claims and one-file capabilities produce exactly the same group count as file grouping. No input produces more first-sample calls than before, since different capabilities were never co-batched previously either. (Test-only `maxBatchSize > 1` deliberately increases first-sample calls by splitting a logical group; that is its purpose and never happens in production, where the default `0` keeps one batch per group.)
+- **First-sample call count is monotonically non-increasing relative to file grouping when `maxBatchSize` is `0`.** Semantic groups are unions of same-capability provenance-file groups: a capability whose claims span a base spec plus delta specs previously cost one batch call per provenance file and now costs one attached batch call per logical group. Capability-less claims and one-file capabilities produce exactly the same group count as file grouping. No input produces more first-sample calls than before, since different capabilities were never co-batched previously either. (With the default `maxBatchSize` of `32`, a logical group larger than 32 claims is split into bounded chunks, deliberately increasing first-sample calls for oversized groups in exchange for keeping each attached `formalizations` response below the model output-token threshold that otherwise truncates the JSON into `invalid_json` and forces a full per-claim inline fallback. An explicit `maxBatchSize` of `0` opts back into one unbounded batch per group.)
 - **Per-call work increases for attached batches**: merged logical groups are larger than per-file groups, the harness reads the attached JSON context before generating, and response size scales with claim count. Two mitigations apply: the inline prompt body no longer scales with claim text (claim bodies move to the attachment, so the adapter's inline prompt-size check becomes less likely to trip, not more), and capability-sized groups were already the pre-merge reality for single-spec capabilities.
 - **The universal timeout is unchanged (decision).** A too-tight timeout on a large attached batch degrades gracefully to bounded per-claim inline calls — each a small prompt that fits easily — so timeout pressure costs extra calls (latency/budget), never correctness. Raising the global default was rejected because it would slow failure detection for every other LLM phase and weaken the universal-timeout invariant (`FLA-FORMAL-TIMEOUT`). If operational data shows attached batches timing out regularly, the batch attempt evidence records (model, sub-batch ordinal, outcome classification) are the measurement mechanism for retuning; revisit then, not speculatively.
 - Larger logical groups (merged capabilities spanning many provenance files) increase context pressure; absorbed by file attachments (prompt excludes claim bodies) plus internal deterministic `maxBatchSize`.

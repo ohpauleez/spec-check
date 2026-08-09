@@ -228,15 +228,22 @@ describe("semantic batching concurrency contracts", () => {
       makeClaim("SIBLING-GROUP-REQ-1", "sibling-group.md", "sibling-group"),
       makeClaim("SIBLING-GROUP-REQ-2", "sibling-group.md", "sibling-group"),
     ];
-    let attachedCallNumber = 0;
 
+    // Discriminate by the attached context's batchKey, never by adapter
+    // invocation order: with concurrency >= group count, mapBounded starts all
+    // workers synchronously and each yields at its first await (temp-dir
+    // creation) before calling the adapter, so invocation order is
+    // nondeterministic and must not decide which group fails.
     mocked.mockImplementation(async (options) => {
       if (options.files === undefined) {
         throw new Error("a failed attached group must not start inline fallback");
       }
-      const groupNumber = attachedCallNumber;
-      attachedCallNumber += 1;
-      if (groupNumber === 0) {
+      const contextPath = options.files[0];
+      if (contextPath === undefined) {
+        throw new Error("attached call missing context path");
+      }
+      const context = JSON.parse(await readFile(contextPath, "utf8")) as { readonly batchKey?: unknown };
+      if (context.batchKey === "<merged-spec/failed-group>") {
         await delay(1);
         throw new Error("failed attached group");
       }

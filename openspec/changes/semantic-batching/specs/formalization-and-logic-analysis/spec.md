@@ -53,7 +53,7 @@ WHEN the spec-check tool forms logical groups, THE groups SHALL be ordered by fi
 **Postcondition:** Identical eligible inputs always produce identically ordered groups and group members.
 
 ### Requirement: Deterministic Physical Sub-Batching [FLA-SUBBATCH]
-WHILE `maxBatchSize` is an internal test-only control, WHEN the spec-check tool forms first-sample physical batches from one logical group, THE spec-check tool SHALL split the group by pure, deterministic, stable slicing such that `maxBatchSize` of `0` yields exactly one physical batch per logical group regardless of group size (unbounded), `maxBatchSize` of `1` yields single-claim inline batches, and `maxBatchSize` greater than `1` yields chunks of size at most `maxBatchSize`, and sub-batching SHALL never change a claim's semantic key.
+WHILE `maxBatchSize` is resolved from `--max-batch-size`, the config file `maxBatchSize`, or the built-in default of `32`, WHEN the spec-check tool forms first-sample physical batches from one logical group, THE spec-check tool SHALL split the group by pure, deterministic, stable slicing such that `maxBatchSize` of `0` yields exactly one physical batch per logical group regardless of group size (unbounded), `maxBatchSize` of `1` yields single-claim inline batches, and `maxBatchSize` greater than `1` yields chunks of size at most `maxBatchSize`, and sub-batching SHALL never change a claim's semantic key. The default of `32` bounds each attached `formalizations` response below the model output-token threshold that otherwise truncates the JSON into `invalid_json` and forces a full per-claim inline fallback.
 
 **References:**
 - `openspec/changes/semantic-batching/proposal.md#Scope`
@@ -63,10 +63,15 @@ WHILE `maxBatchSize` is an internal test-only control, WHEN the spec-check tool 
 
 [`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) models claim partition across physical batches and checks `batches_within_one_group`; numeric chunk bounds, stable slicing order, and `maxBatchSize` validation remain test obligations outside the model.
 
-#### Scenario: Default Disables Splitting [FLA-SUBBATCH-ZERO]
-WHEN `maxBatchSize` is `0` (the default), THE spec-check tool SHALL issue exactly one first-sample physical batch per logical group regardless of how many claims the group contains.
+#### Scenario: Explicit Zero Disables Splitting [FLA-SUBBATCH-ZERO]
+WHEN `maxBatchSize` is `0` (an explicit opt-in, not the default), THE spec-check tool SHALL issue exactly one first-sample physical batch per logical group regardless of how many claims the group contains.
 
-**Postcondition:** No physical sub-batching occurs by default, and the single chunk is unbounded in size.
+**Postcondition:** No physical sub-batching occurs, and the single chunk is unbounded in size.
+
+#### Scenario: Default Caps Batch Size [FLA-SUBBATCH-DEFAULT]
+WHEN `maxBatchSize` is not provided by CLI flag or config file, THE spec-check tool SHALL use the default of `32`, so a logical group larger than `32` claims is split into chunks of size at most `32` and a group of `32` or fewer claims stays a single batch.
+
+**Postcondition:** Physical sub-batching is bounded by default; the unbounded single-chunk behavior requires an explicit `maxBatchSize` of `0`.
 
 #### Scenario: Single-Claim Batches When Size One [FLA-SUBBATCH-ONE]
 WHEN `maxBatchSize` is `1`, THE spec-check tool SHALL issue every first-sample physical batch as a single-claim inline call.

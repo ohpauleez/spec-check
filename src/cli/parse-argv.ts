@@ -26,6 +26,7 @@ export interface CliArgs {
   readonly config?: string;
   readonly pairBudget?: string;
   readonly timeoutMs?: string;
+  readonly maxBatchSize?: string;
   readonly allowArchive: boolean;
   readonly help: boolean;
   readonly version: boolean;
@@ -56,9 +57,9 @@ export type ArgError =
   | { readonly kind: "missing_flag_value"; readonly flag: string };
 
 /** Closed domain of recognized CLI flag keys. */
-export type FlagKey = "--output" | "--src" | "--caps" | "--z3" | "--model" | "--config" | "--pair-budget" | "--timeout-ms";
+export type FlagKey = "--output" | "--src" | "--caps" | "--z3" | "--model" | "--config" | "--pair-budget" | "--timeout-ms" | "--max-batch-size";
 
-const FLAG_KEYS: ReadonlySet<string> = new Set<FlagKey>(["--output", "--src", "--caps", "--z3", "--model", "--config", "--pair-budget", "--timeout-ms"]);
+const FLAG_KEYS: ReadonlySet<string> = new Set<FlagKey>(["--output", "--src", "--caps", "--z3", "--model", "--config", "--pair-budget", "--timeout-ms", "--max-batch-size"]);
 
 /**
  * Narrow a validated flag string to the {@link FlagKey} union type.
@@ -141,6 +142,7 @@ export function parseArgv(argv: readonly string[]): Result<CliArgs, ArgError> {
   let config: string | undefined;
   let pairBudget: string | undefined;
   let timeoutMs: string | undefined;
+  let maxBatchSize: string | undefined;
   let allowArchive = false;
   let help = false;
   let version = false;
@@ -201,6 +203,9 @@ export function parseArgv(argv: readonly string[]): Result<CliArgs, ArgError> {
         case "--timeout-ms":
           timeoutMs = value;
           break;
+        case "--max-batch-size":
+          maxBatchSize = value;
+          break;
         default:
           assertNever(narrowedFlag);
       }
@@ -243,6 +248,9 @@ export function parseArgv(argv: readonly string[]): Result<CliArgs, ArgError> {
       case "--timeout-ms":
         timeoutMs = value;
         break;
+      case "--max-batch-size":
+        maxBatchSize = value;
+        break;
       default:
         assertNever(narrowedToken);
     }
@@ -261,5 +269,6 @@ export function parseArgv(argv: readonly string[]): Result<CliArgs, ArgError> {
     ...(config === undefined ? {} : { config }),
     ...(pairBudget === undefined ? {} : { pairBudget }),
     ...(timeoutMs === undefined ? {} : { timeoutMs }),
+    ...(maxBatchSize === undefined ? {} : { maxBatchSize }),
   });
 }

@@ -112,6 +112,19 @@ describe("CLI argument parsing", () => {
     expect(parsed.value.timeoutMs).toBe("45000");
   });
 
+  it("parses --max-batch-size in both space and equals syntax", () => {
+    traceSpec("CAT-CLI-ARGS", "CAT-CLI-EQSYNTAX");
+    const spaced = parseArgv(["in", "--max-batch-size", "16"]);
+    expect(spaced.ok).toBe(true);
+    if (!spaced.ok) return;
+    expect(spaced.value.maxBatchSize).toBe("16");
+
+    const equals = parseArgv(["in", "--max-batch-size=24"]);
+    expect(equals.ok).toBe(true);
+    if (!equals.ok) return;
+    expect(equals.value.maxBatchSize).toBe("24");
+  });
+
   it("parses allow-archive as boolean flag", () => {
     traceSpec("CAT-CLI-ALLOW-ARCH");
     const parsed = parseArgv(["/tmp/input", "--allow-archive"]);

@@ -102,6 +102,26 @@ describe("semantic physical batching contracts", () => {
     expect(singleClaim.map((batch) => batch.claims.length)).toEqual([1, 1, 1, 1]);
     expect(singleClaim.flatMap((batch) => batch.claims.map((claim) => claim.index))).toEqual([0, 1, 2, 3]);
   });
+
+  it("caps an omitted maxBatchSize at the safe default of 32", () => {
+    traceSpec("FLA-SUBBATCH", "FLA-SUBBATCH-CHUNKS", "FLA-SUBBATCH-DEFAULT");
+    // 40 claims exceeds the 32 default, so an omitted cap must split into two
+    // batches [32, 8]; a group within the cap stays a single batch. Explicit 0
+    // remains unbounded.
+    const largeGroup = { logicalFile: "<merged-spec/auth>", claims: makeIndexedClaims(40) };
+    const smallGroup = { logicalFile: "<merged-spec/auth>", claims: makeIndexedClaims(40) };
+
+    const capped = splitPhysicalBatches(largeGroup, 32);
+    expect(capped.map((batch) => batch.claims.length)).toEqual([32, 8]);
+    expect(capped.flatMap((batch) => batch.claims.map((claim) => claim.index)))
+      .toEqual(Array.from({ length: 40 }, (_, index) => index));
+
+    const withinCap = splitPhysicalBatches({ ...smallGroup, claims: makeIndexedClaims(32) }, 32);
+    expect(withinCap).toHaveLength(1);
+
+    const explicitUnbounded = splitPhysicalBatches(largeGroup, 0);
+    expect(explicitUnbounded).toHaveLength(1);
+  });
 });
 
 describe("attached semantic batch transport contracts", () => {

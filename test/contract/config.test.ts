@@ -198,4 +198,93 @@ describe("config loading and precedence", () => {
     if (!resolved.ok) return;
     expect(resolved.value.pairBudget).toBe(50);
   });
+
+  it("defaults maxBatchSize to 32 when no flag or config is provided", async () => {
+    traceSpec("CAT-CLI-CONFIG", "CAT-CONFIG-MERGE");
+    const resolved = await resolveRunConfig({
+      inputs: ["in"],
+      help: false,
+      version: false,
+      allowArchive: false,
+    });
+
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.maxBatchSize).toBe(32);
+  });
+
+  it("accepts valid --max-batch-size and CLI overrides config", async () => {
+    traceSpec("CAT-CLI-CONFIG", "CAT-CONFIG-MERGE");
+    const resolved = await resolveRunConfig({
+      inputs: ["in"],
+      maxBatchSize: "16",
+      help: false,
+      version: false,
+      allowArchive: false,
+    });
+
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.maxBatchSize).toBe(16);
+  });
+
+  it("accepts --max-batch-size 0 as explicitly unbounded", async () => {
+    traceSpec("CAT-CLI-CONFIG");
+    const resolved = await resolveRunConfig({
+      inputs: ["in"],
+      maxBatchSize: "0",
+      help: false,
+      version: false,
+      allowArchive: false,
+    });
+
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.maxBatchSize).toBe(0);
+  });
+
+  it("rejects invalid --max-batch-size (non-numeric)", async () => {
+    traceSpec("CAT-CLI-CONFIG");
+    const resolved = await resolveRunConfig({
+      inputs: ["in"],
+      maxBatchSize: "abc",
+      help: false,
+      version: false,
+      allowArchive: false,
+    });
+
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(resolved.error.kind).toBe("max_batch_size_validation_error");
+  });
+
+  it("rejects invalid --max-batch-size (negative)", async () => {
+    traceSpec("CAT-CLI-CONFIG");
+    const resolved = await resolveRunConfig({
+      inputs: ["in"],
+      maxBatchSize: "-5",
+      help: false,
+      version: false,
+      allowArchive: false,
+    });
+
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(resolved.error.kind).toBe("max_batch_size_validation_error");
+  });
+
+  it("rejects invalid --max-batch-size (fractional)", async () => {
+    traceSpec("CAT-CLI-CONFIG");
+    const resolved = await resolveRunConfig({
+      inputs: ["in"],
+      maxBatchSize: "1.5",
+      help: false,
+      version: false,
+      allowArchive: false,
+    });
+
+    expect(resolved.ok).toBe(false);
+    if (resolved.ok) return;
+    expect(resolved.error.kind).toBe("max_batch_size_validation_error");
+  });
 });

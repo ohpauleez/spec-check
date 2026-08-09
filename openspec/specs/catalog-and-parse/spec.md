@@ -155,7 +155,7 @@ IF recognized documents are present but another admission or filtering policy re
 - Test (integration): [catalog-abort.integration.test.ts:110 aborts pipeline on all_filtered](/test/integration/catalog-abort.integration.test.ts#L110)
 
 ### Requirement: CLI Argument Validation [CAT-CLI-ARGS]
-THE spec-check CLI SHALL accept positional input paths and optional `--output`, `--src`, `--caps`, `--z3`, `--config`, `--timeout-ms`, `--allow-archive`, `--help`, and `--version` flags, and SHALL reject unrecognized flags or missing required inputs with exit code `2` before any analysis begins.
+THE spec-check CLI SHALL accept positional input paths and optional `--output`, `--src`, `--caps`, `--z3`, `--config`, `--timeout-ms`, `--max-batch-size`, `--allow-archive`, `--help`, and `--version` flags, and SHALL reject unrecognized flags or missing required inputs with exit code `2` before any analysis begins.
 
 **References:**
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Scope`

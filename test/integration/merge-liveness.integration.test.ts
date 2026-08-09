@@ -90,6 +90,7 @@ function makeConfig(inputRoot: string, output: string): RunConfig {
     model: toModelName("test-model"),
     pairBudget: 100,
     timeoutMs: 300_000,
+    maxBatchSize: 32,
     allowArchive: false,
   };
 }

@@ -1090,7 +1090,7 @@ Protocol rules:
 
 - `run-cli.ts` builds the capability-to-logical-file map once and passes the same map instance to formalization and solver grouping; solver-specific exclusions occur before grouping
 - formalization and solver grouping call the same semantic key helper; exact key equality defines groups, and source provenance is preserved rather than used as the grouping identity for capability-bearing claims
-- first-sample physical sub-batches never cross semantic groups and preserve eligible order; `maxBatchSize=0` means one unbounded chunk per logical group
+- first-sample physical sub-batches never cross semantic groups and preserve eligible order; `maxBatchSize` defaults to `32` (resolved from `--max-batch-size`, config `maxBatchSize`, or the default), and an explicit `0` means one unbounded chunk per logical group. The `32` default bounds each attached `formalizations` response below the model output-token threshold that otherwise truncates the JSON into `invalid_json` and forces a full per-claim inline fallback
 - multi-claim first-sample batches use deterministic attached JSON marked as untrusted data; single-claim and additional-sample calls remain inline
 - attached responses are matched by required original eligible `index`, never by array position or `claim.id`; unknown, duplicate, or missing indexes are schema failures
 - attached temp directories use the `spec-check-batch-` prefix and fixed `batch-context.json`; evidence is recorded and cleanup is attempted in `finally` before claim outcomes are assigned on handled paths; process termination may bypass cleanup
@@ -1355,7 +1355,7 @@ Relevant code: [`src/domain/result.ts`](src/domain/result.ts), [`src/domain/erro
 |-------|-----------|-------|
 | **Qualitative analysis completes** | If `opencode` responds with valid output within retry bounds | Bounded retries (default 3) with universal per-call timeout (default 300s) |
 | **Formalization reaches terminal outcomes** | Under handled adapter outcomes, candidate and claim-error indexes exactly and disjointly partition eligible indexes; sibling physical batches continue after localized failure | Bounded adapter retries (3); worst-case in-flight adapter calls are `concurrency × INLINE_FALLBACK_CONCURRENCY (2)` on the degradation path and `concurrency` otherwise |
-| **Physical sub-batching terminates** | Pure stable slicing advances through each finite logical group | Every valid `maxBatchSize`; `0` produces one chunk and positive values bound chunk size |
+| **Physical sub-batching terminates** | Pure stable slicing advances through each finite logical group | Every valid `maxBatchSize`; `0` produces one chunk and positive values bound chunk size; the omitted default is `32` |
 | **Attached temp cleanup is attempted** | Every handled attached terminal path that reaches lifecycle finalization enters `finally`; directory-creation failure owes no cleanup | After success, model failure, adapter-return failure, thrown failure, or partial write; excludes process termination |
 | **Solver analysis completes** | If `z3` responds within per-query timeout | Per-query timeout (default 30s) |
 | **Cross-side implication completes** | If `z3` responds within per-query timeout | Per-query timeout; pair budget bounds total work (default 200) |
@@ -1719,6 +1719,7 @@ spec-check [OPTIONS] [INPUT FILES]
 | `--z3` | Path to Z3 binary | `z3` on PATH |
 | `--config` | JSON configuration file for model and prompt settings | not set |
 | `--timeout-ms` | Universal timeout for all external LLM calls (`30_000..900_000`) | `300_000` |
+| `--max-batch-size` | Maximum claims per attached formalization batch (`0` = unbounded) | `32` |
 | `--allow-archive` | Admit explicitly provided archived OpenSpec inputs into active catalog | `false` |
 | `--pair-budget` | Maximum N*M pairwise comparisons per capability | `200` |
 | `--model` | LLM model identifier for `opencode` | adapter default |

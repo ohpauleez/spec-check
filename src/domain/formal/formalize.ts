@@ -90,7 +90,13 @@ const FORMALIZATION_CONCURRENCY_DEFAULT = 3;
 // multiplier a fixed constant, never the batch size.
 const INLINE_FALLBACK_CONCURRENCY = 2;
 const ADAPTER_RETRIES = 3;
-const MAX_BATCH_SIZE_DEFAULT = 0;
+// Bounded default: large single batches push the model past its output-token
+// budget, which truncates the `formalizations` array and surfaces as terminal
+// `invalid_json` followed by a full per-claim inline fallback (the slow path).
+// 32 keeps each attached response under the observed ~40-claim success
+// threshold while still batching many claims per call. An explicit
+// `maxBatchSize` (including 0 = unbounded) overrides this default.
+const MAX_BATCH_SIZE_DEFAULT = 32;
 
 /**
  * Formalize all eligible claims using stable semantic groups and bounded batches.

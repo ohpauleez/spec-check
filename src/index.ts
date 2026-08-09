@@ -143,6 +143,8 @@ function parseConfigError(error: ConfigError): SpecCheckError {
       return makeTypedError("ConfigError", error.message);
     case "pair_budget_validation_error":
       return makeTypedError("ConfigError", error.message);
+    case "max_batch_size_validation_error":
+      return makeTypedError("ConfigError", error.message);
     default:
       return assertNever(error);
   }
@@ -164,7 +166,7 @@ function printHelp(): void {
       `spec-check v${SPEC_CHECK_VERSION}`,
       "",
       "Usage:",
-      "  spec-check <input...> [--output <dir>] [--src <dir>] [--model <name>] [--caps <path>] [--z3 <path>] [--config <path>] [--timeout-ms <ms>] [--allow-archive]",
+      "  spec-check <input...> [--output <dir>] [--src <dir>] [--model <name>] [--caps <path>] [--z3 <path>] [--config <path>] [--timeout-ms <ms>] [--max-batch-size <n>] [--allow-archive]",
       "  spec-check --help",
       "  spec-check --version",
       "",
@@ -176,6 +178,7 @@ function printHelp(): void {
       "  --z3 <path>      Path to z3 binary",
       "  --config <path>  Path to JSON config file",
       "  --timeout-ms <n> Universal timeout for external LLM calls (30000-900000)",
+      "  --max-batch-size <n> Max claims per attached formalization batch (0 = unbounded; default 32)",
       "  --allow-archive  Admit explicitly provided archived inputs",
       "  --help, -h       Print help and exit",
       "  --version, -v    Print version and exit",

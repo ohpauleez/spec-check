@@ -394,6 +394,7 @@ async function runFormalizationPhaseWithEvidence(
       model: config.model,
       samplesPerClaim: 1,
       timeoutMs: config.timeoutMs,
+      maxBatchSize: config.maxBatchSize,
       logicalFileByCapability,
     });
     const evidenceFile = await writeFormalizationAttemptSet(

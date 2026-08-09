@@ -13,6 +13,20 @@ import { precondition } from "../domain/assert.js";
 import type { OutputDirPath, RelativePath } from "../domain/branded.js";
 
 /**
+ * Directories already ensured by {@link writeOutputAtomic} in this process.
+ *
+ * @remarks
+ * Memoizing `mkdir` turns one syscall per output file into one per distinct
+ * output directory. Growth is bounded by the number of distinct output
+ * directories, which is derived from the run configuration and therefore
+ * small and finite; a long-lived process cannot grow this set without bound.
+ * Entries are only added after a successful `mkdir`, and `mkdir` with
+ * `recursive: true` is idempotent, so a stale entry after an external
+ * deletion costs at most one failed write that surfaces to the caller.
+ */
+const ensuredDirectories = new Set<string>();
+
+/**
  * Resolve and validate that a path stays inside the output directory.
  *
  * @param outputDir - configured output directory
@@ -62,10 +76,19 @@ export function resolveConfinedOutputPath(outputDir: OutputDirPath, relativePath
  * Safety: uses PID and timestamp in temp filename to avoid collisions between
  * concurrent calls targeting the same output path. Not safe for concurrent writes
  * to the same `relativePath` from multiple processes (last rename wins).
+ * Parent-directory creation is memoized process-locally in
+ * `ensuredDirectories`; the memo is an optimization only and does not change
+ * the write/rename guarantees above.
  */
 export async function writeOutputAtomic(outputDir: OutputDirPath, relativePath: RelativePath, content: string): Promise<void> {
   const finalPath = resolveConfinedOutputPath(outputDir, relativePath);
-  await mkdir(dirname(finalPath), { recursive: true });
+  const parentDir = dirname(finalPath);
+  // Skip the syscall for directories already ensured this process; recursive
+  // mkdir is idempotent, so the memo only removes redundant work.
+  if (!ensuredDirectories.has(parentDir)) {
+    await mkdir(parentDir, { recursive: true });
+    ensuredDirectories.add(parentDir);
+  }
   const tempPath = `${finalPath}.tmp-${process.pid}-${Date.now().toString(16)}`;
   await writeFile(tempPath, content, "utf8");
   try {

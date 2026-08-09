@@ -194,6 +194,22 @@ export function selectClaimLogicalFile(
 }
 
 /**
+ * Whether a claim is eligible for formalization.
+ *
+ * @param claim - claim to classify
+ * @returns `true` for requirement and scenario claims, the two kinds that
+ *   carry formalizable obligations
+ *
+ * @remarks
+ * This is the single eligibility predicate shared by grouping and by the CLI
+ * layer that resolves eligible indexes back to claims; keeping it in one
+ * place prevents the two from drifting. The function is pure and total.
+ */
+export function isFormalizableClaim(claim: Claim): boolean {
+  return claim.kind === "requirement" || claim.kind === "scenario";
+}
+
+/**
  * Group formalizable claims by their exact semantic logical-file key.
  *
  * @param claims - all claims; only requirement and scenario claims are eligible
@@ -214,7 +230,7 @@ export function groupFormalizationClaims(
   let index = 0;
 
   for (const claim of claims) {
-    if (claim.kind !== "requirement" && claim.kind !== "scenario") {
+    if (!isFormalizableClaim(claim)) {
       continue;
     }
 

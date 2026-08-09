@@ -353,8 +353,9 @@ export async function createBatchContextDirectory(
  *
  * @param directory - owned `dir_created` state returned by this module
  * @param serializedContext - canonical context text to write verbatim as UTF-8
- * @param contextSha256 - optional known hash of `serializedContext`; when
- *   omitted, this function computes it for source compatibility
+ * @param contextSha256 - known hash of `serializedContext`; required so a
+ *   caller that forgets to thread the prepared hash fails at compile time
+ *   instead of silently recomputing it
  * @returns `ok` with `file_written`, or a primary `file_write_failed` error
  *
  * @remarks
@@ -366,13 +367,14 @@ export async function createBatchContextDirectory(
  *
  * @example
  * ```ts
- * const written = await writeBatchContextFile(created.value, serialized);
+ * const data = prepareBatchContextData(context);
+ * const written = await writeBatchContextFile(created.value, data.serializedContext, data.contextSha256);
  * ```
  */
 export async function writeBatchContextFile(
   directory: BatchContextDirectory,
   serializedContext: string,
-  contextSha256: string = hashBatchContext(serializedContext),
+  contextSha256: string,
 ): Promise<Result<WrittenBatchContext, BatchTransportError>> {
   const filePath = join(directory.directoryPath, BATCH_CONTEXT_FILENAME);
   try {

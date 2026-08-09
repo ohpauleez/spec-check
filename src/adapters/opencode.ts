@@ -16,6 +16,27 @@ import { DEFAULT_TIMEOUT_MS, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS } from "../domain/ti
 export { PROMPT_ARG_MAX_BYTES } from "./opencode-limits.js";
 
 /**
+ * First backoff delay between adapter retry attempts, in milliseconds.
+ *
+ * @remarks
+ * The base exists so transient backend contention (the dominant cause of
+ * `timeout` and `invalid_json` failures) is given time to clear before a
+ * respawn; without it, immediate retries amplify an already-degraded backend.
+ */
+const RETRY_BACKOFF_BASE_MS = 250;
+
+/**
+ * Upper bound on the exponential backoff delay between adapter retry attempts,
+ * in milliseconds.
+ *
+ * @remarks
+ * The cap exists so a large caller-supplied `retries` budget cannot push the
+ * per-attempt delay beyond a few seconds; the shift in {@link retryBackoffMs}
+ * is bounded by this constant rather than by the attempt count.
+ */
+const RETRY_BACKOFF_MAX_MS = 2_000;
+
+/**
  * Closed domain of verification phases supported by the opencode invocation protocol.
  *
  * @remarks
@@ -45,6 +66,14 @@ export interface OpencodeCallOptions {
   readonly timeoutMs?: number;
   readonly retries?: number;
   readonly files?: readonly string[];
+  /**
+   * Delay hook applied between retry attempts; defaults to a real timer.
+   *
+   * @remarks
+   * Injected so tests can advance time deterministically instead of waiting
+   * out real backoff delays. Production callers should leave this unset.
+   */
+  readonly backoffDelay?: (delayMs: number) => Promise<void>;
 }
 
 /**
@@ -63,6 +92,62 @@ export interface OpencodeError {
 }
 
 /**
+ * Exponential backoff delay before retry attempt `attempt` (1-based), in
+ * milliseconds.
+ *
+ * @param attempt - the attempt that just failed; the returned delay precedes
+ *   attempt `attempt + 1`
+ * @returns `RETRY_BACKOFF_BASE_MS * 2^(attempt-1)`, capped at
+ *   `RETRY_BACKOFF_MAX_MS`
+ *
+ * @remarks
+ * The cap is applied after the shift so a large caller-supplied retry budget
+ * cannot overflow the delay into multi-minute territory; for any realistic
+ * budget the value stays a safe small integer. Pure and total.
+ */
+function retryBackoffMs(attempt: number): number {
+  return Math.min(RETRY_BACKOFF_BASE_MS * 2 ** Math.max(0, attempt - 1), RETRY_BACKOFF_MAX_MS);
+}
+
+/**
+ * Whether a failure kind can plausibly heal by respawning an identical call.
+ *
+ * @param kind - the terminal failure kind of the last attempt
+ * @returns `true` for transient kinds (`spawn_error`, `timeout`,
+ *   `invalid_json`); `false` for kinds that are deterministic for a fixed
+ *   request
+ *
+ * @remarks
+ * `prompt_too_large`, `invalid_timeout`, and `invalid_files` are request-shape
+ * failures decided before any subprocess work. `schema_validation_error` is
+ * deterministic at the adapter layer because the retry loop respawns an
+ * identical prompt; recovering from stochastic model disagreement is the
+ * domain layer's job (it rebuilds attempts with its own budget). Keeping this
+ * classification total over the closed `kind` union forces a deliberate
+ * decision when new kinds are added.
+ */
+function isTransientFailureKind(kind: OpencodeError["kind"]): boolean {
+  return kind === "spawn_error" || kind === "timeout" || kind === "invalid_json";
+}
+
+/**
+ * Default backoff delay implementation backed by a real timer.
+ *
+ * @param delayMs - delay in milliseconds; expected to be a safe non-negative
+ *   integer produced by {@link retryBackoffMs}
+ * @returns a promise that resolves after the delay
+ *
+ * @remarks
+ * This is the only timer in the adapter; injecting `options.backoffDelay`
+ * replaces it so tests never wait on wall-clock time.
+ */
+function defaultBackoffDelay(delayMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, delayMs);
+  });
+}
+
+/**
  * Call `opencode` with bounded retries and strict JSON validation.
  *
  * @param options - invocation options including model, prompt, phase, and retry/timeout config
@@ -78,7 +163,14 @@ export interface OpencodeError {
  * - Process exceeds timeout on every attempt → `kind: "timeout"`.
  * - Model returns non-JSON output → `kind: "invalid_json"`.
  * - Model returns JSON that fails phase schema validation → `kind: "schema_validation_error"`.
- * - All failures are retried up to `options.retries` (default 3) before returning error.
+ *
+ * Retry policy: only transient kinds (`spawn_error`, `timeout`, `invalid_json`)
+ * are retried, up to `options.retries` (default 3) total attempts. The remaining
+ * kinds are deterministic for a fixed request — respawning an identical call
+ * cannot heal them — so they return immediately. Between attempts the loop
+ * waits {@link retryBackoffMs}, an exponential backoff capped at
+ * {@link RETRY_BACKOFF_MAX_MS}, injected via `options.backoffDelay` so time
+ * stays at the adapter edge and tests can control it.
  *
  * Safety: spawns up to `retries` sequential subprocess invocations. No concurrent
  * subprocess overlap within a single call. Network failures in the LLM backend
@@ -90,6 +182,7 @@ export async function callOpencode(
   const command = options.binaryPath ?? "opencode";
   const retries = options.retries ?? 3;
   const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+  const backoffDelay = options.backoffDelay ?? defaultBackoffDelay;
 
   const promptBytes = Buffer.byteLength(options.prompt, "utf8");
   if (promptBytes > PROMPT_ARG_MAX_BYTES) {
@@ -126,6 +219,12 @@ export async function callOpencode(
 
   let lastError: OpencodeError | undefined;
   for (let attempt = 1; attempt <= retries; attempt += 1) {
+    // Backoff precedes every attempt after the first; attempt 1 runs
+    // immediately so the common no-retry path pays no scheduling cost.
+    if (attempt > 1) {
+      await backoffDelay(retryBackoffMs(attempt - 1));
+    }
+
     let processResult;
     try {
       processResult = await runProcess(command, args, {
@@ -186,6 +285,12 @@ export async function callOpencode(
     const validated = validatePhaseSchema(options.phase, parsed);
     if (!validated.ok) {
       lastError = validated.error;
+      // A deterministic failure cannot heal by respawning an identical call;
+      // stop here regardless of the remaining retry budget so a schema
+      // mismatch costs one spawn instead of the full budget.
+      if (!isTransientFailureKind(validated.error.kind)) {
+        break;
+      }
       continue;
     }
 

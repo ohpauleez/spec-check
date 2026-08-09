@@ -84,6 +84,12 @@ export function buildFormalizationAttemptSet(
  * non-negative safe integer; violations throw via {@link precondition}.
  * Postcondition: undeclared runtime properties (such as attached claim text)
  * cannot enter durable output. The function is pure and performs no I/O.
+ *
+ * The arrays are re-copied and re-frozen even though producers
+ * (`finalizeBatchEvidence`, `buildBatchEvidenceMetadata`) already freeze
+ * theirs: this is deliberate defense-in-depth at the durable-output boundary.
+ * The durable record must not alias caller-held arrays, so a later in-place
+ * mutation of a producer's array can never retroactively alter evidence.
  */
 function copyAttemptEvidence(attempt: BatchAttemptEvidence): BatchAttemptEvidence {
   precondition(

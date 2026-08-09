@@ -371,34 +371,33 @@ describe("opencode adapter contract", () => {
     expect(result.error.kind).toBe("schema_validation_error");
   });
 
-  it("retries after an indexed formalization schema error and accepts a valid response", async () => {
+  it("does not retry a deterministic schema_validation_error", async () => {
     traceSpec("FLA-ATTACHP-INDEX-VALID");
+    // Invariant: a schema failure is deterministic for a fixed prompt, so the
+    // adapter must not respawn — the second mock value would be reachable only
+    // if the retry gate were missing.
     const { runProcess } = await import("../../src/adapters/process.js");
     const mocked = vi.mocked(runProcess);
-    mocked
-      .mockResolvedValueOnce({
-        exitCode: 0,
-        signal: null,
-        stdout: JSON.stringify({ formalizations: [{ claimId: "R1" }] }),
-        stderr: "",
-        timedOut: false,
-      })
-      .mockResolvedValueOnce({
-        exitCode: 0,
-        signal: null,
-        stdout: JSON.stringify({ formalizations: [{ index: 0, claimId: "R1" }] }),
-        stderr: "",
-        timedOut: false,
-      });
+    mocked.mockResolvedValue({
+      exitCode: 0,
+      signal: null,
+      stdout: JSON.stringify({ formalizations: [{ claimId: "R1" }] }),
+      stderr: "",
+      timedOut: false,
+    });
 
-    const result = await callOpencode({ model: "m", phase: "formalization", prompt: "test", retries: 2 });
+    const result = await callOpencode({ model: "m", phase: "formalization", prompt: "test", retries: 3 });
 
-    expect(result.ok).toBe(true);
-    expect(mocked).toHaveBeenCalledTimes(2);
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("schema_validation_error");
+    expect(mocked).toHaveBeenCalledTimes(1);
   });
 
-  it("returns schema_validation_error after indexed formalization retries are exhausted", async () => {
+  it("returns schema_validation_error once without exhausting the retry budget", async () => {
     traceSpec("FLA-ATTACHP-INDEX-VALID", "FLA-SAMPLE-EXHAUST");
+    // Invariant: a fractional index fails schema validation deterministically,
+    // so a retry budget of 2 must still yield exactly one spawn.
     const { runProcess } = await import("../../src/adapters/process.js");
     const mocked = vi.mocked(runProcess);
     mocked.mockResolvedValue({
@@ -415,7 +414,7 @@ describe("opencode adapter contract", () => {
     if (result.ok) return;
     expect(result.error.kind).toBe("schema_validation_error");
     expect(result.error.phase).toBe("formalization");
-    expect(mocked).toHaveBeenCalledTimes(2);
+    expect(mocked).toHaveBeenCalledTimes(1);
   });
 
   it("retries on invalid JSON up to retry limit then fails", async () => {
@@ -430,17 +429,25 @@ describe("opencode adapter contract", () => {
       timedOut: false,
     });
 
+    const delays: number[] = [];
     const result = await callOpencode({
       model: "m",
       phase: "formalization",
       prompt: "test",
       retries: 2,
+      backoffDelay: (delayMs) => {
+        delays.push(delayMs);
+        return Promise.resolve();
+      },
     });
 
     expect(result.ok).toBe(false);
     if (result.ok) return;
     expect(result.error.kind).toBe("invalid_json");
     expect(mocked).toHaveBeenCalledTimes(2);
+    // One backoff precedes attempt 2; the exponential schedule starts at the
+    // 250ms base and no delay follows the final failed attempt.
+    expect(delays).toEqual([250]);
   });
 
   it("rejects event streams with no text payload", async () => {

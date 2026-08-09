@@ -32,7 +32,7 @@ import {
   groupRepresentativesBySpec,
   runCodeBackwardsWork,
 } from "./pipeline-helpers.js";
-import { activeMergedSpecsForGrouping, buildLogicalFileByCapability } from "../domain/formal/grouping.js";
+import { activeMergedSpecsForGrouping, buildLogicalFileByCapability, isFormalizableClaim } from "../domain/formal/grouping.js";
 import { removeOutputTree } from "../adapters/fs.js";
 import {
   FORMALIZATION_EVIDENCE_DIRECTORY,
@@ -96,7 +96,7 @@ function formalizationErrorsToFindings(
   errors: readonly FormalizationError[],
   claims: readonly Claim[],
 ): readonly Finding[] {
-  const eligibleClaims = claims.filter((claim) => claim.kind === "requirement" || claim.kind === "scenario");
+  const eligibleClaims = claims.filter(isFormalizableClaim);
 
   return errors.map((error) => {
     precondition(
@@ -142,9 +142,14 @@ function formalizationErrorsToFindings(
  * Invariant: findings are append-only across all phases.
  */
 export async function runCli(config: RunConfig): Promise<RunState> {
-  // Invalidate all prior-run completion and formalization evidence before work begins.
-  await invalidateStaleManifest(config.output);
-  await removeOutputTree(config.output, FORMALIZATION_EVIDENCE_DIRECTORY);
+  // Invalidate all prior-run completion and formalization evidence before work
+  // begins. The two operations touch disjoint paths (the manifest file versus
+  // the evidence subtree) and are both idempotent, so they commute and can run
+  // concurrently without ordering constraints.
+  await Promise.all([
+    invalidateStaleManifest(config.output),
+    removeOutputTree(config.output, FORMALIZATION_EVIDENCE_DIRECTORY),
+  ]);
 
   // Phases 1-3: dependency check, catalog build, document parsing.
   const ingestion = await runIngestionPhases(config);

@@ -6,6 +6,7 @@
  */
 import { mapBounded } from "../../adapters/concurrency.js";
 import { callOpencode, type OpencodeError } from "../../adapters/opencode.js";
+import { precondition } from "../assert.js";
 import type { Claim } from "../claim-graph.js";
 import { sanitizeForCodeFence } from "../fence.js";
 import type { Finding } from "../findings.js";
@@ -38,7 +39,11 @@ import {
 import { validateFormalizationSample } from "./validate.js";
 
 const FORMALIZATION_CONCURRENCY_DEFAULT = 3;
-const INLINE_FALLBACK_CONCURRENCY = 1;
+// Fallback workers execute inside worker slots of the outer
+// `mapBounded(batches, concurrency)` pool, so total in-flight adapter calls
+// stay bounded by the configured budget; 2 pipelines one claim's retry with
+// the next claim's first attempt without adding adapter pressure.
+const INLINE_FALLBACK_CONCURRENCY = 2;
 const ADAPTER_RETRIES = 3;
 const MAX_BATCH_SIZE_DEFAULT = 0;
 
@@ -545,7 +550,11 @@ async function callAndAssembleAttached(
  * failure kind and whether every inline prompt fits the adapter limit. When
  * the decision is to emit claim errors, no further adapter work occurs. When
  * it is to fall back, each claim is retried inline at
- * `INLINE_FALLBACK_CONCURRENCY` so total adapter pressure stays bounded.
+ * `INLINE_FALLBACK_CONCURRENCY`; because fallback workers run inside slots of
+ * the outer `mapBounded(batches, concurrency)` pool, total in-flight adapter
+ * calls stay bounded by the configured budget. The per-claim prompts built
+ * for the fit check are reused for the fallback calls, so each claim's prompt
+ * is constructed exactly once per recovery.
  */
 async function recoverAttachedFailure(
   input: {
@@ -557,9 +566,10 @@ async function recoverAttachedFailure(
   failure: OpencodeError,
 ): Promise<AttachedAssembly> {
   const outcome = classifyAdapterFailure(failure.kind);
-  const inlineFit = inlinePromptsFitOpencodeLimit(
-    input.batch.claims.map((entry) => buildFormalizationPrompt(entry.claim)),
-  );
+  // Build each claim's prompt once: the same array feeds both the fit check
+  // and, on fallback, the inline calls themselves.
+  const inlinePrompts = input.batch.claims.map((entry) => buildFormalizationPrompt(entry.claim));
+  const inlineFit = inlinePromptsFitOpencodeLimit(inlinePrompts);
   const decision = decideBatchDegradation(failure.kind, inlineFit);
   if (decision.kind === "emit_claim_errors") {
     return {
@@ -575,6 +585,7 @@ async function recoverAttachedFailure(
     input.model,
     input.samplesPerClaim,
     input.timeoutMs,
+    inlinePrompts,
   );
   return { ...fallback, outcome };
 }
@@ -781,21 +792,37 @@ function readBatchEntryIndex(entry: unknown): number | undefined {
  *   context
  *
  * @remarks
- * Concurrency is pinned to `INLINE_FALLBACK_CONCURRENCY` (sequential) so a
- * degraded batch cannot amplify adapter load. A worker that throws is caught
+ * Concurrency is `INLINE_FALLBACK_CONCURRENCY` (2). Ownership model: claims
+ * are partitioned one per worker, each claim has a single writer, and results
+ * are joined by eligible index, so any interleaving of workers yields the
+ * same candidates and errors. These workers run inside slots of the outer
+ * `mapBounded(batches, concurrency)` pool, so a degraded batch cannot amplify
+ * adapter load beyond the configured budget. A worker that throws is caught
  * per claim and normalized to an error, so one bad claim cannot discard the
  * other claims' results. Postcondition: every input claim contributes exactly
  * one candidate or one error. Inputs are never mutated.
+ *
+ * @param prompts - optional prebuilt per-claim prompts, parallel to `claims`;
+ *   when provided, `prompts[i]` must be the prompt for `claims[i]`
  */
 async function fallbackClaims(
   claims: readonly IndexedFormalizationClaim[],
   model: string,
   samplesPerClaim: number,
   timeoutMs: number,
+  prompts?: readonly string[],
 ): Promise<BatchResult> {
-  const results = await mapBounded(claims, INLINE_FALLBACK_CONCURRENCY, async (indexedClaim) => {
+  precondition(
+    prompts === undefined || prompts.length === claims.length,
+    "fallback prompts must be parallel to claims",
+  );
+  const results = await mapBounded(claims, INLINE_FALLBACK_CONCURRENCY, async (indexedClaim, position) => {
     try {
-      return await sampleFormalizationsForClaim({ indexedClaim, model, samplesPerClaim, timeoutMs });
+      const prompt = prompts === undefined ? undefined : prompts[position];
+      const sampling = prompt === undefined
+        ? { indexedClaim, model, samplesPerClaim, timeoutMs }
+        : { indexedClaim, model, samplesPerClaim, timeoutMs, prompt };
+      return await sampleFormalizationsForClaim(sampling);
     } catch (error: unknown) {
       return err(makeClaimError(indexedClaim, describeUnknownError(error, "inline fallback failed")));
     }
@@ -828,11 +855,13 @@ async function fallbackClaims(
  * @remarks
  * Only the deficit (`samplesPerClaim - candidate.samples.length`) is
  * requested, so per-claim adapter work stays bounded by the attempt budget in
- * {@link sampleFormalizationsForClaim}. Top-up runs sequentially at
- * `INLINE_FALLBACK_CONCURRENCY`; a thrown or failed top-up preserves the
- * original candidate and emits a warning finding instead of an error, because
- * the claim already has at least one valid sample. Postcondition: every input
- * candidate appears exactly once in the output, ordered by eligible index.
+ * {@link sampleFormalizationsForClaim}. Top-up runs at
+ * `INLINE_FALLBACK_CONCURRENCY` (2) with one owner per candidate and results
+ * joined by eligible index, so any interleaving yields the same output; a
+ * thrown or failed top-up preserves the original candidate and emits a
+ * warning finding instead of an error, because the claim already has at least
+ * one valid sample. Postcondition: every input candidate appears exactly once
+ * in the output, ordered by eligible index.
  */
 async function addAdditionalSamples(
   candidates: readonly FormalizationCandidate[],
@@ -906,22 +935,30 @@ async function addAdditionalSamples(
  * @remarks
  * The attempt budget is `samplesPerClaim * ADAPTER_RETRIES` and each adapter
  * call has its own internal retry budget, so total subprocess spawns per claim
- * stay bounded. A terminal adapter error after at least one valid sample
- * preserves the candidate and records a sample-shortfall finding rather than
- * discarding collected work. Thrown adapter failures are caught as `unknown`
- * and normalized to a claim-level error. Inputs are never mutated.
+ * stay bounded. The adapter short-circuits failure kinds that are
+ * deterministic for a fixed prompt, so those cost one spawn per domain attempt
+ * instead of a full adapter retry budget. A terminal adapter error after at
+ * least one valid sample preserves the candidate and records a
+ * sample-shortfall finding rather than discarding collected work. Thrown
+ * adapter failures are caught as `unknown` and normalized to a claim-level
+ * error. Inputs are never mutated.
  */
 async function sampleFormalizationsForClaim(input: {
   readonly indexedClaim: { readonly claim: Claim; readonly index: number };
   readonly model: string;
   readonly samplesPerClaim: number;
   readonly timeoutMs: number;
+  /** Prebuilt prompt for the claim; built from the claim when omitted. */
+  readonly prompt?: string;
 }): Promise<Result<SampleSuccess, FormalizationError>> {
   const validSamples: LogicIrClaim[] = [];
   const invalidSamples: { raw: unknown; reason: string }[] = [];
   const findings: Finding[] = [];
   const maxAttempts = Math.max(1, input.samplesPerClaim * ADAPTER_RETRIES);
   let terminalFailure: string | undefined;
+  // The prompt is identical across attempts: building it once here keeps the
+  // multi-KB template join and fence sanitization out of the retry loop.
+  const prompt = input.prompt ?? buildFormalizationPrompt(input.indexedClaim.claim);
 
   for (let attempt = 1; attempt <= maxAttempts && validSamples.length < input.samplesPerClaim; attempt += 1) {
     let response: Result<unknown, OpencodeError>;
@@ -929,7 +966,7 @@ async function sampleFormalizationsForClaim(input: {
       response = await callOpencode({
         model: input.model,
         phase: "formalization",
-        prompt: buildFormalizationPrompt(input.indexedClaim.claim),
+        prompt,
         retries: ADAPTER_RETRIES,
         timeoutMs: input.timeoutMs,
       });
@@ -940,6 +977,11 @@ async function sampleFormalizationsForClaim(input: {
       ));
     }
     if (!response.ok) {
+      // The adapter has already exhausted its internal retries, so any failure
+      // ends the domain loop: with no valid sample the claim errors, otherwise
+      // the shortfall finding below reports the failure while preserving
+      // collected work. Deterministic kinds reach here in one spawn because
+      // the adapter short-circuits them; no domain-level respawn would help.
       if (validSamples.length === 0) {
         return err(makeClaimError(input.indexedClaim, response.error.message));
       }

@@ -103,7 +103,10 @@ export function buildManifestEntries(
  * // Writes manifest.json atomically to the output directory
  * ```
  */
-export async function writeManifest(outputDir: OutputDirPath, entries: readonly ManifestEntry[]): Promise<void> {
+export async function writeManifest(
+  outputDir: OutputDirPath,
+  entries: readonly ManifestEntry[],
+): Promise<void> {
   const manifest: ManifestFile = { files: entries };
   await writeOutputAtomic(outputDir, toRelativePath("manifest.json"), `${JSON.stringify(manifest, null, 2)}\n`);
 }

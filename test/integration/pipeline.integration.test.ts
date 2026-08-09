@@ -16,19 +16,24 @@ import { deriveSpecsFromSource } from "../../src/domain/code-backwards/derive.js
 import { toClaimId, toOutputDirPath, toRelativePath } from "../../src/domain/branded.js";
 
 vi.mock("../../src/adapters/opencode.js", () => ({
-  callOpencode: vi.fn(async () => ({
-    ok: true,
-    value: {
-      sample: {
-        claimId: "CAT-TEST-REQ",
-        obligation: "mandatory",
-        variables: [{ name: "S", sort: "Bool" }],
-        functions: [{ name: "f", args: ["Bool"], returns: "Bool" }],
-        assertions: [{ id: "A1", expr: "(f true)" }],
+  callOpencode: vi.fn(async (options: { readonly phase: string; readonly prompt: string }) => {
+    const sourceClaimId = options.phase === "formalization"
+      ? /<claim id="([^"]+)"/u.exec(options.prompt)?.[1]
+      : undefined;
+    return {
+      ok: true,
+      value: {
+        sample: {
+          claimId: sourceClaimId ?? "CAT-TEST-REQ",
+          obligation: "mandatory",
+          variables: [{ name: "S", sort: "Bool" }],
+          functions: [{ name: "f", args: ["Bool"], returns: "Bool" }],
+          assertions: [{ id: "A1", expr: "(f true)" }],
+        },
+        findings: [],
       },
-      findings: [],
-    },
-  })),
+    };
+  }),
 }));
 
 vi.mock("../../src/adapters/z3.js", () => ({
@@ -254,6 +259,7 @@ describe("end-to-end integration", () => {
       model: "test-model",
       samplesPerClaim: 2,
       timeoutMs: 300000,
+      logicalFileByCapability: new Map(),
     });
 
     expect(result.ok).toBe(true);

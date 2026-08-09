@@ -167,7 +167,7 @@ fun activeForSolverInput : set MergedSpec {
 }
 
 sig BuiltMap {
-  entries : Capability -> one LogicalFile
+  entries : Capability -> lone LogicalFile
 }
 
 // Conditional domain assumptions, stated as predicates rather than facts so
@@ -518,8 +518,8 @@ pred resolve_inline [b : PhysicalBatch] {
   b.attached = Inline
   b.resolution = Unresolved
   tempState' = tempState
-  resolution' = resolution ++ b ->
-    (BatchSuccess + ModelFailure + InfraFailure)
+  one r : BatchSuccess + ModelFailure + InfraFailure |
+    resolution' = resolution ++ b -> r
   degraded' = degraded
   evidence' = evidence
   outcomes' = outcomes

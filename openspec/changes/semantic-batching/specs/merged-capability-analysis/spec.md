@@ -8,6 +8,10 @@ THE spec-check tool SHALL treat merged capability logical-file keys as the share
 - `openspec/changes/semantic-batching/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/semantic-batching/design.md#Component Descriptions`
 
+#### Requirement model
+
+[`formalization-and-logic-analysis/alloy/semantic-batching.als`](../formalization-and-logic-analysis/alloy/semantic-batching.als) models merge-layer capability uniqueness, exact active-spec map coverage, and the scenario-only mapping property. Non-empty string validation remains a contract-test obligation outside the model.
+
 #### Scenario: Scenario-Only Spec Contributes Map Entry [MCA-GROUP-KEY-SCEN]
 WHEN a merged capability spec contains at least one scenario and no requirements (a defensive case that is unreachable in the current merge domain model), THE spec-check tool SHALL include that capability in the logical-file map used for grouping.
 
@@ -31,6 +35,10 @@ WHEN the spec-check tool selects merged specs for grouping-map construction, THE
 - `openspec/changes/semantic-batching/design.md#Component Descriptions`
 - `openspec/changes/semantic-batching/design.md#Interaction Protocols`
 
+#### Requirement model
+
+[`formalization-and-logic-analysis/alloy/semantic-batching.als`](../formalization-and-logic-analysis/alloy/semantic-batching.als) defines requirement-or-scenario activity, the unchanged requirement-only solver-input filter, and checks scenario-only inclusion, empty-spec exclusion, and grouping-map coverage of solver inputs under the stated current-domain assumption.
+
 #### Scenario: Requirement-Bearing Spec Is Active [MCA-ACTIVE-REQ]
 WHEN a merged spec has at least one requirement, THE spec-check tool SHALL treat it as active for grouping.
 
@@ -52,6 +60,10 @@ WHEN the spec-check tool groups claims for solver analysis, THE solver grouping 
 **References:**
 - `openspec/changes/semantic-batching/proposal.md#Scope`
 - `openspec/changes/semantic-batching/design.md#Interaction Protocols`
+
+#### Requirement model
+
+[`formalization-and-logic-analysis/alloy/semantic-batching.als`](../formalization-and-logic-analysis/alloy/semantic-batching.als) models one shared semantic key function and checks parity for claims with equal keys. Pipeline map-instance identity and solver filtering order remain implementation and test obligations outside the model.
 
 #### Scenario: No Duplicated Fallback Logic [MCA-SOLVER-NODUP]
 WHEN solver grouping computes a claim's grouping key, THE key SHALL be produced by the shared helper so that the capability fallback rule (mapped `logicalFile`, else `<merged-spec/{capability}>`) exists in exactly one place.

@@ -15,7 +15,7 @@ The core product details are:
 - input specs and source trees are read-only
 - parsed structure, claims, findings, and reports are explicit typed artifacts
 - preserved evidence matters as much as verdicts
-- manifest presence is the completion marker for a trustworthy run
+- manifest presence is the completion marker for the last successful run; atomic attempt-evidence files may survive incomplete runs and do not mark completion
 
 The living design doc under [`docs/design.md`](docs/design.md) is the durable design intent for the product. This file complements it by mapping that intent onto the code that exists in this repository today.
 
@@ -60,7 +60,7 @@ src/cli/run-cli.ts
                     |
                     v
               output directory
-              reports + smt + gen_specs + manifest.json
+              reports + smt + gen_specs + attempt evidence + manifest.json
 
 external boundaries used along the way:
   src/adapters/opencode.ts -> opencode
@@ -221,17 +221,25 @@ Prompt text can also be overridden in the config.
 
 - `logic-ir.ts`: typed logic intermediate representation
 - `formal/validate.ts`: schema validation for formalization samples
-- `formal/formalize.ts`: batch and per-claim formalization sampling through `opencode`
+- `formal/formalize.ts`: semantic logical-file grouping, stable physical sub-batching, and per-claim formalization sampling through `opencode`
+- `formal/grouping.ts`: shared semantic key selection used by both formalization and solver grouping; capability keys resolve through the merged logical-file map, while capability-less claims retain verbatim provenance-file keys
+- `formal/batch-transport.ts`: deterministic attached JSON construction, original eligible-index identity, private handled-path temp-file lifecycle, and claim-text-pointer evidence with SHA-256
 - `formal/identifiers.ts`: canonical injective SMT-LIB identifier sanitization (with compatibility re-export from `smtlib.ts`)
 - `formal/smtlib.ts`: SMT-LIB compilation, merge conflict detection, unsat-core label handling, and parse helpers
 - `formal/clustering.ts`: pairwise implication checks and equivalence clustering for alternate formalizations
-- `formal/logic-analysis.ts`: per-spec combined solver analysis, contradiction detection, conditional contradiction checks, and completeness-gap detection
+- `formal/logic-analysis.ts`: per-semantic-group combined solver analysis, contradiction detection, conditional contradiction checks, and completeness-gap detection
 - `formal/logic-analysis-checks.ts`: bounded pairwise contradiction and completeness helper checks
 - `formal/logic-analysis-sexpr.ts`: implication parsing and declaration preamble helpers
 
 This area is the formal core of the product.
 
 The key architectural choice is that ambiguity is not hidden. Multiple candidate formalizations are sampled, clustered, and either reduced to a stable representative or surfaced as ambiguity.
+
+Grouping is semantic-only in production. `run-cli.ts` builds the active capability-to-`logicalFile` map once and passes the same instance to formalization and solver grouping. Both paths call the shared key helper after their own eligibility filters; capability-bearing claims never fall back to raw provenance grouping, and historical file-shaped groups occur only when semantic keys happen to equal provenance files.
+
+Original zero-based eligible index or claim object identity is authoritative across grouping, physical sub-batching, attached response matching, and additional sampling. `claim.id` remains display and evidence metadata because it can be missing or duplicated. At handled completion, candidate and claim-error indexes are disjoint and exhaust eligible indexes; failure of an additional sample preserves its existing candidate and emits a warning, never a claim error.
+
+Every multi-claim first-sample physical batch writes one deterministic `batch-context.json` in a fresh `spec-check-batch-` temp directory using exclusive owner-only permissions. Attached JSON is untrusted data. Each formalization invocation produces one `FormalizationAttemptSet`: its `claimSet` is `specs_forward` or `generated_spec` with an invocation-local ordinal and capability, and attempt indexes resolve only within that claim set. Each set is a separate atomic evidence file. Cleanup runs only on handled terminal paths that reach lifecycle finalization; process termination can leave temp artifacts and evidence files. Those files audit attempted work but do not imply completion. The successful manifest is written last and lists/checksums them.
 
 If you are changing solver semantics, contradiction severity, SMT generation, or clustering rules, these modules are more important than the CLI layer.
 
@@ -432,6 +440,7 @@ Primary code:
 
 - phase reports
 - summary report
+- separate atomic `FormalizationAttemptSet` evidence files
 - manifest
 
 Primary code:
@@ -471,6 +480,21 @@ These are the most important things to preserve when changing the code.
 - Parser modules preserve unmatched lines rather than silently dropping them.
 - Unsupported conclusions should be suppressed into explicit reporting defects rather than rendered as if trustworthy.
 
+### Semantic Grouping and Batch Identity Rule
+
+- Formalization and specs-forward solver analysis must derive keys with the same semantic key helper and shared capability-to-logical-file map.
+- Solver-specific and formalization-specific eligibility filters run before grouping; they do not alter key semantics.
+- Physical sub-batches stay within one semantic group and preserve eligible claim order.
+- Original eligible index or claim object identity is internal authority; `claim.id` alone must not match responses or additional samples.
+- Candidate and claim-error indexes exactly and disjointly partition eligible indexes on handled completion; additional-sample failure preserves the candidate and emits a warning only.
+
+### Attached Context Lifecycle Rule
+
+- Multi-claim first-sample context is attached as untrusted deterministic JSON; single-claim and additional-sample calls remain inline.
+- Temp context creation, exclusive write, evidence recording, adapter invocation, and cleanup form one explicit handled-path lifecycle with cleanup in `finally`; process termination, including SIGINT/SIGTERM, has no cleanup guarantee.
+- Durable evidence stores a `claimSet`, local indexes, metadata, and the exact context hash, not duplicate claim text; deleted context is reconstructable only from the selected invocation claim set and deterministic serialization.
+- One separate atomic attempt-set file is written per invocation. Such files may survive an incomplete run; only a manifest written last marks success and lists/checksums them.
+
 ### Blind Comparison Rule
 
 - Original requirement text must not leak into code-derived generation or blind comparison prompts.
@@ -496,6 +520,7 @@ The product is not just a verdict engine. It preserves:
 - generated specs
 - report files
 - manifest checksums
+- invocation-scoped formalization attempt-set evidence files
 
 When in doubt, prefer preserving inspectable evidence over collapsing it into a summary.
 

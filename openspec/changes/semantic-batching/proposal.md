@@ -13,21 +13,23 @@ This change moves formalization onto the solver's existing capability/`logicalFi
 - `buildLogicalFileByCapability` contract, plus a dedicated `activeMergedSpecsForGrouping()` filter used only for grouping-map construction. Its activity rule (at least one requirement **or** at least one scenario) is deliberately broader than the claim-graph and solver-input filters (at least one requirement); the scenario clause is *defensive*: standalone scenario claims cannot occur in the current merge domain model (merged scenarios derive from requirement blocks only), so the clause should be unreachable in practice but keeps the helper correct if the domain model ever changes.
 - Physical sub-batching semantics: `maxBatchSize=0` (default, **unbounded**: one first-sample physical batch per logical group regardless of size), `maxBatchSize=1` (single-claim inline), `maxBatchSize>1` (stable slicing into chunks of size `<= maxBatchSize`); `maxBatchSize` is internal/test-only.
 - File-attached JSON context transport for all multi-claim first-sample physical batches; single-claim first-sample attempts remain inline; additional sampling for `samplesPerClaim > 1` issues bounded per-claim calls and is not additional physical sub-batching.
-- Batch context file schema (schemaVersion 1), deterministic UTF-8 serialization, random temp directory (prefix `spec-check-batch-`) with fixed `batch-context.json` filename, exclusive `0600` write, and a defined cleanup lifecycle for success, model failure, adapter-return failure, thrown adapter failure, and partial write failure.
+- Batch context file schema (schemaVersion 1), deterministic UTF-8 serialization, random temp directory (prefix `spec-check-batch-`) with fixed `batch-context.json` filename, exclusive `0600` write, and a defined cleanup lifecycle for handled success and failure paths that reach the lifecycle's `finally` block. Process termination is outside the cleanup guarantee and can leave temp artifacts.
 - A dedicated file-attached prompt that treats attached JSON as untrusted data, embeds no claim bodies, and requires an explicit `index` field per returned batch entry, validated against the attached claim index (the batch response schema gains a required `index` field; array position alone is never authoritative, and `claim.id` is never used for matching).
 - Failure-handling policy applied to *terminal* adapter errors (the adapter's internal retry budget is already exhausted when `callOpencode` returns an error), mapped to the existing `OpencodeError.kind` taxonomy with no new top-level public error categories; graceful per-claim degradation for model-response failures (`timeout`, `invalid_json`, `schema_validation_error`); claim-level `FormalizationError` for infrastructure failures (`spawn_error`, `invalid_files`, `invalid_timeout`); `prompt_too_large` degrades only when every per-claim inline prompt (inline template plus claim text, measured in UTF-8 bytes) fits the adapter prompt-size limit, and otherwise produces claim-level errors immediately.
 - Identity and ordering: original eligible index (or claim object identity) is authoritative internally; `claim.id` is display/evidence metadata only; additional-sample merging must not rely on `claim.id` alone.
-- Evidence preservation for deleted temp context files using claim-text pointers: each attached attempt records schema version, batch key, ordered claim original eligible indexes, claim IDs when present, provenance files, context SHA-256 over the exact serialized bytes, prompt variant/version, model, sub-batch ordinal, and response/failure classification (including cleanup outcome). Records are collected in a new `batchAttempts` field on `FormalizationOutput`, recorded before temp cleanup (so cleanup classification can be included), threaded to the reporting phase, and persisted in the existing run manifest/evidence output. The deleted context is byte-reconstructable by resolving the recorded claim indexes against preserved source artifacts (claim text) and re-serializing deterministically; the recorded SHA-256 verifies byte-equality of any reconstruction. Claim text is *not* duplicated into the evidence record.
-- Updates to `docs/design.md`, `ARCHITECTURE.md`, and the OpenSpec specs `formalization-and-logic-analysis` and `merged-capability-analysis`.
+- Evidence preservation for deleted temp context files using claim-text pointers: each formalization invocation emits one `FormalizationAttemptSet` envelope with `schemaVersion`, a `claimSet` discriminator (`specs_forward`, or `generated_spec` with invocation-local `ordinal` and `capability`), and its attached attempts. Each attempt records batch key, ordered claim indexes local to that `claimSet`, claim IDs when present, provenance files, context SHA-256 over the exact serialized bytes, prompt variant/version, model, sub-batch ordinal, response/failure classification, and cleanup outcome. Reconstruction resolves indexes only within the envelope's identified `claimSet`. Claim text is *not* duplicated into evidence.
+- Each `FormalizationAttemptSet` is persisted as a separate atomically finalized attempt-evidence file. Such files may survive a failed or terminated run and do not imply completion. On success, `manifest.json` remains the last-written success marker and lists each attempt-evidence file with its SHA-256 checksum.
+- Additional-sample failure after a candidate exists preserves that candidate and emits a warning finding; it never creates a claim-level error. At handled completion the candidate and claim-error index sets are disjoint and their union is exactly the eligible-claim index set.
+- Updates to `docs/design.md`, `ARCHITECTURE.md`, and the OpenSpec specs `formalization-and-logic-analysis`, `merged-capability-analysis`, and `reporting-and-evidence`.
 
 ### Out of Scope
 
 - New top-level public error categories in `src/domain/errors.ts`.
 - Changes to the LLM provider or adapter binary interface beyond what the attached-file transport already requires.
-- Durable retention of full temp context file contents or verbatim claim text in batch attempt evidence (claim-text pointers plus the deterministic serialization contract and SHA-256 are sufficient for byte-verifiable reconstruction).
+- Durable retention of full temp context file contents or verbatim claim text in attempt evidence (`claimSet`-scoped claim-text pointers plus the deterministic serialization contract and SHA-256 are sufficient for byte-verifiable reconstruction).
 - Changes to the claim-graph and solver-input activity filters (`requirements.length > 0` in `runClaimGraphPhase` and the logic phase); `activeMergedSpecsForGrouping()` is used only for grouping-map construction.
 - Support for standalone scenario claims outside requirement blocks (the scenario-only grouping clause is defensive only; the current merge domain model cannot produce such claims).
-- Changes to clustering, logic solving, or reporting semantics beyond consuming the unified grouping.
+- Changes to clustering or logic-solving semantics, or to reporting semantics beyond separate atomic attempt-evidence files and manifest inclusion/checksums.
 - Normalization or resolution of `claim.provenance.file` paths (stored verbatim).
 
 ## Context
@@ -48,7 +50,7 @@ This change moves formalization onto the solver's existing capability/`logicalFi
 - `OpencodeError.kind` remains the local discriminated union for adapter boundary failures, and `callOpencode` returns errors only after its internal retry budget (default 3 attempts) is exhausted; batch-level policy decisions apply to those terminal errors.
 - `CapabilityName` and `ClaimId` branded types and their validators already exist.
 - The adapter supports file attachments and performs prompt-size checks in UTF-8 bytes.
-- Claim text is preserved on `Claim.text` from claim-graph construction through formalization, so attached context files are byte-reconstructable from preserved source artifacts.
+- Claim text is preserved on `Claim.text` from claim-graph construction through formalization, so attached context files are byte-reconstructable from the source artifacts for the `FormalizationAttemptSet.claimSet` that owns each local claim index.
 - Semantic keys are compared by exact string equality; `provenance.file` is an opaque catalog-produced path string. Key equality therefore does not depend on claim-text line-ending handling.
 - Capability uniqueness within the merged specs follows from the merge layer's `capabilityOrder` construction (first-occurrence deduplication by capability). This is an observed property of the merge layer, not a separately asserted postcondition; the map builder does not re-enforce it.
 
@@ -57,7 +59,7 @@ This change moves formalization onto the solver's existing capability/`logicalFi
 - All code MUST follow `docs/typescript_style.md`: deterministic cores, `Result`-style expected failures, explicit bounds, aggressive assertions, complete TSDoc, `tsc --strict` clean.
 - Lightweight formal methods per `docs/lfm.md`: invariants first, pure deterministic helpers, effects pushed to edges, differential/property/fault-injection evidence, every counterexample becomes a regression test.
 - No new public error categories; the existing `ErrorCategory` union is complete.
-- Temp context files are ephemeral transport artifacts and must not be intentionally retained.
+- Temp context files are ephemeral transport artifacts and must not be intentionally retained on handled paths; process termination can prevent cleanup.
 
 ### References
 
@@ -66,7 +68,7 @@ This change moves formalization onto the solver's existing capability/`logicalFi
 - `docs/typescript_style.md` — construction rules
 - `docs/design.md` — system design, failure modes, trust boundaries
 - `src/domain/errors.ts` — public error taxonomy
-- OpenSpec specs: `formalization-and-logic-analysis`, `merged-capability-analysis`
+- OpenSpec specs: `formalization-and-logic-analysis`, `merged-capability-analysis`, `reporting-and-evidence`
 
 ## Domain Model
 
@@ -80,9 +82,10 @@ Entities and relationships (implementation-neutral):
 - **Logical Group**: all eligible claims sharing one semantic key. Ordered by first occurrence of the key in eligible-claim order; claims within a group preserve eligible input order.
 - **Physical Sub-Batch**: one first-sample LLM attempt over a chunk of one logical group. Chunking is pure, deterministic, stable slicing: `maxBatchSize > 0` bounds chunk size at `maxBatchSize`; `maxBatchSize = 0` means unbounded (one chunk per logical group). It never changes the semantic key.
 - **Batch Context File**: an ephemeral JSON document (schemaVersion 1) carrying the batch key and the ordered claims of one physical sub-batch; serialized byte-deterministically (UTF-8, no BOM, LF newlines, exactly one trailing newline, `JSON.stringify(value, null, 2)`).
-- **Temp Context Lifecycle**: `not_created → dir_created → file_written → cleanup_succeeded | cleanup_failed`. Cleanup failure after a successful model response yields a warning `Finding` with category `formalization.temp_cleanup_failed`, not an error.
-- **Formalization Outcome**: under all handled failure modes, every eligible claim reaches exactly one terminal outcome — a candidate, or an explicit claim-level `FormalizationError`.
-- **Batch Attempt Evidence**: durable metadata for an attached batch attempt — schema version, batch key, ordered original eligible indexes, claim IDs when present, provenance files, context SHA-256 over the exact serialized bytes, prompt variant/version, model, sub-batch ordinal, and response/failure classification (including cleanup outcome). Evidence uses claim-text pointers: the recorded indexes resolve claim text from preserved source artifacts, and the deterministic serialization contract plus SHA-256 make the deleted context byte-verifiable on reconstruction.
+- **Temp Context Lifecycle**: `not_created → dir_created → file_written → cleanup_succeeded | cleanup_failed` for handled paths that reach lifecycle finalization. Cleanup failure after a successful model response yields a warning `Finding` with category `formalization.temp_cleanup_failed`, not an error. Process termination may stop before finalization and leave temp artifacts.
+- **Formalization Outcome**: at handled completion, every eligible claim index belongs to exactly one of two disjoint sets: candidate indexes or explicit claim-level `FormalizationError` indexes. Additional-sample failure cannot move an index from the candidate set to the error set.
+- **Invocation Claim Set**: the index namespace for one formalization invocation: `specs_forward`, or `generated_spec` identified by a zero-based invocation ordinal and capability. Attempt indexes have meaning only inside this namespace.
+- **Formalization Attempt Set**: one invocation envelope containing schema version, its invocation `claimSet`, and the attached attempt records for that invocation. Each attempt contains batch key, ordered `claimSet`-local indexes, claim IDs when present, provenance files, context SHA-256 over the exact serialized bytes, prompt variant/version, model, sub-batch ordinal, response/failure classification, and cleanup outcome. The envelope is one separate atomic evidence file; it is auditable but is not a completion marker.
 
 ## Preconditions, Postconditions, and Invariants
 
@@ -95,10 +98,11 @@ Entities and relationships (implementation-neutral):
 
 ### Postconditions
 
-- Under all handled failure modes, every eligible claim (`kind === "requirement"` or `kind === "scenario"`) reaches a terminal outcome: candidate or claim-level error. No eligible claim is lost to grouping, sub-batching, temp-file failure, invalid attachments, model-response failure, graceful degradation, or worker-thrown failures. (`candidates.length + errors.length <= eligibleClaims.length` always; equality holds when every claim reaches a terminal outcome.)
+- Under all handled failure modes, every eligible claim (`kind === "requirement"` or `kind === "scenario"`) reaches exactly one terminal outcome. If `E` is the set of eligible indexes, `C` the candidate indexes, and `R` the claim-error indexes, then `C ⊆ E`, `R ⊆ E`, `C ∩ R = ∅`, and `C ∪ R = E`. No eligible claim is lost to grouping, sub-batching, temp-file failure, invalid attachments, model-response failure, graceful degradation, additional-sample failure, or worker-thrown failures.
 - Candidates and errors are emitted in eligible input order where practical; otherwise each output carries explicit claim/index identity and tests do not assume array order.
-- Temp context directories are cleaned after success, graceful model failure, adapter-return failure, thrown adapter failure, and partial write failure. SIGINT/SIGTERM handlers also attempt temp cleanup; under `SIGKILL` no cleanup occurs (no handler can run), consistent with the existing signal model in `docs/design.md`.
-- Batch attempt evidence (claim-text-pointer metadata and context hash) is recorded for every attached attempt and persisted via the run manifest/evidence output.
+- Temp context cleanup is attempted after success, graceful model failure, adapter-return failure, thrown adapter failure, and partial write failure when control reaches the lifecycle's `finally` path. There is no SIGINT/SIGTERM cleanup guarantee; process termination can leave temp artifacts and the run manifest absent.
+- One separate atomic `FormalizationAttemptSet` evidence file is persisted per formalization invocation. The successful manifest is written last and lists/checksums those files; an evidence file without that manifest does not imply run completion.
+- Failure to obtain an additional sample for an existing candidate emits a warning finding, preserves the candidate and its collected samples, and emits no claim-level error for that failure.
 
 ### Invariants
 
@@ -108,6 +112,8 @@ Entities and relationships (implementation-neutral):
 - The grouping map covers every capability present on any eligible claim (defensively; the synthetic fallback guarantees a key even if a capability is unmapped).
 - Attached batch context serialization is byte-deterministic.
 - Original eligible index or claim object identity is authoritative internally; `claim.id` is never sufficient for internal matching unless uniqueness is proven; duplicate or missing claim IDs cannot cause samples to merge into the wrong candidate.
+- Attempt indexes are local to the `FormalizationAttemptSet.claimSet`; reconstruction MUST select that claim set before resolving an index and MUST NOT resolve indexes across invocation envelopes.
+- Candidate indexes and claim-error indexes form an exact disjoint partition of eligible indexes at handled completion: `C ∩ R = ∅` and `C ∪ R = E`.
 - Input `Claim` objects and `claim.provenance` are never mutated.
 - Attached JSON content is treated as untrusted data, never elevated into instruction position; no attached claim text appears in the prompt body.
 - Historical file grouping is not a mode; it emerges only when semantic keys equal provenance files.
@@ -127,7 +133,9 @@ Entities and relationships (implementation-neutral):
 - **Duplicate or missing claim IDs corrupt additional-sample merging**: samples for one claim merge into another claim's candidate. (This bug exists today: additional-sample merging matches by `claim.id` in `formalize.ts`.)
   - **Rationale**: IDs are optional and not guaranteed unique; treating them as identity silently corrupts evidence.
 - **Deleted temp context defeats auditability**: no durable record of what was sent.
-  - **Rationale**: Context files are deleted by design; preserved metadata plus SHA-256 keeps attempts auditable and reconstructable.
+  - **Rationale**: Context files are deleted by design on handled paths; a separate atomic `FormalizationAttemptSet` plus `claimSet`-scoped indexes and SHA-256 keeps attempts auditable and reconstructable without implying run completion.
+- **Additional-sample failure corrupts the claim partition**: a claim that already has a candidate also receives a claim-level error when a later optional sample fails.
+  - **Rationale**: Additional samples improve clustering confidence but do not revoke the first valid candidate; the failure is a warning-only shortfall and candidate/error membership must remain disjoint.
 - **Worker-thrown failures drop unstarted claims**: a `mapBounded` worker failure silently abandons eligible claims that never started.
   - **Rationale**: The terminal-outcome invariant is the core liveness claim of formalization; silent loss is intolerable.
 
@@ -139,11 +147,11 @@ Entities and relationships (implementation-neutral):
 - **Determinism**: grouping, sub-batching, and context serialization are pure and reproducible.
   - **Target/Threshold**: Identical inputs always produce identical keys, groups, chunks, and serialized bytes.
   - **Influence**: Enables differential testing, replay, and byte-level hash evidence.
-- **Auditability**: every attached batch attempt preserves reconstructable evidence despite context deletion.
-  - **Target/Threshold**: Metadata plus SHA-256 recorded for 100% of attached attempts.
+- **Auditability**: every attached batch attempt preserves invocation-scoped, reconstructable evidence despite context deletion; evidence existence is distinct from run completion.
+  - **Target/Threshold**: Metadata plus SHA-256 recorded for 100% of attached attempts in separate atomic `FormalizationAttemptSet` files, all listed/checksummed by the successful manifest.
   - **Influence**: Supports review, incident analysis, and the dependability case.
 - **Security**: attached JSON is untrusted data; temp files are owner-only and ephemeral.
-  - **Target/Threshold**: `0600` exclusive writes; cleanup attempted after every handled terminal state; prompt-injection negative tests pass.
+  - **Target/Threshold**: `0600` exclusive writes; cleanup attempted after every handled terminal state that reaches lifecycle finalization; prompt-injection negative tests pass.
   - **Influence**: Protects the LLM boundary from spec-text injection.
 - **Reliability**: bounded retries and explicit degradation; no unbounded work.
   - **Target/Threshold**: All loops, retries, batch sizes, and in-flight work bounded; `mapBounded` worker failures cannot drop unstarted claims.
@@ -157,5 +165,6 @@ Entities and relationships (implementation-neutral):
 
 ### Modified Capabilities
 
-- `formalization-and-logic-analysis`: formalization grouping moves to the solver's existing semantic logical-file grouping via one shared helper; multi-claim first-sample physical batches use attached JSON context with a dedicated prompt; attached JSON is untrusted data; batch responses carry explicit `index` fields validated against attached claim indexes; claim partition is preserved under all handled failure modes (every eligible claim becomes a candidate or explicit error); temp context cleanup and pointer-based evidence preservation are required; model-response failures degrade gracefully per claim; OS/process/file-attachment failures surface as explicit formalization errors; claim ID alone is not internal identity.
+- `formalization-and-logic-analysis`: formalization grouping moves to the solver's existing semantic logical-file grouping via one shared helper; multi-claim first-sample physical batches use attached JSON context with a dedicated prompt; attached JSON is untrusted data; batch responses carry explicit `index` fields validated against attached claim indexes; candidate and claim-error indexes form an exact disjoint partition under handled completion; additional-sample failure preserves the candidate and emits only a warning; cleanup is guaranteed only on handled paths reaching lifecycle finalization; invocation-scoped `FormalizationAttemptSet` evidence preserves local-index reconstruction; model-response failures degrade gracefully per claim; OS/process/file-attachment failures surface as explicit formalization errors; claim ID alone is not internal identity.
 - `merged-capability-analysis`: merged capability logical-file keys become the shared grouping authority for requirements and scenarios; scenario-only merged specs contribute logical-file map entries (defensively — unreachable in the current domain model); solver grouping calls the shared key helper rather than duplicating capability fallback logic.
+- `reporting-and-evidence`: each formalization invocation writes a separate atomic `FormalizationAttemptSet` evidence file that may survive an incomplete run without implying completion; a successful `manifest.json` remains the final success marker and lists every such evidence file with its SHA-256 checksum.

@@ -7,10 +7,13 @@
  */
 import { lstat, stat } from "node:fs/promises";
 
+import { PROMPT_ARG_MAX_BYTES } from "./opencode-limits.js";
 import { runProcess } from "./process.js";
 import { postcondition } from "../domain/assert.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { DEFAULT_TIMEOUT_MS, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS } from "../domain/timeout.js";
+
+export { PROMPT_ARG_MAX_BYTES } from "./opencode-limits.js";
 
 /**
  * Closed domain of verification phases supported by the opencode invocation protocol.
@@ -58,8 +61,6 @@ export interface OpencodeError {
   readonly message: string;
   readonly stderr?: string;
 }
-
-const PROMPT_ARG_MAX_BYTES = 32_768;
 
 /**
  * Call `opencode` with bounded retries and strict JSON validation.
@@ -600,17 +601,22 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
  * @remarks
  * Precondition: `payload` is the result of a successful `JSON.parse` call.
  * Postcondition: on success, `payload` is a non-null object and any `findings` field is an array.
+ * For the `formalization` phase, an optional `formalizations` field is an array of objects whose
+ * `index` fields are safe integers. Omitting `formalizations` preserves single-response forms.
  * Invariant: does not mutate `payload`.
  *
- * Failure modes: none — validation failures are captured in the Result error branch.
- * This function never throws.
+ * Failure modes (all represented by `schema_validation_error`, never thrown):
+ * - Non-object top-level payload.
+ * - A present `findings` field that is not an array.
+ * - For `formalization`, a present `formalizations` field that is not an array.
+ * - For `formalization`, a batch entry that is not an object or lacks a safe-integer `index`.
+ *
+ * Safety: validation is pure. Entry validation is bounded by the returned `formalizations` array.
  */
 function validatePhaseSchema(
   phase: OpencodePhase,
   payload: unknown,
 ): Result<unknown, OpencodeError> {
-  // Design note: validation is phase-agnostic — all phases share identical schema
-  // constraints. The phase parameter exists for error reporting context only.
   const record = asRecord(payload);
   if (record === undefined) {
     return err({
@@ -627,6 +633,27 @@ function validatePhaseSchema(
       phase,
       message: "expected findings to be an array when present",
     });
+  }
+
+  const formalizations = record.formalizations;
+  if (phase === "formalization" && formalizations !== undefined) {
+    if (!Array.isArray(formalizations)) {
+      return err({
+        kind: "schema_validation_error",
+        phase,
+        message: "expected formalizations to be an array when present",
+      });
+    }
+    for (const entry of formalizations) {
+      const entryRecord = asRecord(entry);
+      if (entryRecord === undefined || Array.isArray(entry) || !Number.isSafeInteger(entryRecord.index)) {
+        return err({
+          kind: "schema_validation_error",
+          phase,
+          message: "expected every formalizations entry to be an object with a safe integer index",
+        });
+      }
+    }
   }
 
   return ok(payload);

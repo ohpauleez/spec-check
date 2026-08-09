@@ -3,7 +3,9 @@ import { describe, expect, it } from "vitest";
 import { traceSpec } from "../support/spec-trace.js";
 import { parseArgv } from "../../src/cli/parse-argv.js";
 import { resolveRunConfig } from "../../src/cli/config.js";
-import { formatCatalogEmptyMessage } from "../../src/cli/run-cli.js";
+import { formatCatalogEmptyMessage, formalizationErrorsToFindings } from "../../src/cli/run-cli.js";
+import { toClaimId } from "../../src/domain/branded.js";
+import type { Claim } from "../../src/domain/claim-graph.js";
 
 describe("CLI argument parsing", () => {
   it("parses valid flags and positional paths", () => {
@@ -202,5 +204,62 @@ describe("formatCatalogEmptyMessage", () => {
     const allFiltered = formatCatalogEmptyMessage({ kind: "all_filtered", filterReason: "archive policy", filteredCount: 2 });
     expect(allFiltered).toContain("archive policy");
     expect(allFiltered).toContain("2");
+  });
+});
+
+describe("formalizationErrorsToFindings", () => {
+  it("resolves eligible claim provenance and preserves error order", () => {
+    traceSpec("FLA-FORMALIZE-CLAIMS", "RAE-FINDING-SHAPE");
+    const claims: Claim[] = [
+      {
+        kind: "proposal_property",
+        text: "An ineligible upstream claim",
+        obligation: "informational",
+        provenance: { file: "proposal.md", line: 2 },
+        references: [],
+      },
+      {
+        id: toClaimId("CLI-PARTIAL-R1"),
+        kind: "requirement",
+        text: "The first eligible claim",
+        obligation: "mandatory",
+        provenance: { file: "spec.md", heading: "First", line: 4 },
+        references: [],
+      },
+      {
+        id: toClaimId("CLI-PARTIAL-S1"),
+        kind: "scenario",
+        text: "The second eligible claim",
+        obligation: "mandatory",
+        provenance: { file: "spec.md", heading: "Second", line: 8 },
+        references: [],
+      },
+    ];
+
+    const findings = formalizationErrorsToFindings([
+      { message: "second failed", eligibleIndex: 1, claimId: "stale-informational-id" },
+      { message: "first failed", eligibleIndex: 0, claimId: "CLI-PARTIAL-R1" },
+    ], claims);
+
+    expect(findings.map((finding) => finding.description)).toEqual(["second failed", "first failed"]);
+    expect(findings.map((finding) => finding.provenance)).toEqual([
+      { file: "spec.md", heading: "Second", line: 8 },
+      { file: "spec.md", heading: "First", line: 4 },
+    ]);
+    expect(findings.map((finding) => finding.category)).toEqual([
+      "formalization.claim_failed",
+      "formalization.claim_failed",
+    ]);
+    expect(findings.map((finding) => finding.severity)).toEqual(["warning", "warning"]);
+    expect(findings.map((finding) => finding.evidence)).toEqual([
+      [
+        { kind: "eligible_index", value: "1" },
+        { kind: "claim_id", value: "CLI-PARTIAL-S1" },
+      ],
+      [
+        { kind: "eligible_index", value: "0" },
+        { kind: "claim_id", value: "CLI-PARTIAL-R1" },
+      ],
+    ]);
   });
 });

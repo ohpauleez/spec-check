@@ -35,6 +35,7 @@ vi.mock("../../src/domain/formal/formalize.js", () => ({
       candidates: [],
       findings: [],
       errors: [],
+      batchAttempts: [],
     },
   })),
 }));

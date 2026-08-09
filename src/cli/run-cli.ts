@@ -8,13 +8,13 @@
 import type { RunConfig } from "./config.js";
 import type { Finding } from "../domain/findings.js";
 import type { LogicIrClaim } from "../domain/logic-ir.js";
-import type { ClaimGraphOutput } from "../domain/claim-graph.js";
+import type { Claim, ClaimGraphOutput } from "../domain/claim-graph.js";
 import type { PipelineContext, IngestionResult, AnalysisResult } from "./pipeline-types.js";
 import { createInitialRunState, addFindings, type RunState } from "../domain/run-state.js";
 import { buildCatalog, inferCapabilityName, type CatalogEmptyReason } from "../domain/parser/catalog.js";
-import { assertNever } from "../domain/assert.js";
+import { assertNever, precondition } from "../domain/assert.js";
 import { runQualitativePasses } from "../domain/spec-forward/qualitative.js";
-import { formalizeClaims } from "../domain/formal/formalize.js";
+import { formalizeClaims, type FormalizationError } from "../domain/formal/formalize.js";
 import { runLogicAnalysis } from "../domain/formal/logic-analysis.js";
 import { writeManifest, buildManifestEntries, invalidateStaleManifest } from "../domain/reporting/manifest.js";
 import { writePhaseReports, writeSummaryReport } from "../domain/reporting/render.js";
@@ -33,11 +33,19 @@ import {
   groupRepresentativesBySpec,
   runCodeBackwardsWork,
 } from "./pipeline-helpers.js";
+import { activeMergedSpecsForGrouping, buildLogicalFileByCapability } from "../domain/formal/grouping.js";
+import { removeOutputTree } from "../adapters/fs.js";
+import {
+  FORMALIZATION_EVIDENCE_DIRECTORY,
+  buildFormalizationAttemptSet,
+  writeFormalizationAttemptSet,
+  type FormalizationEvidenceFile,
+} from "../domain/reporting/formalization-evidence.js";
 
 export { PipelineAbortError } from "./pipeline-types.js";
 
-// Exported for testing — formats user-facing catalog-empty diagnostics.
-export { formatCatalogEmptyMessage };
+// Exported for testing — pure CLI diagnostic adapters.
+export { formatCatalogEmptyMessage, formalizationErrorsToFindings };
 
 /**
  * Format a user-facing diagnostic message for an empty catalog result.
@@ -68,6 +76,53 @@ function formatCatalogEmptyMessage(reason: CatalogEmptyReason): string {
   }
 }
 
+/**
+ * Convert partial claim-level formalization errors into visible CLI warnings.
+ *
+ * @param errors - partial-output errors in their stable formalization order
+ * @param claims - original claim-graph order supplied to formalization
+ * @returns one warning per error, preserving `errors` order
+ *
+ * @remarks
+ * Preconditions: every error has a safe non-negative `eligibleIndex`, and that
+ * index resolves within the requirement/scenario subsequence of `claims`.
+ * Postconditions: provenance and claim identity come from the claim selected by
+ * eligible index; every finding includes `eligible_index` and `claim_id`
+ * evidence. The inputs and their nested values are not mutated.
+ *
+ * Failure modes: throws via {@link precondition} when a partial-output error
+ * violates the eligible-index contract. This pure helper performs no I/O.
+ */
+function formalizationErrorsToFindings(
+  errors: readonly FormalizationError[],
+  claims: readonly Claim[],
+): readonly Finding[] {
+  const eligibleClaims = claims.filter((claim) => claim.kind === "requirement" || claim.kind === "scenario");
+
+  return errors.map((error) => {
+    precondition(
+      error.eligibleIndex !== undefined && Number.isSafeInteger(error.eligibleIndex) && error.eligibleIndex >= 0,
+      "partial formalization error must have a safe non-negative eligible index",
+    );
+    const claim = eligibleClaims[error.eligibleIndex];
+    precondition(claim !== undefined, "partial formalization error eligible index must resolve to a claim");
+    const claimId = claim.id ?? "<unnamed>";
+
+    return {
+      severity: "warning",
+      category: "formalization.claim_failed",
+      provenance: claim.provenance,
+      description: error.message,
+      rationale: "This claim was not formalized, so successful analysis of other claims does not cover it.",
+      evidence: [
+        { kind: "eligible_index", value: String(error.eligibleIndex) },
+        { kind: "claim_id", value: claimId },
+      ],
+      ...(claim.id === undefined ? {} : { relatedClaimIdentifiers: [claim.id] }),
+    };
+  });
+}
+
 // ---------------------------------------------------------------------------
 // Main entry point — orchestrates phase groups
 // ---------------------------------------------------------------------------
@@ -88,6 +143,10 @@ function formatCatalogEmptyMessage(reason: CatalogEmptyReason): string {
  * Invariant: findings are append-only across all phases.
  */
 export async function runCli(config: RunConfig): Promise<RunState> {
+  // Invalidate all prior-run completion and formalization evidence before work begins.
+  await invalidateStaleManifest(config.output);
+  await removeOutputTree(config.output, FORMALIZATION_EVIDENCE_DIRECTORY);
+
   // Phases 1-3: dependency check, catalog build, document parsing.
   const ingestion = await runIngestionPhases(config);
 
@@ -99,6 +158,7 @@ export async function runCli(config: RunConfig): Promise<RunState> {
   let srcTraceFindings: readonly Finding[] | undefined;
   let srcLogicFindings: readonly Finding[] | undefined;
   let compareFindings: readonly Finding[] | undefined;
+  let codeEvidenceFiles: readonly FormalizationEvidenceFile[] | undefined;
 
   if (config.src !== undefined) {
     // Extract known capability names from catalog for informalization suggestions.
@@ -122,10 +182,11 @@ export async function runCli(config: RunConfig): Promise<RunState> {
     srcTraceFindings = srcResult.srcTraceFindings;
     srcLogicFindings = srcResult.srcLogicFindings;
     compareFindings = srcResult.compareFindings;
+    codeEvidenceFiles = srcResult.evidenceFiles;
   }
 
   // Phase 11: generate reports and manifest.
-  state = await runReportingPhase(config, state, analysis, srcTraceFindings, srcLogicFindings, compareFindings);
+  state = await runReportingPhase(config, state, analysis, srcTraceFindings, srcLogicFindings, compareFindings, codeEvidenceFiles);
 
   return state;
 }
@@ -146,20 +207,16 @@ export async function runCli(config: RunConfig): Promise<RunState> {
  * Precondition: `config` has been validated by `resolveRunConfig`.
  * Postcondition: state contains findings from catalog and parsing phases.
  * Postcondition: progress events have been emitted for all three phases.
- * Postcondition: stale manifest has been invalidated before analysis begins.
  *
  * Failure modes:
  * - Throws `PipelineAbortError("DependencyError", ...)` if `opencode` or `z3` is not on PATH.
  * - Throws `PipelineAbortError("CatalogError", ...)` if an input path is unreadable.
  *
- * Safety: performs filesystem I/O (manifest invalidation, catalog read, document parse).
+ * Safety: performs filesystem I/O (catalog read and document parse).
  * Must not be called concurrently with another pipeline run targeting the same output directory.
  */
 async function runIngestionPhases(config: RunConfig): Promise<IngestionResult> {
   let state = createInitialRunState();
-
-  // [RAE-MANIFEST-STALE] Remove stale manifest before analysis begins.
-  await invalidateStaleManifest(config.output);
 
   // Phase 1: Check external dependencies.
   state = await runPhase("dependencies", state, async () => {
@@ -247,6 +304,12 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
   };
   state = addFindings(state, ctx.mergedSpecs.flatMap((spec) => spec.findings));
 
+  const logicalFileResult = buildLogicalFileByCapability(activeMergedSpecsForGrouping(ctx.mergedSpecs));
+  if (!logicalFileResult.ok) {
+    throw new PipelineAbortError("ValidationError", logicalFileResult.error.map((error) => error.message).join("; "));
+  }
+  const logicalFileByCapability = logicalFileResult.value;
+
   // Phase 4: Build claim graph and analyze coverage.
   const claimGraphResult = await runPhaseWithResult("claim-graph", state, async () => {
     return runClaimGraphPhase(ctx);
@@ -277,30 +340,40 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
       model: config.model,
       samplesPerClaim: 1,
       timeoutMs: config.timeoutMs,
+      logicalFileByCapability,
     });
+    const evidenceFile = await writeFormalizationAttemptSet(
+      config.output,
+      buildFormalizationAttemptSet(
+        { kind: "specs_forward" },
+        result.ok ? result.value.batchAttempts : [],
+      ),
+    );
     if (!result.ok) {
       throw new PipelineAbortError("FormalizationError", result.error.map((e) => e.message).join("; "));
     }
     if (result.value.errors.length > 0 && result.value.candidates.length === 0) {
       throw new PipelineAbortError("FormalizationError", result.value.errors.map((e) => e.message).join("; "));
     }
-    return result.value;
+    return { output: result.value, evidenceFile };
   });
-  state = addFindings(formalResult.state, formalResult.value.findings);
+  const formalizationErrorFindings = formalResult.value.output.candidates.length === 0
+    ? []
+    : formalizationErrorsToFindings(formalResult.value.output.errors, claimGraphResult.value.graph.claims);
+  state = addFindings(formalResult.state, [...formalResult.value.output.findings, ...formalizationErrorFindings]);
 
   // Phase 7: Cluster formalization samples and select representatives.
   const clusterResult = await runPhaseWithResult("clustering", state, async () => {
-    return await runClusteringPhase(config, formalResult.value.candidates);
+    return await runClusteringPhase(config, formalResult.value.output.candidates);
   });
   state = addFindings(clusterResult.state, clusterResult.value.findings);
 
   // Phase 8: Run formal logic analysis on per-spec combined SMT-LIB.
   const logicResult = await runPhaseWithResult("logic", state, async () => {
-    const nonEmptyMergedSpecs = ctx.mergedSpecs.filter((spec) => spec.requirements.length > 0);
     const groups = groupRepresentativesBySpec(
-      formalResult.value.candidates,
+      formalResult.value.output.candidates,
       clusterResult.value.representatives,
-      nonEmptyMergedSpecs,
+      logicalFileByCapability,
     );
     const output = await runLogicAnalysis({
       groups,
@@ -317,6 +390,10 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
     clusterResult: clusterResult.value,
     qualResult: qualResult.value,
     logicResult: logicResult.value,
+    formalization: {
+      evidenceFile: formalResult.value.evidenceFile,
+      errors: formalResult.value.output.errors,
+    },
   };
 }
 
@@ -333,6 +410,7 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
  * @param srcTraceFindings - source trace findings (undefined if phase was skipped)
  * @param srcLogicFindings - source logic findings (undefined if phase was skipped)
  * @param compareFindings - comparison findings (undefined if phase was skipped)
+ * @param codeEvidenceFiles - generated-spec invocation evidence descriptors
  * @returns updated run state with reporting phase completed
  *
  * @remarks
@@ -353,6 +431,7 @@ async function runReportingPhase(
   srcTraceFindings: readonly Finding[] | undefined,
   srcLogicFindings: readonly Finding[] | undefined,
   compareFindings: readonly Finding[] | undefined,
+  codeEvidenceFiles: readonly FormalizationEvidenceFile[] | undefined,
 ): Promise<RunState> {
   const skippedPhases = computeSkippedPhases(config);
 
@@ -372,7 +451,11 @@ async function runReportingPhase(
       allFindings: state.findings,
       skippedPhases,
     });
-    await writeManifest(config.output, buildManifestEntries([...phaseFiles, summaryFile]));
+    await writeManifest(config.output, [
+      ...buildManifestEntries([...phaseFiles, summaryFile]),
+      analysis.formalization.evidenceFile,
+      ...(codeEvidenceFiles ?? []),
+    ]);
   });
 }
 
@@ -416,6 +499,7 @@ async function runSourcePhases(
   readonly srcTraceFindings: readonly Finding[];
   readonly srcLogicFindings: readonly Finding[];
   readonly compareFindings: readonly Finding[];
+  readonly evidenceFiles: readonly FormalizationEvidenceFile[];
 }> {
   let state = initialState;
 
@@ -463,5 +547,6 @@ async function runSourcePhases(
     srcTraceFindings: [...traceResult.value.traceOutput.findings, ...traceResult.value.taskFindings],
     srcLogicFindings: codeResult.value.logicFindings,
     compareFindings: codeResult.value.compareFindings,
+    evidenceFiles: codeResult.value.evidenceFiles,
   };
 }

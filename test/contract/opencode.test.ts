@@ -267,6 +267,157 @@ describe("opencode adapter contract", () => {
     expect(result.error.kind).toBe("schema_validation_error");
   });
 
+  it("accepts indexed formalizations for the formalization phase", async () => {
+    traceSpec("FLA-ATTACHP-INDEX-VALID");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    const mocked = vi.mocked(runProcess);
+    const payload = {
+      formalizations: [
+        { index: 0, claimId: "R1" },
+        { index: Number.MAX_SAFE_INTEGER, claimId: "R2" },
+      ],
+    };
+    mocked.mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      stdout: JSON.stringify({ type: "text", part: { text: JSON.stringify(payload) } }),
+      stderr: "",
+      timedOut: false,
+    });
+
+    const result = await callOpencode({ model: "m", phase: "formalization", prompt: "test", retries: 1 });
+
+    expect(result).toEqual({ ok: true, value: payload });
+  });
+
+  it.each([
+    { claimId: "R1" },
+    { sample: { claimId: "R1" } },
+    { formalization: { claimId: "R1" } },
+  ])("preserves a formalization single-response form: %j", async (payload) => {
+    traceSpec("FLA-VALIDATE-SAMPLE");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    vi.mocked(runProcess).mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      stdout: JSON.stringify({ type: "text", part: { text: JSON.stringify(payload) } }),
+      stderr: "",
+      timedOut: false,
+    });
+
+    const result = await callOpencode({ model: "m", phase: "formalization", prompt: "test", retries: 1 });
+
+    expect(result).toEqual({ ok: true, value: payload });
+  });
+
+  it("rejects non-array formalizations", async () => {
+    traceSpec("FLA-ATTACHP-INDEX-VALID");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    vi.mocked(runProcess).mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      stdout: JSON.stringify({ formalizations: { index: 0 } }),
+      stderr: "",
+      timedOut: false,
+    });
+
+    const result = await callOpencode({ model: "m", phase: "formalization", prompt: "test", retries: 1 });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("schema_validation_error");
+    expect(result.error.message).toContain("formalizations to be an array");
+  });
+
+  it.each([
+    ["missing", { claimId: "R1" }],
+    ["fractional", { index: 1.5, claimId: "R1" }],
+    ["non-numeric", { index: "0", claimId: "R1" }],
+    ["unsafe", { index: Number.MAX_SAFE_INTEGER + 1, claimId: "R1" }],
+  ])("rejects a formalizations entry with a %s index", async (_case, entry) => {
+    traceSpec("FLA-ATTACHP-INDEX-VALID");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    vi.mocked(runProcess).mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      stdout: JSON.stringify({ formalizations: [entry] }),
+      stderr: "",
+      timedOut: false,
+    });
+
+    const result = await callOpencode({ model: "m", phase: "formalization", prompt: "test", retries: 1 });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("schema_validation_error");
+    expect(result.error.message).toContain("safe integer index");
+  });
+
+  it.each([null, "not-an-object", [0]])("rejects a non-object formalizations entry: %j", async (entry) => {
+    traceSpec("FLA-ATTACHP-INDEX-VALID");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    vi.mocked(runProcess).mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      stdout: JSON.stringify({ formalizations: [entry] }),
+      stderr: "",
+      timedOut: false,
+    });
+
+    const result = await callOpencode({ model: "m", phase: "formalization", prompt: "test", retries: 1 });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("schema_validation_error");
+  });
+
+  it("retries after an indexed formalization schema error and accepts a valid response", async () => {
+    traceSpec("FLA-ATTACHP-INDEX-VALID");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    const mocked = vi.mocked(runProcess);
+    mocked
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        signal: null,
+        stdout: JSON.stringify({ formalizations: [{ claimId: "R1" }] }),
+        stderr: "",
+        timedOut: false,
+      })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        signal: null,
+        stdout: JSON.stringify({ formalizations: [{ index: 0, claimId: "R1" }] }),
+        stderr: "",
+        timedOut: false,
+      });
+
+    const result = await callOpencode({ model: "m", phase: "formalization", prompt: "test", retries: 2 });
+
+    expect(result.ok).toBe(true);
+    expect(mocked).toHaveBeenCalledTimes(2);
+  });
+
+  it("returns schema_validation_error after indexed formalization retries are exhausted", async () => {
+    traceSpec("FLA-ATTACHP-INDEX-VALID", "FLA-SAMPLE-EXHAUST");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    const mocked = vi.mocked(runProcess);
+    mocked.mockResolvedValue({
+      exitCode: 0,
+      signal: null,
+      stdout: JSON.stringify({ formalizations: [{ index: 0.5, claimId: "R1" }] }),
+      stderr: "",
+      timedOut: false,
+    });
+
+    const result = await callOpencode({ model: "m", phase: "formalization", prompt: "test", retries: 2 });
+
+    expect(result.ok).toBe(false);
+    if (result.ok) return;
+    expect(result.error.kind).toBe("schema_validation_error");
+    expect(result.error.phase).toBe("formalization");
+    expect(mocked).toHaveBeenCalledTimes(2);
+  });
+
   it("retries on invalid JSON up to retry limit then fails", async () => {
     traceSpec("FLA-FORMAL-FAIL", "FLA-SAMPLE-EXHAUST");
     const { runProcess } = await import("../../src/adapters/process.js");

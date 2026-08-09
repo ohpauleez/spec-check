@@ -3,10 +3,10 @@
  * and deleting files within a confined output directory.
  *
  * Adapter layer — isolates domain logic from direct filesystem access.
- * Exports: resolveConfinedOutputPath, writeOutputFile, atomicWriteOutputFile, removeOutputFile.
+ * Exports confined atomic writing, hashing, path resolution, and tree removal.
  */
 import { createHash } from "node:crypto";
-import { mkdir, rename, unlink, writeFile } from "node:fs/promises";
+import { mkdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 
 import { precondition } from "../domain/assert.js";
@@ -95,4 +95,28 @@ export async function writeOutputAtomic(outputDir: OutputDirPath, relativePath: 
  */
 export function sha256Hex(content: string): string {
   return createHash("sha256").update(content, "utf8").digest("hex");
+}
+
+/**
+ * Remove one stale file or directory tree confined beneath the output root.
+ *
+ * @param outputDir - configured output directory root
+ * @param relativePath - stale subtree path inside the output directory
+ * @returns resolves after the target is absent
+ *
+ * @remarks
+ * Precondition: `relativePath` is non-empty, resolves below `outputDir`, and
+ * does not identify the output root itself. Postcondition: the selected target
+ * does not exist; a missing target is accepted. Path violations throw before
+ * I/O. Permission and other unexpected filesystem errors propagate. Recursive
+ * deletion is deliberately restricted to the one confined target.
+ */
+export async function removeOutputTree(
+  outputDir: OutputDirPath,
+  relativePath: RelativePath,
+): Promise<void> {
+  precondition(relativePath.length > 0, "output tree path must be non-empty");
+  const target = resolveConfinedOutputPath(outputDir, relativePath);
+  precondition(target !== resolve(outputDir), "output tree removal must not target the output root");
+  await rm(target, { recursive: true, force: true });
 }

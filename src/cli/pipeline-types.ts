@@ -11,6 +11,8 @@ import type { MergedCapabilitySpec, ParsedDesign, ParsedProposal, ParsedSpec, Pa
 import type { LogicIrClaim } from "../domain/logic-ir.js";
 import type { ErrorCategory } from "../domain/errors.js";
 import type { RunState } from "../domain/run-state.js";
+import type { FormalizationError } from "../domain/formal/formalize.js";
+import type { FormalizationEvidenceFile } from "../domain/reporting/formalization-evidence.js";
 
 // ---------------------------------------------------------------------------
 // Pipeline abort mechanism
@@ -94,4 +96,8 @@ export interface AnalysisResult {
   readonly clusterResult: { readonly representatives: readonly LogicIrClaim[]; readonly findings: readonly Finding[] };
   readonly qualResult: { readonly pass1Findings: readonly Finding[]; readonly pass2Findings: readonly Finding[] };
   readonly logicResult: { readonly findings: readonly Finding[] };
+  readonly formalization: {
+    readonly evidenceFile: FormalizationEvidenceFile;
+    readonly errors: readonly FormalizationError[];
+  };
 }

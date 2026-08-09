@@ -8,6 +8,12 @@ import { buildManifestEntries, writeManifest, invalidateStaleManifest } from "..
 import { writeOutputAtomic } from "../../src/adapters/fs.js";
 import { traceSpec } from "../support/spec-trace.js";
 import { toOutputDirPath, toRelativePath } from "../../src/domain/branded.js";
+import {
+  buildFormalizationAttemptSet,
+  formalizationAttemptSetPath,
+  serializeFormalizationAttemptSet,
+  writeFormalizationAttemptSet,
+} from "../../src/domain/reporting/formalization-evidence.js";
 
 describe("manifest semantics", () => {
   it("writes checksums and manifest last", async () => {
@@ -62,5 +68,44 @@ describe("manifest semantics", () => {
 
     const removed = await invalidateStaleManifest(toOutputDirPath(outDir));
     expect(removed).toBe(false);
+  });
+
+  it("lists formalization evidence as an ordinary checksummed file without embedding attempts", async () => {
+    const outDir = await mkdtemp(join(tmpdir(), "spec-check-manifest-evidence-"));
+    const evidence = {
+      batchKey: "<merged-spec/auth>",
+      claimIndexes: [0, 1],
+      claimIds: ["AUTH-REQ-1", null],
+      provenanceFiles: ["base/auth.md", "delta/auth.md"],
+      contextSha256: "a".repeat(64),
+      promptVariant: "attached-context-v1",
+      model: "test-model",
+      subBatchOrdinal: 0,
+      outcome: { kind: "success" as const },
+      cleanup: "succeeded" as const,
+    };
+
+    const attemptSet = buildFormalizationAttemptSet({ kind: "specs_forward" }, [evidence]);
+    const evidenceFile = await writeFormalizationAttemptSet(toOutputDirPath(outDir), attemptSet);
+    await writeManifest(toOutputDirPath(outDir), [evidenceFile]);
+
+    const manifest = JSON.parse(await readFile(join(outDir, "manifest.json"), "utf8")) as {
+      readonly files: readonly { readonly path: string; readonly checksum: string }[];
+      readonly formalizationBatchAttempts?: readonly unknown[];
+    };
+    expect(manifest.formalizationBatchAttempts).toBeUndefined();
+    expect(manifest.files).toEqual([evidenceFile]);
+    const { sha256Hex } = await import("../../src/adapters/fs.js");
+    expect(manifest.files[0]?.checksum).toBe(sha256Hex(serializeFormalizationAttemptSet(attemptSet)));
+  });
+
+  it("uses deterministic discriminated paths and collision-free generated ordinals", () => {
+    expect(formalizationAttemptSetPath({ kind: "specs_forward" })).toBe(
+      "formalization_evidence/specs_forward.json",
+    );
+    const first = formalizationAttemptSetPath({ kind: "generated_spec", ordinal: 0, capability: "same" });
+    const second = formalizationAttemptSetPath({ kind: "generated_spec", ordinal: 1, capability: "same" });
+    expect(first).not.toBe(second);
+    expect(first).toBe(formalizationAttemptSetPath({ kind: "generated_spec", ordinal: 0, capability: "same" }));
   });
 });

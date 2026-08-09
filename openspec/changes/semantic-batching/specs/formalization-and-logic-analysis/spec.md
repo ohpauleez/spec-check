@@ -8,6 +8,10 @@ WHEN the spec-check tool groups formalizable claims (claims with `kind` equal to
 - `openspec/changes/semantic-batching/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/semantic-batching/design.md#Interface Contracts`
 
+#### Requirement model
+
+[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) models shared key selection, grouping partition, fallback totality, phase parity, and the cross-layer constraint that physical batches stay within one logical group. First-occurrence ordering remains a sequence-level test obligation outside the model.
+
 #### Scenario: Mapped Capability Groups By Logical File [FLA-SEMGRP-MAPPED]
 WHEN a formalizable claim carries a capability that is present in the logical-file map, THE spec-check tool SHALL group that claim under the mapped `logicalFile` value.
 
@@ -55,6 +59,10 @@ WHILE `maxBatchSize` is an internal test-only control, WHEN the spec-check tool 
 - `openspec/changes/semantic-batching/proposal.md#Scope`
 - `openspec/changes/semantic-batching/design.md#Component Design`
 
+#### Requirement model
+
+[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) models claim partition across physical batches and checks `batches_within_one_group`; numeric chunk bounds, stable slicing order, and `maxBatchSize` validation remain test obligations outside the model.
+
 #### Scenario: Default Disables Splitting [FLA-SUBBATCH-ZERO]
 WHEN `maxBatchSize` is `0` (the default), THE spec-check tool SHALL issue exactly one first-sample physical batch per logical group regardless of how many claims the group contains.
 
@@ -81,6 +89,10 @@ WHEN a first-sample physical batch contains two or more claims, THE spec-check t
 **References:**
 - `openspec/changes/semantic-batching/proposal.md#Domain Model`
 - `openspec/changes/semantic-batching/design.md#Data Design`
+
+#### Requirement model
+
+[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) models the transport-arity invariant: multi-claim physical batches are attached and single-claim batches are inline. JSON shape and byte serialization remain contract-test obligations outside the model.
 
 #### Scenario: Multi-Claim Batch Uses Attachment [FLA-ATTACH-MULTI]
 WHEN a first-sample physical batch contains two or more claims, THE spec-check tool SHALL write the batch context JSON to a temp file and SHALL attach that file to the LLM invocation.
@@ -136,12 +148,16 @@ IF a returned batch entry carries an `index` that is missing, duplicated, or doe
 **Postcondition:** Misattributed responses become detectable schema failures, never silent corruption.
 
 ### Requirement: Temp Context File Lifecycle [FLA-TEMP-LIFECYCLE]
-WHILE a multi-claim attached batch is in flight, THE spec-check tool SHALL manage the temp context file through the explicit lifecycle `not_created`, `dir_created`, `file_written`, `cleanup_succeeded`, or `cleanup_failed`, SHALL create the directory with `mkdtemp()` using the prefix `spec-check-batch-` separately from file writing, SHALL write the fixed filename `batch-context.json` with UTF-8 encoding, mode `0o600`, and exclusive flag `wx`, and SHALL attempt cleanup after success, graceful model failure, adapter-return failure, thrown adapter failure, and partial write failure.
+WHILE a multi-claim attached batch is in flight on a handled execution path, THE spec-check tool SHALL manage the temp context file through the explicit lifecycle `not_created`, `dir_created`, `file_written`, `cleanup_succeeded`, or `cleanup_failed`, SHALL create the directory with `mkdtemp()` using the prefix `spec-check-batch-` separately from file writing, SHALL write the fixed filename `batch-context.json` with UTF-8 encoding, mode `0o600`, and exclusive flag `wx`, and SHALL attempt cleanup after success, graceful model failure, adapter-return failure, thrown adapter failure, and partial write failure when execution reaches lifecycle finalization. THE spec-check tool SHALL NOT claim a SIGINT or SIGTERM cleanup guarantee; process termination MAY leave temp artifacts, and the absent final manifest SHALL identify the run as incomplete.
 
 **References:**
 - `openspec/changes/semantic-batching/proposal.md#Domain Model`
 - `openspec/changes/semantic-batching/proposal.md#Failure Modes`
 - `openspec/changes/semantic-batching/design.md#Key Components`
+
+#### Requirement model
+
+[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) models handled temp lifecycle states, outcome-after-cleanup ordering, cleanup-terminal safety, cleanup liveness under explicit fairness, and the process-termination boundary.
 
 #### Scenario: Successful Batch Cleans Up [FLA-TEMP-SUCCESS]
 WHEN an attached batch attempt completes successfully, THE spec-check tool SHALL remove the temp context directory before returning results.
@@ -181,7 +197,12 @@ IF the OS temp directory is not writable and `mkdtemp()` fails, THEN THE spec-ch
 #### Scenario: Outcomes Assigned After Cleanup Terminal State [FLA-TEMP-ORDER]
 WHEN an attached batch attempt resolves (success, model failure, or infrastructure failure), THE spec-check tool SHALL assign claim outcomes only after the temp lifecycle reaches a terminal cleanup state (`cleanup_succeeded` or `cleanup_failed`). IF no temp directory was created (directory creation failure), THEN claim errors MAY be assigned immediately since no cleanup is owed.
 
-**Postcondition:** The temp lifecycle always precedes outcome assignment when a directory exists; the evidence record may outlive outcome assignment only under process kill, which is acceptable because the record audits what was sent, not what resolved.
+**Postcondition:** On handled paths, the temp lifecycle always precedes outcome assignment when a directory exists. Process termination can bypass this postcondition and is governed by [FLA-TEMP-TERMINATION]; any already finalized evidence audits attempts but does not prove completion.
+
+#### Scenario: Process Termination May Leave Temp Artifacts [FLA-TEMP-TERMINATION]
+IF the process terminates before an attached batch lifecycle reaches its handled `finally` path, THEN THE spec-check tool MAY leave the temp directory or context file and SHALL NOT leave a final manifest that implies successful completion.
+
+**Postcondition:** No cleanup guarantee is attributed to SIGINT, SIGTERM, or other process termination; manifest absence distinguishes the incomplete run from success.
 
 ### Requirement: Graceful Degradation By Adapter Error Kind [FLA-DEGRADE-KIND]
 WHEN a multi-claim attached batch attempt fails with a terminal adapter error (an `OpencodeError.kind` returned after the adapter's internal retry budget is exhausted), THE spec-check tool SHALL select per-claim handling from the existing taxonomy without introducing new public error categories: `timeout`, `invalid_json`, and `schema_validation_error` SHALL degrade to bounded per-claim inline retry; `spawn_error`, `invalid_files`, and `invalid_timeout` SHALL produce claim-level `FormalizationError` values for the affected physical batch with no per-claim fallback; and `prompt_too_large` SHALL degrade only when every per-claim inline prompt (inline template plus claim text, measured in UTF-8 bytes) fits the adapter prompt-size limit, and SHALL otherwise produce claim-level errors immediately.
@@ -190,6 +211,10 @@ WHEN a multi-claim attached batch attempt fails with a terminal adapter error (a
 - `openspec/changes/semantic-batching/proposal.md#Scope`
 - `openspec/changes/semantic-batching/design.md#Interface Contracts`
 - `openspec/changes/semantic-batching/design.md#Failure Mode Analysis`
+
+#### Requirement model
+
+[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) models terminal model, infrastructure, and transport resolutions, conditional `prompt_too_large` degradation, and bounded-path assignment to candidate or claim-error outcomes.
 
 #### Scenario: Batch Timeout Degrades Per Claim [FLA-DEGRADE-TIMEOUT]
 IF an attached batch attempt fails with `timeout`, THEN THE spec-check tool SHALL retry each claim of that physical batch individually through the inline path.
@@ -227,11 +252,15 @@ IF an attached batch attempt fails with `prompt_too_large`, THEN THE spec-check 
 **Postcondition:** Fallback is attempted only when it can succeed; no budget is spent on fallback calls guaranteed to fail.
 
 ### Requirement: Claim Partition And Terminal Outcomes [FLA-CLAIM-PARTITION]
-UNDER all handled failure modes, THE spec-check tool SHALL deliver every eligible claim (claims with `kind` equal to `requirement` or `scenario`) to exactly one terminal formalization outcome: a candidate or an explicit claim-level `FormalizationError`. No eligible claim shall be lost because of grouping, sub-batching, temp-file failure, invalid attachments, model-response failure, graceful degradation, or worker-thrown failures.
+UNDER all handled failure modes, THE spec-check tool SHALL deliver every eligible claim (claims with `kind` equal to `requirement` or `scenario`) to exactly one terminal formalization outcome. Let `E` be the set of eligible claim indexes, `C` the set of candidate indexes, and `R` the set of explicit claim-level `FormalizationError` indexes. THE spec-check tool SHALL maintain `C ⊆ E`, `R ⊆ E`, `C ∩ R = ∅`, and `C ∪ R = E`. No eligible claim SHALL be lost or assigned both outcomes because of grouping, sub-batching, temp-file failure, invalid attachments, model-response failure, graceful degradation, additional-sample failure, or worker-thrown failures.
 
 **References:**
 - `openspec/changes/semantic-batching/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/semantic-batching/design.md#Failure Mode Analysis`
+
+#### Requirement model
+
+[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) models stable, disjoint physical-batch claim partition, stable terminal outcomes, and eventual candidate-or-claim-error assignment under handled-execution fairness.
 
 #### Scenario: Worker Failure Drops No Claims [FLA-PARTITION-WORKER]
 IF a `mapBounded` worker throws while processing a physical batch, THEN THE spec-check tool SHALL convert the failure into claim-level errors for every claim of the affected physical batch, and sibling physical batches SHALL continue processing.
@@ -247,6 +276,11 @@ IF the adapter throws during a single-claim inline attempt, THEN THE spec-check 
 IF formalization returns zero candidates and one or more errors, THEN THE spec-check tool SHALL abort the run with `PipelineAbortError("FormalizationError", ...)` at the CLI boundary.
 
 **Postcondition:** Existing abort behavior for total formalization failure is preserved.
+
+#### Scenario: Additional-Sample Failure Preserves Candidate [FLA-PARTITION-ADDITIONAL-WARN]
+IF a claim already has a valid candidate and a later additional-sample attempt fails or exhausts its bounded retry budget, THEN THE spec-check tool SHALL preserve the candidate and all samples already collected, SHALL emit a warning finding describing the sample shortfall, and SHALL NOT emit a claim-level `FormalizationError` for that additional-sample failure.
+
+**Postcondition:** The claim remains in `C` and not in `R`; additional sampling can reduce confidence but cannot revoke a valid candidate or violate the disjoint partition.
 
 ### Requirement: Original Eligible Index Is Authoritative Identity [FLA-IDENTITY-INDEX]
 THE spec-check tool SHALL use the original eligible index (the stable zero-based index of a formalizable claim in eligible-claim order) or claim object identity as the authoritative internal identity for grouping, sub-batching, response matching, and additional-sample merging, and SHALL NOT use `claim.id` alone as internal identity because IDs can be missing or duplicated.
@@ -271,15 +305,19 @@ WHEN formalization emits candidates and errors, THE spec-check tool SHALL emit t
 **Postcondition:** Output attribution is always recoverable independent of emission order.
 
 ### Requirement: Batch Attempt Evidence Preservation [FLA-BATCH-EVIDENCE]
-WHEN the spec-check tool completes or fails an attached batch attempt whose temp context file is deleted, THE spec-check tool SHALL record a batch attempt evidence entry containing: schema version, batch key, ordered original eligible indexes, claim IDs when present, claim provenance files, the SHA-256 hash over the exact serialized UTF-8 context bytes, prompt variant/version, model, the physical sub-batch ordinal within the logical group, the response/failure classification, and the cleanup outcome. Evidence records SHALL use claim-text pointers (original eligible indexes resolved against preserved source artifacts) and SHALL NOT duplicate claim text; records SHALL be created before temp cleanup, collected into the formalization output, and persisted via the run manifest/evidence output.
+WHEN the spec-check tool performs a formalization invocation, THE spec-check tool SHALL produce one `FormalizationAttemptSet` envelope containing schema version, an invocation `claimSet`, and the invocation's attached attempt entries. The `claimSet` SHALL be either `specs_forward` or `generated_spec` with a zero-based invocation ordinal and capability. Each attempt entry SHALL contain batch key, ordered claim indexes local to that `claimSet`, claim IDs when present, claim provenance files, the SHA-256 hash over the exact serialized UTF-8 context bytes, prompt variant/version, model, the physical sub-batch ordinal within the logical group, the response/failure classification, and the cleanup outcome. Evidence SHALL NOT duplicate claim text; each envelope SHALL be persisted as a separate atomically finalized evidence file.
 
 **References:**
 - `openspec/changes/semantic-batching/proposal.md#Domain Model`
 - `openspec/changes/semantic-batching/proposal.md#Failure Modes`
 - `openspec/changes/semantic-batching/design.md#Data Design`
 
+#### Requirement model
+
+[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) checks that evidence is recorded for every attached attempt reaching a terminal resolution. Invocation envelopes, hashes, atomic file persistence, and manifest semantics remain evidence-contract obligations outside the model.
+
 #### Scenario: Attempt Metadata Is Complete [FLA-EVIDENCE-METADATA]
-WHEN an attached batch attempt terminates in any handled state, THE preserved evidence SHALL include schema version, batch key, ordered claim indexes, claim IDs when present, provenance files, context SHA-256, prompt variant/version, model, sub-batch ordinal, response/failure classification, and cleanup outcome.
+WHEN an attached batch attempt terminates in any handled state, THE preserved evidence SHALL include the enclosing envelope's schema version and `claimSet`, plus the attempt's batch key, ordered claim-set-local indexes, claim IDs when present, provenance files, context SHA-256, prompt variant/version, model, sub-batch ordinal, response/failure classification, and cleanup outcome.
 
 **Postcondition:** Every attached attempt is auditable without the temp file.
 
@@ -289,9 +327,14 @@ WHEN the spec-check tool computes the context hash, THE hash SHALL be SHA-256 ov
 **Postcondition:** The hash is reproducible from the deterministic serialization.
 
 #### Scenario: Deleted Context Is Byte-Reconstructable [FLA-EVIDENCE-RECONSTRUCT]
-WHEN a temp context file has been deleted, resolving the recorded claim indexes against preserved source artifacts (claim text), rebuilding the context object, and re-serializing deterministically SHALL yield bytes whose SHA-256 equals the recorded context hash.
+WHEN a temp context file has been deleted, selecting the claim array identified by the enclosing `FormalizationAttemptSet.claimSet`, resolving the recorded local indexes only against that claim array, rebuilding the context object, and re-serializing deterministically SHALL yield bytes whose SHA-256 equals the recorded context hash.
 
-**Postcondition:** Auditability survives temp-file deletion by design, without duplicating claim text in durable output.
+**Postcondition:** Auditability survives temp-file deletion without duplicating claim text, and indexes from one invocation are never resolved against another invocation's claim set.
+
+#### Scenario: Attempt Evidence Does Not Mark Completion [FLA-EVIDENCE-NOT-COMPLETE]
+IF a run fails or the process terminates after one or more `FormalizationAttemptSet` files are atomically finalized, THEN those files MAY remain and SHALL NOT imply successful run completion.
+
+**Postcondition:** Attempt evidence audits work performed; only a successful final manifest marks completion.
 
 ## MODIFIED Requirements
 
@@ -305,6 +348,10 @@ WHEN requirement and scenario claims are available for formal analysis, THE spec
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Make JSON extraction tolerant but keep schema validation strict`
 - `openspec/changes/semantic-batching/proposal.md#Scope`
 - `openspec/changes/semantic-batching/design.md#Proposed Design`
+
+#### Requirement model
+
+[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) models semantic grouping, physical-batch containment, handled formalization outcomes, and attached-attempt evidence. Logic IR generation, timeout values, and emitted artifact formats remain outside the model.
 
 #### Scenario: Generate Inspectable Logic Artifacts [FLA-FORMAL-ARTS]
 WHEN a claim is selected for formalization, THE spec-check tool SHALL emit inspectable logic and SMT artifacts that let a reviewer trace the formal result back to the originating requirement or scenario.
@@ -356,6 +403,10 @@ WHEN the spec-check tool prepares specs-forward logical analysis, THE spec-check
 - `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Verification Strategy`
 - `openspec/changes/semantic-batching/proposal.md#Scope`
 - `openspec/changes/semantic-batching/design.md#Interface Contracts`
+
+#### Requirement model
+
+[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) models shared semantic key selection and checks grouping parity and one-group physical-batch containment. Solver-specific filtering and artifact naming remain implementation and test obligations outside the model.
 
 #### Scenario: One Logic Group Per Merged Capability [FLA-GROUP-ONE]
 WHEN one capability has finalized-plus-delta inputs that merge into one active capability view, THE spec-check tool SHALL produce exactly one specs-forward logical-analysis group for that capability.

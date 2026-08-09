@@ -1,10 +1,10 @@
-import { mkdtemp, readFile } from "node:fs/promises";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
 import { describe, expect, it } from "vitest";
 import { traceSpec } from "../support/spec-trace.js";
-import { resolveConfinedOutputPath, writeOutputAtomic, sha256Hex } from "../../src/adapters/fs.js";
+import { removeOutputTree, resolveConfinedOutputPath, writeOutputAtomic, sha256Hex } from "../../src/adapters/fs.js";
 import { toOutputDirPath, toRelativePath } from "../../src/domain/branded.js";
 
 describe("filesystem adapter contracts", () => {
@@ -38,6 +38,18 @@ describe("filesystem adapter contracts", () => {
     await writeOutputAtomic(toOutputDirPath(dir), toRelativePath("test.md"), "content\n");
     const content = await readFile(join(dir, "test.md"), "utf8");
     expect(content).toBe("content\n");
+  });
+
+  it("removes only the selected confined stale evidence tree", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "spec-check-fs-remove-"));
+    await mkdir(join(dir, "formalization_evidence"), { recursive: true });
+    await writeFile(join(dir, "formalization_evidence", "stale.json"), "{}\n", "utf8");
+    await writeFile(join(dir, "keep.txt"), "keep\n", "utf8");
+
+    await removeOutputTree(toOutputDirPath(dir), toRelativePath("formalization_evidence"));
+
+    await expect(access(join(dir, "formalization_evidence"))).rejects.toThrow();
+    expect(await readFile(join(dir, "keep.txt"), "utf8")).toBe("keep\n");
   });
 
   it("accepts filenames containing '..' as a substring (not a traversal segment)", () => {

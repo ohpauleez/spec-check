@@ -40,6 +40,7 @@ function makeConfig(inputs: string[], output: string, opts?: { allowArchive?: bo
     model: toModelName("test-model"),
     pairBudget: 100,
     timeoutMs: 300_000,
+    maxBatchSize: 32,
     allowArchive: opts?.allowArchive ?? false,
   };
 }

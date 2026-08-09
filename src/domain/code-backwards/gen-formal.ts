@@ -13,6 +13,11 @@ import { formalizeClaims } from "../formal/formalize.js";
 import { clusterFormalizationSamples } from "../formal/clustering.js";
 import { compileSmtlib } from "../formal/smtlib.js";
 import type { LogicIrClaim } from "../logic-ir.js";
+import {
+  buildFormalizationAttemptSet,
+  writeFormalizationAttemptSet,
+  type FormalizationEvidenceFile,
+} from "../reporting/formalization-evidence.js";
 
 /**
  * A single formalized claim from the code-derived spec pipeline with its SMT artifact path.
@@ -35,11 +40,13 @@ export interface GeneratedFormalization {
  * @remarks
  * Invariant: `claims` contains successfully formalized claims with persisted SMT artifacts.
  * Invariant: `findings` accumulates errors for failed specs and warnings for ambiguous samples.
+ * Invariant: `evidenceFiles` describes one durable invocation envelope per processed spec.
  * Partial results are preserved: failure of one spec does not affect others.
  */
 export interface GeneratedFormalizationOutput {
   readonly claims: readonly GeneratedFormalization[];
   readonly findings: readonly Finding[];
+  readonly evidenceFiles: readonly FormalizationEvidenceFile[];
 }
 
 /**
@@ -70,8 +77,10 @@ export async function formalizeGeneratedSpecs(input: {
 }): Promise<GeneratedFormalizationOutput> {
   const findings: Finding[] = [];
   const outputClaims: GeneratedFormalization[] = [];
+  const evidenceFiles: FormalizationEvidenceFile[] = [];
 
-  for (const spec of input.generatedSpecs) {
+  for (let ordinal = 0; ordinal < input.generatedSpecs.length; ordinal += 1) {
+    const spec = input.generatedSpecs[ordinal]!;
     // Use actual requirement text from informalization (not tautological templates).
     const syntheticClaims: Claim[] = spec.requirements.map((req) => ({
       id: toClaimId(req.id),
@@ -88,9 +97,18 @@ export async function formalizeGeneratedSpecs(input: {
       model: input.model,
       samplesPerClaim: 1,
       timeoutMs: input.timeoutMs,
+      logicalFileByCapability: new Map(),
     });
+    const evidenceFile = await writeFormalizationAttemptSet(
+      input.outputDir,
+      buildFormalizationAttemptSet(
+        { kind: "generated_spec", ordinal, capability: spec.capability },
+        formalized.ok ? formalized.value.batchAttempts : [],
+      ),
+    );
+    evidenceFiles.push(evidenceFile);
 
-    // formalizeClaims always returns ok; check for errors in the output.
+    // Persist invocation evidence before interpreting formalization failure.
     if (!formalized.ok) {
       // Defensive: should not happen with current implementation but preserves type safety.
       findings.push({
@@ -156,5 +174,6 @@ export async function formalizeGeneratedSpecs(input: {
   return {
     claims: outputClaims,
     findings,
+    evidenceFiles,
   };
 }

@@ -6,6 +6,7 @@ import type { LogicIrClaim } from "../../src/domain/logic-ir.js";
 import type { MergedCapabilitySpec } from "../../src/domain/model.js";
 import { toCapabilityName, toClaimId } from "../../src/domain/branded.js";
 import { groupRepresentativesBySpec, runClaimGraphPhase, sanitizeLogicalFileForArtifacts } from "../../src/cli/pipeline-helpers.js";
+import { buildLogicalFileByCapability } from "../../src/domain/formal/grouping.js";
 
 vi.mock("../../src/domain/claim-graph.js", () => ({
   buildClaimGraph: vi.fn(() => ({ graph: { claims: [] }, findings: [] })),
@@ -42,6 +43,14 @@ function representative(id: string): LogicIrClaim {
     functions: [],
     assertions: [{ id: "A1", expr: "true" }],
   };
+}
+
+function logicalFileMap(specs: readonly MergedCapabilitySpec[]): ReadonlyMap<string, string> {
+  const result = buildLogicalFileByCapability(specs);
+  if (!result.ok) {
+    throw new Error(result.error.map((error) => error.message).join("; "));
+  }
+  return result.value;
 }
 
 describe("pipeline helper contracts", () => {
@@ -83,6 +92,7 @@ describe("pipeline helper contracts", () => {
 
     const candidates: FormalizationCandidate[] = [
       {
+        eligibleIndex: 0,
         claim: {
           id: toClaimId("CAP-A-REQ-1"),
           kind: "requirement",
@@ -96,6 +106,7 @@ describe("pipeline helper contracts", () => {
         invalidSamples: [],
       },
       {
+        eligibleIndex: 1,
         claim: {
           id: toClaimId("CAP-B-REQ-1"),
           kind: "requirement",
@@ -113,7 +124,7 @@ describe("pipeline helper contracts", () => {
     const groups = groupRepresentativesBySpec(
       candidates,
       [representative("CAP-A-REQ-1"), representative("CAP-B-REQ-1")],
-      nonEmptyMergedSpecs,
+      logicalFileMap(nonEmptyMergedSpecs),
     );
 
     expect(groups).toHaveLength(2);
@@ -128,6 +139,7 @@ describe("pipeline helper contracts", () => {
     const mergedSpecs = [mergedCapability("cap-a", 1)];
     const candidates: FormalizationCandidate[] = [
       {
+        eligibleIndex: 0,
         claim: {
           id: toClaimId("CAP-A-REQ-1"),
           kind: "requirement",
@@ -142,7 +154,7 @@ describe("pipeline helper contracts", () => {
       },
     ];
 
-    const groups = groupRepresentativesBySpec(candidates, [representative("CAP-A-REQ-1")], mergedSpecs);
+    const groups = groupRepresentativesBySpec(candidates, [representative("CAP-A-REQ-1")], logicalFileMap(mergedSpecs));
     expect(groups).toHaveLength(1);
     expect(groups[0]?.specFile).toBe("<merged-spec/cap-a>");
   });
@@ -165,6 +177,7 @@ describe("pipeline helper contracts", () => {
 
     const candidates: FormalizationCandidate[] = [
       {
+        eligibleIndex: 0,
         claim: {
           id: toClaimId("CAP-A-REQ-1"),
           kind: "requirement",
@@ -178,6 +191,7 @@ describe("pipeline helper contracts", () => {
         invalidSamples: [],
       },
       {
+        eligibleIndex: 1,
         claim: {
           id: toClaimId("CAP-B-REQ-1"),
           kind: "requirement",
@@ -196,16 +210,17 @@ describe("pipeline helper contracts", () => {
       groupRepresentativesBySpec(
         candidates,
         [representative("CAP-A-REQ-1"), representative("CAP-B-REQ-1")],
-        mergedSpecs,
+        logicalFileMap(mergedSpecs),
       )
     ).toThrow(/duplicate sanitized logicalFile key/u);
   });
 
   it("excludes non-spec claims from capability-grouped logic path", () => {
-    traceSpec("FLA-RUN-LOGIC", "CGC-NORMALIZE-CLAIMS");
+    traceSpec("FLA-RUN-LOGIC", "CGC-NORMALIZE-CLAIMS", "MCA-SOLVER-FILTER-FIRST");
     const mergedSpecs = [mergedCapability("cap-a", 1)];
     const candidates: FormalizationCandidate[] = [
       {
+        eligibleIndex: 0,
         claim: {
           id: toClaimId("CAP-A-REQ-1"),
           kind: "requirement",
@@ -219,6 +234,7 @@ describe("pipeline helper contracts", () => {
         invalidSamples: [],
       },
       {
+        eligibleIndex: 1,
         claim: {
           kind: "proposal_property",
           text: "This is a proposal-only statement.",
@@ -234,7 +250,7 @@ describe("pipeline helper contracts", () => {
     const groups = groupRepresentativesBySpec(
       candidates,
       [representative("CAP-A-REQ-1"), representative("PROPOSAL-1")],
-      mergedSpecs,
+      logicalFileMap(mergedSpecs),
     );
 
     expect(groups).toHaveLength(1);

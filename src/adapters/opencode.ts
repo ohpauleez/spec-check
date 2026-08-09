@@ -7,10 +7,34 @@
  */
 import { lstat, stat } from "node:fs/promises";
 
-import { runProcess } from "./process.js";
+import { PROMPT_ARG_MAX_BYTES } from "./opencode-limits.js";
+import { runProcess, type ProcessResult } from "./process.js";
 import { postcondition } from "../domain/assert.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { DEFAULT_TIMEOUT_MS, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS } from "../domain/timeout.js";
+
+export { PROMPT_ARG_MAX_BYTES } from "./opencode-limits.js";
+
+/**
+ * First backoff delay between adapter retry attempts, in milliseconds.
+ *
+ * @remarks
+ * The base exists so transient backend contention (the dominant cause of
+ * `timeout` and `invalid_json` failures) is given time to clear before a
+ * respawn; without it, immediate retries amplify an already-degraded backend.
+ */
+const RETRY_BACKOFF_BASE_MS = 250;
+
+/**
+ * Upper bound on the exponential backoff delay between adapter retry attempts,
+ * in milliseconds.
+ *
+ * @remarks
+ * The cap exists so a large caller-supplied `retries` budget cannot push the
+ * per-attempt delay beyond a few seconds; the shift in {@link retryBackoffMs}
+ * is bounded by this constant rather than by the attempt count.
+ */
+const RETRY_BACKOFF_MAX_MS = 2_000;
 
 /**
  * Closed domain of verification phases supported by the opencode invocation protocol.
@@ -42,6 +66,14 @@ export interface OpencodeCallOptions {
   readonly timeoutMs?: number;
   readonly retries?: number;
   readonly files?: readonly string[];
+  /**
+   * Delay hook applied between retry attempts; defaults to a real timer.
+   *
+   * @remarks
+   * Injected so tests can advance time deterministically instead of waiting
+   * out real backoff delays. Production callers should leave this unset.
+   */
+  readonly backoffDelay?: (delayMs: number) => Promise<void>;
 }
 
 /**
@@ -59,7 +91,61 @@ export interface OpencodeError {
   readonly stderr?: string;
 }
 
-const PROMPT_ARG_MAX_BYTES = 32_768;
+/**
+ * Exponential backoff delay before retry attempt `attempt` (1-based), in
+ * milliseconds.
+ *
+ * @param attempt - the attempt that just failed; the returned delay precedes
+ *   attempt `attempt + 1`
+ * @returns `RETRY_BACKOFF_BASE_MS * 2^(attempt-1)`, capped at
+ *   `RETRY_BACKOFF_MAX_MS`
+ *
+ * @remarks
+ * The cap is applied after the shift so a large caller-supplied retry budget
+ * cannot overflow the delay into multi-minute territory; for any realistic
+ * budget the value stays a safe small integer. Pure and total.
+ */
+function retryBackoffMs(attempt: number): number {
+  return Math.min(RETRY_BACKOFF_BASE_MS * 2 ** Math.max(0, attempt - 1), RETRY_BACKOFF_MAX_MS);
+}
+
+/**
+ * Whether a failure kind can plausibly heal by respawning an identical call.
+ *
+ * @param kind - the terminal failure kind of the last attempt
+ * @returns `true` for transient kinds (`spawn_error`, `timeout`,
+ *   `invalid_json`); `false` for kinds that are deterministic for a fixed
+ *   request
+ *
+ * @remarks
+ * `prompt_too_large`, `invalid_timeout`, and `invalid_files` are request-shape
+ * failures decided before any subprocess work. `schema_validation_error` is
+ * deterministic at the adapter layer because the retry loop respawns an
+ * identical prompt; recovering from stochastic model disagreement is the
+ * domain layer's job (it rebuilds attempts with its own budget). Keeping this
+ * classification total over the closed `kind` union forces a deliberate
+ * decision when new kinds are added.
+ */
+function isTransientFailureKind(kind: OpencodeError["kind"]): boolean {
+  return kind === "spawn_error" || kind === "timeout" || kind === "invalid_json";
+}
+
+/**
+ * Default backoff delay implementation backed by a real timer.
+ *
+ * @param delayMs - delay in milliseconds; expected to be a safe non-negative
+ *   integer produced by {@link retryBackoffMs}
+ * @returns a promise that resolves after the delay
+ *
+ * @remarks
+ * This is the only timer in the adapter; injecting `options.backoffDelay`
+ * replaces it so tests never wait on wall-clock time.
+ */
+function defaultBackoffDelay(delayMs: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, delayMs);
+  });
+}
 
 /**
  * Call `opencode` with bounded retries and strict JSON validation.
@@ -77,19 +163,51 @@ const PROMPT_ARG_MAX_BYTES = 32_768;
  * - Process exceeds timeout on every attempt → `kind: "timeout"`.
  * - Model returns non-JSON output → `kind: "invalid_json"`.
  * - Model returns JSON that fails phase schema validation → `kind: "schema_validation_error"`.
- * - All failures are retried up to `options.retries` (default 3) before returning error.
+ *
+ * Retry policy: only transient kinds (`spawn_error`, `timeout`, `invalid_json`)
+ * are retried, up to `options.retries` (default 3) total attempts. The remaining
+ * kinds are deterministic for a fixed request — respawning an identical call
+ * cannot heal them — so they return immediately. Between attempts the loop
+ * waits {@link retryBackoffMs}, an exponential backoff capped at
+ * {@link RETRY_BACKOFF_MAX_MS}, injected via `options.backoffDelay` so time
+ * stays at the adapter edge and tests can control it.
  *
  * Safety: spawns up to `retries` sequential subprocess invocations. No concurrent
  * subprocess overlap within a single call. Network failures in the LLM backend
  * surface as process-level errors (non-zero exit or timeout).
  */
-export async function callOpencode(
-  options: OpencodeCallOptions,
-): Promise<Result<unknown, OpencodeError>> {
-  const command = options.binaryPath ?? "opencode";
-  const retries = options.retries ?? 3;
-  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+/**
+ * Resolved and validated invocation controls for one `callOpencode` run.
+ *
+ * @remarks
+ * All defaults are applied and all request-shape validation has already
+ * passed, so the retry loop can treat every field as authoritative.
+ */
+interface ResolvedCallOptions {
+  readonly command: string;
+  readonly retries: number;
+  readonly timeoutMs: number;
+  readonly backoffDelay: (delayMs: number) => Promise<void>;
+}
 
+/**
+ * Validate request shape and resolve defaults before any subprocess work.
+ *
+ * @param options - raw invocation options from the caller
+ * @returns resolved controls on success, or a terminal request-shape error
+ *   (`prompt_too_large`, `invalid_timeout`, `invalid_files`) that no retry
+ *   could heal
+ *
+ * @remarks
+ * Postcondition on success: `timeoutMs` is a safe integer inside the accepted
+ * range and every attached file is a readable regular file at validation
+ * time. These failures are returned before the retry loop because respawning
+ * an identically-shaped request cannot change them. The files check performs
+ * read-only `stat` calls; all other checks are pure.
+ */
+async function validateCallOptions(
+  options: OpencodeCallOptions,
+): Promise<Result<ResolvedCallOptions, OpencodeError>> {
   const promptBytes = Buffer.byteLength(options.prompt, "utf8");
   if (promptBytes > PROMPT_ARG_MAX_BYTES) {
     return err({
@@ -99,6 +217,7 @@ export async function callOpencode(
     });
   }
 
+  const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS;
   if (!Number.isSafeInteger(timeoutMs) || timeoutMs < TIMEOUT_MIN_MS || timeoutMs > TIMEOUT_MAX_MS) {
     return err({
       kind: "invalid_timeout",
@@ -116,79 +235,191 @@ export async function callOpencode(
     });
   }
 
-  // The prompt must be the first positional argument after the "run" subcommand.
-  // opencode interprets trailing positional arguments as file paths, not prompt text.
+  return ok({
+    command: options.binaryPath ?? "opencode",
+    retries: options.retries ?? 3,
+    timeoutMs,
+    backoffDelay: options.backoffDelay ?? defaultBackoffDelay,
+  });
+}
+
+/**
+ * Build the argv array for one `opencode run` invocation.
+ *
+ * @param options - invocation options supplying the prompt, model, and files
+ * @returns argument vector with the prompt as the first positional argument
+ *
+ * @remarks
+ * The prompt must be the first positional argument after the "run" subcommand:
+ * opencode interprets trailing positional arguments as file paths, not prompt
+ * text. Pure and total; no element is mutated after construction.
+ */
+function buildOpencodeArgs(options: OpencodeCallOptions): string[] {
   const args: string[] = ["run", options.prompt, "--model", options.model, "--format", "json"];
   for (const filePath of options.files ?? []) {
     args.push("--file", filePath);
   }
+  return args;
+}
+
+/**
+ * Classify one completed subprocess result into a success or attempt error.
+ *
+ * @param processResult - captured stdout/stderr/exit state of one spawn
+ * @param options - invocation options supplying phase and resolved timeout
+ * @returns the validated payload, or the classified `OpencodeError` for this
+ *   attempt; the caller decides whether the kind is worth retrying
+ *
+ * @remarks
+ * Failure classification order is load-bearing: timeout first (stdout is
+ * unreliable after a kill), then non-zero exit with unusable stdout (surfaced
+ * with a bounded stderr preview), then JSON parse, then phase schema. Pure
+ * classification of an already-captured result; performs no I/O.
+ */
+function classifyProcessResult(
+  processResult: ProcessResult,
+  options: OpencodeCallOptions,
+  timeoutMs: number,
+): Result<unknown, OpencodeError> {
+  if (processResult.timedOut) {
+    return err({
+      kind: "timeout",
+      phase: options.phase,
+      message: `opencode timed out after ${String(timeoutMs)}ms`,
+      stderr: processResult.stderr,
+    });
+  }
+
+  // Surface non-zero exit codes and stderr content when stdout is unusable.
+  // This prevents opaque "empty stdout" errors when the subprocess reports
+  // a clear failure via stderr (e.g., argument parsing errors, missing files).
+  if (processResult.exitCode !== null && processResult.exitCode !== 0 && processResult.stdout.trim().length === 0) {
+    const stderrPreview = processResult.stderr.trim().slice(0, 300);
+    return err({
+      kind: "spawn_error",
+      phase: options.phase,
+      message: stderrPreview.length > 0
+        ? `opencode exited with code ${String(processResult.exitCode)}: ${stderrPreview}`
+        : `opencode exited with code ${String(processResult.exitCode)} (empty stdout, no stderr)`,
+      stderr: processResult.stderr,
+    });
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = parseOpencodePayload(processResult.stdout);
+  } catch (parseError: unknown) {
+    const baseMessage = parseError instanceof Error ? parseError.message : "opencode returned non-JSON output";
+    const stderrHint = processResult.stderr.trim().length > 0
+      ? ` [stderr: ${processResult.stderr.trim().slice(0, 200)}]`
+      : "";
+    return err({
+      kind: "invalid_json",
+      phase: options.phase,
+      message: `${baseMessage}${stderrHint}`,
+      stderr: processResult.stderr,
+    });
+  }
+
+  const validated = validatePhaseSchema(options.phase, parsed);
+  if (!validated.ok) {
+    return err(validated.error);
+  }
+  return ok(validated.value);
+}
+
+/**
+ * Run one spawn-and-classify attempt against the opencode subprocess.
+ *
+ * @param command - resolved binary path
+ * @param args - argv built by {@link buildOpencodeArgs}
+ * @param options - invocation options supplying phase and files
+ * @param timeoutMs - resolved per-attempt timeout
+ * @returns the validated payload, or the classified attempt error; a thrown
+ *   spawn is normalized to `spawn_error` so the retry loop stays total
+ *
+ * @remarks
+ * Exactly one subprocess is spawned per call. The function never throws:
+ * process-level throws (binary missing, not executable) are expected adapter
+ * failures and are returned as data.
+ */
+async function attemptOpencodeOnce(
+  command: string,
+  args: readonly string[],
+  options: OpencodeCallOptions,
+  timeoutMs: number,
+): Promise<Result<unknown, OpencodeError>> {
+  let processResult: ProcessResult;
+  try {
+    processResult = await runProcess(command, [...args], { timeoutMs });
+  } catch (error) {
+    return err({
+      kind: "spawn_error",
+      phase: options.phase,
+      message: error instanceof Error ? error.message : "opencode spawn failed",
+    });
+  }
+  return classifyProcessResult(processResult, options, timeoutMs);
+}
+
+/**
+ * Call `opencode` with bounded retries and strict JSON validation.
+ *
+ * @param options - invocation options including model, prompt, phase, and retry/timeout config
+ * @returns schema-validated JSON response on success, or a terminal `OpencodeError` on failure
+ *
+ * @remarks
+ * Precondition: `options.model` and `options.prompt` are non-empty strings.
+ * Postcondition: on `ok: true`, the value is a non-null object that passed phase schema
+ * validation. On `ok: false`, all retry attempts have been exhausted.
+ *
+ * Failure modes:
+ * - Binary not found or not executable → `kind: "spawn_error"` after all retries.
+ * - Process exceeds timeout on every attempt → `kind: "timeout"`.
+ * - Model returns non-JSON output → `kind: "invalid_json"`.
+ * - Model returns JSON that fails phase schema validation → `kind: "schema_validation_error"`.
+ *
+ * Retry policy: only transient kinds (`spawn_error`, `timeout`, `invalid_json`)
+ * are retried, up to `options.retries` (default 3) total attempts. The remaining
+ * kinds are deterministic for a fixed request — respawning an identical call
+ * cannot heal them — so they return immediately. Between attempts the loop
+ * waits {@link retryBackoffMs}, an exponential backoff capped at
+ * {@link RETRY_BACKOFF_MAX_MS}, injected via `options.backoffDelay` so time
+ * stays at the adapter edge and tests can control it.
+ *
+ * Safety: spawns up to `retries` sequential subprocess invocations. No concurrent
+ * subprocess overlap within a single call. Network failures in the LLM backend
+ * surface as process-level errors (non-zero exit or timeout).
+ */
+export async function callOpencode(
+  options: OpencodeCallOptions,
+): Promise<Result<unknown, OpencodeError>> {
+  const validated = await validateCallOptions(options);
+  if (!validated.ok) {
+    return validated;
+  }
+  const { command, retries, timeoutMs, backoffDelay } = validated.value;
+  const args = buildOpencodeArgs(options);
 
   let lastError: OpencodeError | undefined;
   for (let attempt = 1; attempt <= retries; attempt += 1) {
-    let processResult;
-    try {
-      processResult = await runProcess(command, args, {
-        timeoutMs,
-      });
-    } catch (error) {
-      lastError = {
-        kind: "spawn_error",
-        phase: options.phase,
-        message: error instanceof Error ? error.message : "opencode spawn failed",
-      };
-      continue;
+    // Backoff precedes every attempt after the first; attempt 1 runs
+    // immediately so the common no-retry path pays no scheduling cost.
+    if (attempt > 1) {
+      await backoffDelay(retryBackoffMs(attempt - 1));
     }
 
-    if (processResult.timedOut) {
-      lastError = {
-        kind: "timeout",
-        phase: options.phase,
-        message: `opencode timed out after ${String(timeoutMs)}ms`,
-        stderr: processResult.stderr,
-      };
-      continue;
+    const attempted = await attemptOpencodeOnce(command, args, options, timeoutMs);
+    if (attempted.ok) {
+      return attempted;
     }
-
-    // Surface non-zero exit codes and stderr content when stdout is unusable.
-    // This prevents opaque "empty stdout" errors when the subprocess reports
-    // a clear failure via stderr (e.g., argument parsing errors, missing files).
-    if (processResult.exitCode !== null && processResult.exitCode !== 0 && processResult.stdout.trim().length === 0) {
-      const stderrPreview = processResult.stderr.trim().slice(0, 300);
-      lastError = {
-        kind: "spawn_error",
-        phase: options.phase,
-        message: stderrPreview.length > 0
-          ? `opencode exited with code ${String(processResult.exitCode)}: ${stderrPreview}`
-          : `opencode exited with code ${String(processResult.exitCode)} (empty stdout, no stderr)`,
-        stderr: processResult.stderr,
-      };
-      continue;
+    lastError = attempted.error;
+    // A deterministic failure cannot heal by respawning an identical call;
+    // stop here regardless of the remaining retry budget so a schema
+    // mismatch costs one spawn instead of the full budget.
+    if (!isTransientFailureKind(attempted.error.kind)) {
+      break;
     }
-
-    let parsed: unknown;
-    try {
-      parsed = parseOpencodePayload(processResult.stdout);
-    } catch (parseError: unknown) {
-      const baseMessage = parseError instanceof Error ? parseError.message : "opencode returned non-JSON output";
-      const stderrHint = processResult.stderr.trim().length > 0
-        ? ` [stderr: ${processResult.stderr.trim().slice(0, 200)}]`
-        : "";
-      lastError = {
-        kind: "invalid_json",
-        phase: options.phase,
-        message: `${baseMessage}${stderrHint}`,
-        stderr: processResult.stderr,
-      };
-      continue;
-    }
-
-    const validated = validatePhaseSchema(options.phase, parsed);
-    if (!validated.ok) {
-      lastError = validated.error;
-      continue;
-    }
-
-    return ok(validated.value);
   }
 
   return err(
@@ -600,17 +831,22 @@ function asRecord(value: unknown): Record<string, unknown> | undefined {
  * @remarks
  * Precondition: `payload` is the result of a successful `JSON.parse` call.
  * Postcondition: on success, `payload` is a non-null object and any `findings` field is an array.
+ * For the `formalization` phase, an optional `formalizations` field is an array of objects whose
+ * `index` fields are safe integers. Omitting `formalizations` preserves single-response forms.
  * Invariant: does not mutate `payload`.
  *
- * Failure modes: none — validation failures are captured in the Result error branch.
- * This function never throws.
+ * Failure modes (all represented by `schema_validation_error`, never thrown):
+ * - Non-object top-level payload.
+ * - A present `findings` field that is not an array.
+ * - For `formalization`, a present `formalizations` field that is not an array.
+ * - For `formalization`, a batch entry that is not an object or lacks a safe-integer `index`.
+ *
+ * Safety: validation is pure. Entry validation is bounded by the returned `formalizations` array.
  */
 function validatePhaseSchema(
   phase: OpencodePhase,
   payload: unknown,
 ): Result<unknown, OpencodeError> {
-  // Design note: validation is phase-agnostic — all phases share identical schema
-  // constraints. The phase parameter exists for error reporting context only.
   const record = asRecord(payload);
   if (record === undefined) {
     return err({
@@ -627,6 +863,35 @@ function validatePhaseSchema(
       phase,
       message: "expected findings to be an array when present",
     });
+  }
+
+  const formalizations = record.formalizations;
+  if (phase === "formalization" && formalizations !== undefined) {
+    if (!Array.isArray(formalizations)) {
+      return err({
+        kind: "schema_validation_error",
+        phase,
+        message: "expected formalizations to be an array when present",
+      });
+    }
+    for (const entry of formalizations) {
+      const entryRecord = asRecord(entry);
+      if (entryRecord === undefined || Array.isArray(entry) || !Number.isSafeInteger(entryRecord.index)) {
+        return err({
+          kind: "schema_validation_error",
+          phase,
+          message: "expected every formalizations entry to be an object with a safe integer index",
+        });
+      }
+      const index = entryRecord.index;
+      if (typeof index === "number" && index < 0) {
+        return err({
+          kind: "schema_validation_error",
+          phase,
+          message: "expected every formalizations entry index to be a non-negative safe integer",
+        });
+      }
+    }
   }
 
   return ok(payload);

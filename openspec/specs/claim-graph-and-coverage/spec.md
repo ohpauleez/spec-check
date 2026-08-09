@@ -261,7 +261,7 @@ WHEN the tool derives a claim from a requirement, scenario, design section, or t
 
 ##### Evidence
 - Implementation: [claim-graph.ts:153 buildClaimGraph()](/src/domain/claim-graph.ts#L153), [claim-graph.ts:269 claimFromRequirement()](/src/domain/claim-graph.ts#L269), [claim-graph.ts:291 claimFromScenario()](/src/domain/claim-graph.ts#L291), [claim-graph.ts:314 extractProposalClaims()](/src/domain/claim-graph.ts#L314), [claim-graph.ts:358 extractDesignClaims()](/src/domain/claim-graph.ts#L358), [claim-graph.ts:390 extractTaskClaims()](/src/domain/claim-graph.ts#L390)
-- Test: [claim-graph.test.ts:8 assigns obligation levels and keeps provenance](/test/contract/claim-graph.test.ts#L8), [safety-liveness.invariant.test.ts:45 SAFE-2: no claim enters the graph without provenance](/test/invariant/safety-liveness.invariant.test.ts#L45)
+- Test: [claim-graph.test.ts:8 assigns obligation levels and keeps provenance](/test/contract/claim-graph.test.ts#L8), [safety-liveness.invariant.test.ts:73 SAFE-2: no claim enters the graph without provenance](/test/invariant/safety-liveness.invariant.test.ts#L73)
 - Test (property): [claim-graph.property.test.ts:9 every claim has provenance with a file, and no claim exists without a traceable source](/test/property/claim-graph.property.test.ts#L9)
 - Example:
 ```typescript
@@ -295,8 +295,8 @@ WHEN the tool derives a claim from a merged capability requirement or scenario, 
 **Postcondition:** Downstream specs-forward grouping can use capability identity without re-inferring it from source file paths.
 
 ##### Evidence
-- Implementation: [claim-graph.ts:247 extractMergedSpecClaims()](/src/domain/claim-graph.ts#L247), [claim-graph.ts:269 claimFromRequirement()](/src/domain/claim-graph.ts#L269), [claim-graph.ts:291 claimFromScenario()](/src/domain/claim-graph.ts#L291), [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345)
-- Test: [claim-graph.test.ts:123 populates Claim.capability for merged spec-derived claims](/test/contract/claim-graph.test.ts#L123), [pipeline-helpers.test.ts:126 groups by Claim.capability instead of provenance.file](/test/contract/pipeline-helpers.test.ts#L126)
+- Implementation: [claim-graph.ts:247 extractMergedSpecClaims()](/src/domain/claim-graph.ts#L247), [claim-graph.ts:269 claimFromRequirement()](/src/domain/claim-graph.ts#L269), [claim-graph.ts:291 claimFromScenario()](/src/domain/claim-graph.ts#L291), [pipeline-helpers.ts:356 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L356)
+- Test: [claim-graph.test.ts:123 populates Claim.capability for merged spec-derived claims](/test/contract/claim-graph.test.ts#L123), [pipeline-helpers.test.ts:137 groups by Claim.capability instead of provenance.file](/test/contract/pipeline-helpers.test.ts#L137)
 - Example:
 ```typescript
 const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
@@ -504,7 +504,7 @@ WHEN a claim is derived from a design property, assumption, or informational sec
 
 ##### Evidence
 - Implementation: [claim-graph.ts:314 extractProposalClaims()](/src/domain/claim-graph.ts#L314), [claim-graph.ts:358 extractDesignClaims()](/src/domain/claim-graph.ts#L358)
-- Test: [claim-graph.test.ts:107 classifies informational content at informational obligation](/test/contract/claim-graph.test.ts#L107), [safety-liveness.invariant.test.ts:130 SAFE-9: claims with non-standard obligation produce only informational findings](/test/invariant/safety-liveness.invariant.test.ts#L130)
+- Test: [claim-graph.test.ts:107 classifies informational content at informational obligation](/test/contract/claim-graph.test.ts#L107), [safety-liveness.invariant.test.ts:158 SAFE-9: claims with non-standard obligation produce only informational findings](/test/invariant/safety-liveness.invariant.test.ts#L158)
 - Test (property): [claim-graph.property.test.ts:39 obligation assignment is consistent across EARS patterns](/test/property/claim-graph.property.test.ts#L39)
 - Example:
 ```typescript
@@ -600,7 +600,7 @@ WHEN a proposal or design claim has no corresponding capability requirement or s
 ##### Evidence
 - Implementation: [coverage.ts:228 detectCoverageGaps()](/src/domain/spec-forward/coverage.ts#L228)
 - Test: [coverage.test.ts:45 detects uncovered upstream claims](/test/contract/coverage.test.ts#L45)
-- Test (integration): [pipeline.integration.test.ts:70 coverage gaps produce expected findings](/test/integration/pipeline.integration.test.ts#L70)
+- Test (integration): [pipeline.integration.test.ts:75 coverage gaps produce expected findings](/test/integration/pipeline.integration.test.ts#L75)
 - Example:
 ```typescript
 const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
@@ -619,7 +619,7 @@ IF a capability requirement contradicts a proposal or design claim, THEN THE spe
 ##### Evidence
 - Implementation: [coverage.ts:272 detectContradictionsAndDrift()](/src/domain/spec-forward/coverage.ts#L272)
 - Test: [coverage.test.ts:53 detects contradictions between upstream and downstream](/test/contract/coverage.test.ts#L53)
-- Test (integration): [pipeline.integration.test.ts:96 contradictions produce expected findings](/test/integration/pipeline.integration.test.ts#L96)
+- Test (integration): [pipeline.integration.test.ts:101 contradictions produce expected findings](/test/integration/pipeline.integration.test.ts#L101)
 - Example:
 ```typescript
 const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
@@ -857,8 +857,8 @@ WHEN a requirement is removed from the active merged capability view by a valid 
 **Postcondition:** Coverage reflects the same active capability behavior used by claim extraction and logic.
 
 ##### Evidence
-- Implementation: [merge.ts:244 applyRemoved()](/src/domain/parser/merge.ts#L244), [pipeline-helpers.ts:264 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L264)
-- Test (integration): [merge-liveness.integration.test.ts:181 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L181)
+- Implementation: [merge.ts:244 applyRemoved()](/src/domain/parser/merge.ts#L244), [pipeline-helpers.ts:265 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L265)
+- Test (integration): [merge-liveness.integration.test.ts:226 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L226)
 - Example:
 ```typescript
 const { mergeSpecsByCapability } = await import("./src/domain/parser/merge.ts");
@@ -900,9 +900,9 @@ IF a capability produces zero surviving merged requirements and the merge layer 
 **Postcondition:** Coverage analysis does not report misleading results for vacuous capability groups.
 
 ##### Evidence
-- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [pipeline-helpers.ts:264 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L264)
-- Test: [merge.test.ts:215 emits empty capability finding when no surviving requirements remain](/test/contract/merge.test.ts#L215), [pipeline-helpers.test.ts:52 submits every non-empty merged capability to claim extraction and coverage exactly once](/test/contract/pipeline-helpers.test.ts#L52)
-- Test (integration): [merge-liveness.integration.test.ts:85 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L85)
+- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [pipeline-helpers.ts:265 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L265)
+- Test: [merge.test.ts:215 emits empty capability finding when no surviving requirements remain](/test/contract/merge.test.ts#L215), [pipeline-helpers.test.ts:61 submits every non-empty merged capability to claim extraction and coverage exactly once](/test/contract/pipeline-helpers.test.ts#L61)
+- Test (integration): [merge-liveness.integration.test.ts:124 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L124)
 - Example:
 ```typescript
 const { runClaimGraphPhase } = await import("./src/cli/pipeline-helpers.ts");

@@ -5,6 +5,7 @@ import { traceSpec } from "../support/spec-trace.js";
 import { buildFormalizationPrompt } from "../../src/domain/formal/formalize.js";
 import { buildReviewPrompt } from "../../src/domain/spec-forward/qualitative.js";
 import type { Claim } from "../../src/domain/claim-graph.js";
+import { sanitizeForCodeFence } from "../../src/domain/fence.js";
 import type { ParsedProposal, ParsedSpec } from "../../src/domain/model.js";
 import { toClaimId } from "../../src/domain/branded.js";
 
@@ -27,7 +28,7 @@ describe("code-derived generation boundary properties", () => {
         const prompt = buildFormalizationPrompt(claim);
 
         // Prompt should contain claim text fenced, not proposal/design text
-        expect(prompt).toContain(text);
+        expect(prompt).toContain(sanitizeForCodeFence(text));
         expect(prompt).toContain("<claim");
         expect(prompt).toContain("```text");
         expect(prompt).toContain("</claim>");

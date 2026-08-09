@@ -27,11 +27,12 @@ import { mergeSpecsByCapability } from "../domain/parser/merge.js";
 import { analyzeCoverage } from "../domain/spec-forward/coverage.js";
 import { clusterFormalizationSamples } from "../domain/formal/clustering.js";
 import { deriveSpecsFromSource } from "../domain/code-backwards/derive.js";
-import { formalizeGeneratedSpecs } from "../domain/code-backwards/gen-formal.js";
+import { formalizeGeneratedSpecs, type GeneratedFormalizationOutput } from "../domain/code-backwards/gen-formal.js";
 import { analyzeGeneratedLogic } from "../domain/code-backwards/gen-logic.js";
 import { runCapabilityAggregateComparison, runBoundedPairwiseComparison } from "../domain/code-backwards/cross-implication.js";
 import { runBlindComparison } from "../domain/code-backwards/blind-compare.js";
 import { compileSmtlib } from "../domain/formal/smtlib.js";
+import { selectClaimLogicalFile } from "../domain/formal/grouping.js";
 
 // ---------------------------------------------------------------------------
 // Dependency and configuration helpers
@@ -327,45 +328,54 @@ export async function runClusteringPhase(
 }
 
 /**
- * Group representative claims by their source spec file for per-spec Z3 analysis.
+ * Group representative spec claims by their shared semantic logical-file key
+ * for per-group Z3 analysis.
  *
- * @param candidates - original formalization candidates carrying `claim.provenance.file`
+ * @param candidates - original formalization candidates and solver-routing metadata
  * @param representatives - clustered representative claims in the same order as `candidates`
- * @returns array of {@link SpecClaimGroup} with one entry per unique spec file,
+ * @param logicalFileByCapability - shared capability-to-logical-file map built by the pipeline
+ * @returns array of {@link SpecClaimGroup} with one entry per unique semantic key,
  *   ordered by first occurrence
  *
  * @remarks
  * Precondition: `representatives` is in the same order as `candidates` (one per candidate).
- * Precondition: `candidates[i]!.claim.provenance.file` is defined for all indices.
- * Postcondition: every representative appears in exactly one group.
- * Postcondition: groups are ordered by first occurrence of the spec file in `candidates`.
+ * Precondition: `logicalFileByCapability` contains only non-empty logical-file
+ * values, as guaranteed by the shared map builder.
+ * Solver policy: non-spec and capability-less claims are filtered before
+ * semantic grouping. This phase-specific exclusion is separate from the shared
+ * key helper, which retains provenance fallback semantics for formalization.
+ * Postcondition: every representative that passes solver filtering appears in
+ * exactly one group.
+ * Postcondition: groups are ordered by first occurrence of the semantic key in
+ * the filtered candidate order, and claims within a group preserve that order.
  *
  * Failure modes: none — pure computation over in-memory data, cannot throw.
+ * Artifact safety: sanitized logical-file collisions still raise the existing
+ * precondition failure before solver artifacts are written.
  */
 export function groupRepresentativesBySpec(
   candidates: readonly FormalizationCandidate[],
   representatives: readonly LogicIrClaim[],
-  mergedSpecs?: readonly MergedCapabilitySpec[],
+  logicalFileByCapability: ReadonlyMap<string, string>,
 ): SpecClaimGroup[] {
-  const groups = new Map<string, { claims: LogicIrClaim[]; logicalFile: string; artifactKey: string }>();
-  const order: string[] = [];
-  const logicalFileByCapability = new Map<string, string>();
-  if (mergedSpecs !== undefined) {
-    for (const spec of mergedSpecs) {
-      logicalFileByCapability.set(spec.capability, spec.logicalFile);
-    }
-  }
-
+  const eligiblePairs: { readonly candidate: FormalizationCandidate; readonly representative: LogicIrClaim }[] = [];
   for (let i = 0; i < representatives.length; i++) {
     const representative = representatives[i]!;
     const candidate = candidates[i]!;
-    const capability = candidate.claim.capability;
-    if (mergedSpecs !== undefined && capability === undefined) {
+    if (candidate.claim.kind !== "requirement" && candidate.claim.kind !== "scenario") {
       continue;
     }
-    const logicalFile = capability === undefined
-      ? candidate.claim.provenance.file
-      : (logicalFileByCapability.get(capability) ?? `<merged-spec/${capability}>`);
+    if (candidate.claim.capability === undefined) {
+      continue;
+    }
+    eligiblePairs.push({ candidate, representative });
+  }
+
+  const groups = new Map<string, { claims: LogicIrClaim[]; logicalFile: string; artifactKey: string }>();
+  const order: string[] = [];
+
+  for (const { candidate, representative } of eligiblePairs) {
+    const logicalFile = selectClaimLogicalFile(candidate.claim, logicalFileByCapability);
     const groupKey = logicalFile;
     let group = groups.get(groupKey);
     if (group === undefined) {
@@ -420,8 +430,9 @@ export function sanitizeLogicalFileForArtifacts(logicalFile: string): string {
  * @param representativeClaims - original representative claims for cross-implication (from phase 7)
  * @param knownCapabilities - capability names from the catalog for informalization suggestions
  * @param claimCapabilityMap - mapping from claim ID to resolved capability name for grouping
- * @returns categorized findings: `allFindings` (complete), `logicFindings` (generated logic only),
- *   and `compareFindings` (aggregate + pairwise + blind comparison)
+ * @returns categorized findings plus attached formalization attempt evidence:
+ *   `allFindings` (complete), `logicFindings` (generated logic only),
+ *   `compareFindings` (aggregate + pairwise + blind comparison), and `evidenceFiles`
  *
  * @remarks
  * Precondition: `srcDir` is a readable directory path (caller narrows from `config.src`).
@@ -466,6 +477,7 @@ export async function runCodeBackwardsWork(
   readonly allFindings: readonly Finding[];
   readonly logicFindings: readonly Finding[];
   readonly compareFindings: readonly Finding[];
+  readonly evidenceFiles: GeneratedFormalizationOutput["evidenceFiles"];
 }> {
   const allFindings: Finding[] = [];
 
@@ -586,5 +598,6 @@ export async function runCodeBackwardsWork(
     allFindings,
     logicFindings: generatedLogic.findings,
     compareFindings: [...aggregate.findings, ...pairwise.findings, ...blindComparison.findings],
+    evidenceFiles: generatedFormal.evidenceFiles,
   };
 }

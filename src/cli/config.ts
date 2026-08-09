@@ -31,6 +31,7 @@ export interface RunConfig {
   readonly model: ModelName;
   readonly pairBudget: number;
   readonly timeoutMs: number;
+  readonly maxBatchSize: number;
   readonly allowArchive: boolean;
 }
 
@@ -43,6 +44,7 @@ interface ConfigFileShape {
   readonly model?: string;
   readonly pairBudget?: number;
   readonly timeoutMs?: number;
+  readonly maxBatchSize?: number;
   readonly allowArchive?: boolean;
 }
 
@@ -103,11 +105,24 @@ export type ConfigError =
   | { readonly kind: "config_validation_error"; readonly path: string; readonly message: string }
   | { readonly kind: "timeout_validation_error"; readonly message: string }
   | { readonly kind: "pair_budget_validation_error"; readonly message: string }
+  | { readonly kind: "max_batch_size_validation_error"; readonly message: string }
   | { readonly kind: "missing_inputs" }
   | { readonly kind: "output_inside_src" };
 
 /** Default pair budget for bounded pairwise cross-implication. */
 const DEFAULT_PAIR_BUDGET = 200;
+
+/**
+ * Default physical batch size for multi-claim attached formalization.
+ *
+ * @remarks
+ * Matches `MAX_BATCH_SIZE_DEFAULT` in `formal/formalize.ts`. Large single
+ * batches push the model past its output-token budget, truncating the
+ * `formalizations` array into terminal `invalid_json` and a full per-claim
+ * inline fallback; 32 stays under the observed ~40-claim success threshold.
+ * `0` is accepted explicitly to mean one unbounded batch per logical file.
+ */
+const DEFAULT_MAX_BATCH_SIZE = 32;
 
 /** Default LLM model used when no --model flag or config is provided. */
 const DEFAULT_MODEL = "github-copilot/gpt-5.4";
@@ -212,6 +227,11 @@ export async function resolveRunConfig(args: CliArgs): Promise<Result<RunConfig,
     return pairBudgetResult;
   }
 
+  const maxBatchSizeResult = parseMaxBatchSize(args.maxBatchSize, fromFile.value.maxBatchSize);
+  if (!maxBatchSizeResult.ok) {
+    return maxBatchSizeResult;
+  }
+
   return ok({
     inputs: mergedInputs,
     output: toOutputDirPath(rawOutput),
@@ -221,6 +241,7 @@ export async function resolveRunConfig(args: CliArgs): Promise<Result<RunConfig,
     model: toModelName(args.model ?? fromFile.value.model ?? DEFAULT_MODEL),
     pairBudget: pairBudgetResult.value,
     timeoutMs: timeoutMsResult.value,
+    maxBatchSize: maxBatchSizeResult.value,
     // allowArchive is additive: either CLI --allow-archive presence OR config file
     // allowArchive: true activates admission. This differs from other flags where CLI
     // overrides config — for a boolean opt-in, both sources contribute.
@@ -311,6 +332,7 @@ function isConfigFileShape(value: unknown): value is ConfigFileShape {
     readonly model?: unknown;
     readonly pairBudget?: unknown;
     readonly timeoutMs?: unknown;
+    readonly maxBatchSize?: unknown;
     readonly allowArchive?: unknown;
   };
 
@@ -331,6 +353,7 @@ function isConfigFileShape(value: unknown): value is ConfigFileShape {
     && (candidate.model === undefined || typeof candidate.model === "string")
     && (candidate.pairBudget === undefined || typeof candidate.pairBudget === "number")
     && (candidate.timeoutMs === undefined || typeof candidate.timeoutMs === "number")
+    && (candidate.maxBatchSize === undefined || typeof candidate.maxBatchSize === "number")
     && (candidate.allowArchive === undefined || typeof candidate.allowArchive === "boolean")
   );
 }
@@ -426,4 +449,37 @@ function parsePairBudget(cliValue: string | undefined, configValue: number | und
     return ok(configValue);
   }
   return ok(DEFAULT_PAIR_BUDGET);
+}
+
+/**
+ * Parse and validate the max-batch-size value from CLI string or config file number.
+ *
+ * @param cliValue - string from CLI `--max-batch-size` flag, or `undefined` if not provided
+ * @param configValue - numeric value from config file's `maxBatchSize` field, or `undefined` if absent
+ * @returns validated batch size on success; diagnostic message on failure
+ *
+ * @remarks
+ * A value of `0` is accepted and means one unbounded physical batch per
+ * logical file (the pre-cap behavior); any positive safe integer caps the
+ * number of claims per attached batch. Negative, fractional, NaN, and
+ * infinite values are rejected. Merge priority is CLI over config over the
+ * built-in default ({@link DEFAULT_MAX_BATCH_SIZE}). Pure and total.
+ */
+function parseMaxBatchSize(cliValue: string | undefined, configValue: number | undefined): Result<number, ConfigError> {
+  if (cliValue !== undefined) {
+    // `Number(...)`, not `parseInt`: parseInt silently truncates "1.5" to 1,
+    // hiding a fractional-input defect that must surface as a validation error.
+    const parsed = Number(cliValue);
+    if (!Number.isSafeInteger(parsed) || parsed < 0) {
+      return err({ kind: "max_batch_size_validation_error", message: "--max-batch-size must be a safe integer >= 0" });
+    }
+    return ok(parsed);
+  }
+  if (configValue !== undefined) {
+    if (!Number.isSafeInteger(configValue) || configValue < 0) {
+      return err({ kind: "max_batch_size_validation_error", message: "config maxBatchSize must be a safe integer >= 0" });
+    }
+    return ok(configValue);
+  }
+  return ok(DEFAULT_MAX_BATCH_SIZE);
 }

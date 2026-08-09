@@ -1601,7 +1601,92 @@ THE spec-check tool SHALL treat merged capability logical-file keys as the share
 
 #### Requirement model
 
-[`formalization-and-logic-analysis/alloy/semantic-batching.als`](../formalization-and-logic-analysis/alloy/semantic-batching.als) models merge-layer capability uniqueness, exact active-spec map coverage, and the scenario-only mapping property. Non-empty string validation remains a contract-test obligation outside the model.
+```alloy
+// --- Shared logical-file grouping authority (MCA-GROUP-KEY) ---
+// Builds on the existing module: MergedCapability, Claim, LogicalKey.
+// The logical-file map is the shared grouping authority. Every provided merged
+// capability maps to its non-empty logical file; the synthetic key
+// <merged-spec/{capability}> is the deterministic fallback when unmapped.
+// Non-empty logicalFile string validation remains a contract-test obligation
+// outside this model.
+
+// A merged capability "provides" content iff it has requirements or scenarios.
+pred hasRequirements [mc : MergedCapability] { some mc.mergedReqs }
+pred hasScenarios    [mc : MergedCapability] { some mc.mergedScenarios }
+
+// The grouping map: each provided (active) capability -> its logical key.
+// Every MergedCapability already carries exactly one logicalKey
+// (uniqueLogicalKeys), so the map is total over the active set and injective by
+// construction. Capability uniqueness follows from the merge layer's
+// capabilityOrder first-occurrence deduplication (oneViewPerCapability +
+// uniqueLogicalKeys), and is not re-enforced here.
+fun groupingMap : MergedCapability -> LogicalKey {
+  { mc : MergedCapability, k : LogicalKey |
+    mc in activeForGrouping and k = mc.logicalKey }
+}
+
+// Capabilities carrying a map entry.
+fun mappedCaps : set MergedCapability { groupingMap.LogicalKey }
+
+// [MCA-GROUP-KEY-COMPLETE] The map covers exactly the active-for-grouping caps.
+pred mapCoversActiveSpecs {
+  mappedCaps = activeForGrouping
+}
+
+// [MCA-GROUP-KEY-SCEN] Scenario-only specs (some scenario, no requirement)
+// still contribute a map entry. Defensive: unreachable in today's domain, where
+// merged scenarios derive only from surviving requirement blocks
+// (see mergedScenariosFromReqs).
+pred scenarioOnlySpecsMapped {
+  all mc : MergedCapability |
+    (some mc.mergedScenarios and no mc.mergedReqs) implies mc in mappedCaps
+}
+
+// Today's merge domain: a merged scenario cannot exist without its parent
+// requirement, so scenario presence implies requirement presence. Stated as a
+// predicate so each check names the condition it depends on. This holds
+// structurally here (base fact mergedScenariosFromReqs makes scenario-only
+// merged capabilities unreachable), so scenarioOnlySpecsMapped is VACUOUSLY
+// true under today's domain.
+pred scenariosImplyRequirements {
+  all mc : MergedCapability | some mc.mergedScenarios implies some mc.mergedReqs
+}
+
+// A future domain that admits standalone scenario claims (scenario-only merged
+// capabilities). Named so the scenario-only property below is shown to hold
+// even THERE, not merely vacuously here.
+pred standaloneScenariosAdmitted {
+  some mc : MergedCapability | some mc.mergedScenarios and no mc.mergedReqs
+}
+
+// [MCA-GROUP-KEY-COMPLETE] No provided capability is silently omitted from the map.
+assert every_active_capability_mapped {
+  mapCoversActiveSpecs implies (all mc : activeForGrouping | mc in mappedCaps)
+}
+
+// [MCA-GROUP-KEY-SCEN] Scenario-only specs are still mapped whenever the map
+// covers active specs. HONEST SCOPE NOTE: in this capability's module the base
+// fact mergedScenariosFromReqs makes scenario-only merged capabilities
+// unreachable (standaloneScenariosAdmitted is UNSAT here), so scenarioOnlySpecsMapped
+// is vacuously true and this check cannot expose a violation of the scenario-only
+// rule itself. It is retained as the domain-independent statement of the rule;
+// the rule is exercised non-vacuously in the formalization-and-logic-analysis
+// module (BuiltMap layer), whose domain admits standalone scenarios. The
+// mapCoversActiveSpecs antecedent IS satisfiable here (mapCovers_reachable
+// witness), so the implication is not vacuous on its left side.
+assert scenario_only_mapped_under_coverage {
+  mapCoversActiveSpecs implies scenarioOnlySpecsMapped
+}
+
+check every_active_capability_mapped for 6 expect 0
+check scenario_only_mapped_under_coverage for 6 expect 0
+
+// Non-vacuity: map coverage is reachable with a non-empty active set, so the
+// two checks above are not vacuous on their antecedent.
+run mapCovers_reachable {
+  mapCoversActiveSpecs and some activeForGrouping
+} for 4 expect 1
+```
 
 #### Scenario: Scenario-Only Spec Contributes Map Entry [MCA-GROUP-KEY-SCEN]
 WHEN a merged capability spec contains at least one scenario and no requirements (a defensive case that is unreachable in the current merge domain model), THE spec-check tool SHALL include that capability in the logical-file map used for grouping.
@@ -1628,7 +1713,64 @@ WHEN the spec-check tool selects merged specs for grouping-map construction, THE
 
 #### Requirement model
 
-[`formalization-and-logic-analysis/alloy/semantic-batching.als`](../formalization-and-logic-analysis/alloy/semantic-batching.als) defines requirement-or-scenario activity, the unchanged requirement-only solver-input filter, and checks scenario-only inclusion, empty-spec exclusion, and grouping-map coverage of solver inputs under the stated current-domain assumption.
+```alloy
+// --- Active merged specs for grouping (MCA-ACTIVE-SPECS) ---
+// The grouping-map activity filter is broader (requirement OR scenario) than the
+// unchanged solver-input filter (requirement only), so the grouping map can only
+// be broader than the set of specs that contribute claims -- never narrower.
+
+// [MCA-ACTIVE-SPECS] Active for grouping: at least one requirement OR scenario.
+// The scenarios clause is defensive -- unreachable under the current merge domain
+// model; it becomes load-bearing only if standalone scenario claims are admitted.
+fun activeForGrouping : set MergedCapability {
+  { mc : MergedCapability | some mc.mergedReqs or some mc.mergedScenarios }
+}
+
+// Solver-input activity filter (unchanged): requirements only.
+fun activeForSolverInput : set MergedCapability {
+  { mc : MergedCapability | some mc.mergedReqs }
+}
+
+// The grouping map can only be broader than the solver-input set, never narrower.
+pred groupingMapCoversSolverInputs {
+  activeForSolverInput in mappedCaps
+}
+
+// [MCA-ACTIVE-EMPTY] Empty specs (no req, no scenario) contribute no entry.
+pred emptySpecsExcluded {
+  all mc : MergedCapability |
+    (no mc.mergedReqs and no mc.mergedScenarios) implies mc not in mappedCaps
+}
+
+// [MCA-ACTIVE-SPECS] The grouping map is never narrower than the solver-input set.
+assert grouping_never_narrower_than_solver {
+  mapCoversActiveSpecs implies groupingMapCoversSolverInputs
+}
+
+// [MCA-ACTIVE-EMPTY] Vacuous specs never enter the grouping map.
+assert vacuous_specs_never_mapped {
+  emptySpecsExcluded implies
+    (no mc : MergedCapability |
+      no mc.mergedReqs and no mc.mergedScenarios and mc in mappedCaps)
+}
+
+check grouping_never_narrower_than_solver for 6 expect 0
+check vacuous_specs_never_mapped for 6 expect 0
+
+// Scenario: a requirement-bearing capability is active and mapped [MCA-ACTIVE-REQ].
+run active_requirement_scenario {
+  some mc : MergedCapability | some mc.mergedReqs and mc in mappedCaps
+} for 4 expect 1
+
+// Scenario: an empty capability is excluded while a non-empty one is mapped
+// [MCA-ACTIVE-EMPTY], demonstrating selective coverage.
+run empty_excluded_scenario {
+  mapCoversActiveSpecs
+  some mc1 : MergedCapability |
+    no mc1.mergedReqs and no mc1.mergedScenarios and mc1 not in mappedCaps
+  some mc2 : MergedCapability | some mc2.mergedReqs and mc2 in mappedCaps
+} for 4 expect 1
+```
 
 #### Scenario: Requirement-Bearing Spec Is Active [MCA-ACTIVE-REQ]
 WHEN a merged spec has at least one requirement, THE spec-check tool SHALL treat it as active for grouping.
@@ -1654,7 +1796,101 @@ WHEN the spec-check tool groups claims for solver analysis, THE solver grouping 
 
 #### Requirement model
 
-[`formalization-and-logic-analysis/alloy/semantic-batching.als`](../formalization-and-logic-analysis/alloy/semantic-batching.als) models one shared semantic key function and checks parity for claims with equal keys. Pipeline map-instance identity and solver filtering order remain implementation and test obligations outside the model.
+```alloy
+// --- Solver grouping calls the shared key helper (MCA-SOLVER-SHARED-KEY) ---
+// One shared semantic key helper serves both solver grouping and formalization
+// grouping. The capability fallback rule (mapped logicalFile, else the synthetic
+// <merged-spec/{capability}> key) exists in exactly one place, so the two phases
+// cannot drift. Pipeline map-instance identity and solver-specific filtering order
+// remain implementation and test obligations outside this model.
+
+// One key space: a mapped logical key, or the synthetic per-capability fallback.
+sig SyntheticKey { synthCap : one MergedCapability }
+fact synthKeyPerCap {
+  all disj s1, s2 : SyntheticKey | s1.synthCap != s2.synthCap
+  all mc : MergedCapability | one s : SyntheticKey | s.synthCap = mc
+}
+
+// The single authoritative fallback rule [MCA-SOLVER-NODUP]: mapped logicalKey
+// when the capability is active/mapped, else the synthetic <merged-spec/{cap}> key.
+fun semanticKeyOf [mc : MergedCapability] : LogicalKey + SyntheticKey {
+  (mc in mappedCaps implies mc.logicalKey
+   else { s : SyntheticKey | s.synthCap = mc })
+}
+
+// A claim's grouping key = the semantic key of its compile-group capability.
+// Both solver grouping and formalization grouping obtain the key from this helper.
+fun claimKey [c : Claim] : LogicalKey + SyntheticKey {
+  semanticKeyOf[c.claimCap]
+}
+
+// [MCA-SOLVER-NODUP] Parity: claims with equal grouping keys co-group. Because
+// both phases call this one helper, they cannot diverge (no key drift).
+pred parityBySharedKey {
+  all disj c1, c2 : Claim |
+    claimKey[c1] = claimKey[c2] implies c1.claimCap = c2.claimCap
+}
+
+// [MCA-SOLVER-FILTER-FIRST] The key helper is policy-free, total, and
+// deterministic: every claim gets exactly one key regardless of solver-specific
+// filtering, which is applied before grouping and never encoded in the helper.
+pred keyHelperTotal {
+  all c : Claim | one claimKey[c]
+}
+
+// [MCA-SOLVER-NODUP] Shared-key parity: equal keys imply the same compile group.
+assert shared_key_parity {
+  parityBySharedKey
+}
+
+// [MCA-SOLVER-FILTER-FIRST] The key helper is total and deterministic.
+assert key_helper_deterministic {
+  keyHelperTotal
+}
+
+// Safety: the semantic key reflects exactly whether the capability was mapped.
+// LogicalKey and SyntheticKey are disjoint sigs, so a mapped-keyed capability
+// can never collide with a fallback-keyed one. Stated over semanticKeyOf at the
+// CAPABILITY level, where BOTH branches are live (an inactive/empty merged
+// capability -- some mc not in mappedCaps -- exercises the synthetic fallback).
+assert fallback_distinct_from_logical {
+  all mc : MergedCapability |
+    (mc in mappedCaps implies semanticKeyOf[mc] in LogicalKey)
+    and (mc not in mappedCaps implies semanticKeyOf[mc] in SyntheticKey)
+}
+
+// Note on claim-level reachability: the base fact `claimProvenance`
+// (c.derivedFrom in c.claimCap.mergedReqs) forces every claim's capability to
+// carry requirements, hence to be active/mapped. So `claimKey` only ever
+// resolves to a LogicalKey in this module; the synthetic branch is unreachable
+// FOR CLAIMS here even though it is the authoritative rule the pipeline shares
+// with formalization grouping. The fallback is therefore verified at the
+// capability level (assert above + synthetic_fallback_scenario witness), not via
+// claimKey. claim_key_always_logical records the claim-level consequence.
+assert claim_key_always_logical {
+  all c : Claim | claimKey[c] in LogicalKey
+}
+
+check shared_key_parity for 6 expect 0
+check key_helper_deterministic for 6 expect 0
+check fallback_distinct_from_logical for 6 expect 0
+check claim_key_always_logical for 6 expect 0
+
+// Scenario: two claims in the same group share one key (parity witness)
+// [MCA-SOLVER-NODUP].
+run shared_key_scenario {
+  some disj c1, c2 : Claim |
+    c1.claimCap = c2.claimCap and claimKey[c1] = claimKey[c2]
+} for 4 expect 1
+
+// Non-vacuity: the synthetic fallback is reachable at the capability level --
+// an inactive/empty merged capability keys to its <merged-spec/{cap}> synthetic
+// key, distinct from any logical key [MCA-SOLVER-NODUP].
+run synthetic_fallback_scenario {
+  some mc : MergedCapability |
+    mc not in mappedCaps and semanticKeyOf[mc] in SyntheticKey
+} for 6 expect 1
+```
 
 #### Scenario: No Duplicated Fallback Logic [MCA-SOLVER-NODUP]
 WHEN solver grouping computes a claim's grouping key, THE key SHALL be produced by the shared helper so that the capability fallback rule (mapped `logicalFile`, else `<merged-spec/{capability}>`) exists in exactly one place.

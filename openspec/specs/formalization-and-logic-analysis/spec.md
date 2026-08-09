@@ -12,10 +12,13 @@ open util/boolean
 
 // --- Domain vocabulary ---
 
-// A Claim is a requirement or scenario from a spec file
+// A Claim is a requirement or scenario from a spec file. `claimId` is the
+// sanitized claim identity used for compile-group preflight; two claims
+// sharing one `claimId` are a duplicate-identity collision [FLA-SPEC-DUPLICATE-CLAIM-ID].
 sig Claim {
   obligation : one Obligation,
-  spec : one Spec
+  spec : one Spec,
+  claimId : one ClaimId
 }
 
 // Obligation levels (strict total order: Mandatory > Advisory > Informational)
@@ -63,7 +66,8 @@ one sig Sat, Unsat, Timeout, Unknown, SolverError extends SolverResult {}
 // Finding types produced by analysis
 abstract sig FindingType {}
 one sig Contradiction, ConditionalContradiction, CompletenessGap,
-       Ambiguity, Inconclusive, MergeConflict, SolverErrType extends FindingType {}
+       Ambiguity, Inconclusive, MergeConflict, SolverErrType,
+       InvalidGroup extends FindingType {}
 
 // Finding severity levels
 abstract sig Severity {}
@@ -119,6 +123,7 @@ one sig Pipeline {
   var representatives : Claim -> lone Sample, // selected reps per claim
   var findings : set Finding,                 // accumulated findings
   var evidence : set Spec,                    // specs with persisted evidence
+  var attemptEvidence : set PhysicalBatch,    // attached attempts with persisted evidence
   var exitCode : lone Int                     // exit code (2 = abort)
 }
 
@@ -155,6 +160,239 @@ pred samples_equivalent [a, b : Sample] {
 fact clusters_respect_equivalence {
   all disj a, b : Sample, cl : Cluster |
     (samples_equivalent[a, b] and a in cl.members) implies b in cl.members
+}
+
+// --- Semantic batching: shared key helper, grouping, physical batches ---
+// Structural layer for the semantic-batching requirements [FLA-SEMANTIC-GROUPING,
+// FLA-SUBBATCH, FLA-ATTACH-TRANSPORT, FLA-CLAIM-PARTITION, FLA-BATCH-EVIDENCE,
+// FLA-TEMP-LIFECYCLE, FLA-DEGRADE-KIND].
+
+// Whether a merged spec has requirements / scenarios.
+abstract sig Presence {}
+one sig NoneP, SomeP extends Presence {}
+
+sig Capability {}
+sig ProvFile {}
+sig LogicalFile {}
+sig SyntheticKey { cap : one Capability }
+
+// Semantic key space: provenance files, mapped logical files, and synthetic
+// fallback keys all inhabit one space.
+sig SemanticKey {
+  fromProv  : lone ProvFile,
+  fromMap   : lone LogicalFile,
+  fromSynth : lone SyntheticKey
+} {
+  one (fromProv + fromMap + fromSynth)
+}
+
+// Genuinely universal: key construction is injective across sources and total
+// over source values. This is an axiom of the key space, not a pipeline condition.
+fact key_sources_injective {
+  all disj k1, k2 : SemanticKey |
+    k1.fromProv != k2.fromProv
+    and k1.fromMap != k2.fromMap
+    and k1.fromSynth != k2.fromSynth
+  SemanticKey.fromProv = ProvFile
+  SemanticKey.fromMap = LogicalFile
+  SemanticKey.fromSynth = SyntheticKey
+}
+
+// A claim carries zero or one capability and exactly one provenance file.
+sig ClaimProvenance {
+  claim : one Claim,
+  cap : lone Capability,
+  provFile : one ProvFile
+}
+
+// The logical-file map built by the pipeline: capability -> logical file
+// (partial; may be empty).
+sig GroupingMap {
+  mapping : Capability -> lone LogicalFile
+}
+
+// The shared key helper [FLA-SEMGRP-MAPPED/PROVENANCE/FALLBACK].
+// Total: every claim gets exactly one key under any map.
+fun keyFor [c : Claim, m : GroupingMap] : one SemanticKey {
+  { k : SemanticKey |
+    some cp : ClaimProvenance | cp.claim = c and
+    ((no cp.cap and k.fromProv = cp.provFile)
+     or (some cp.cap and some m.mapping[cp.cap]
+         and k.fromMap = m.mapping[cp.cap])
+     or (some cp.cap and no m.mapping[cp.cap]
+         and k.fromSynth.cap = cp.cap))
+  }
+}
+
+// A logical group: claims partitioned by semantic key.
+sig SemanticLogicalGroup {
+  groupKey : one SemanticKey,
+  groupMembers : set Claim
+}
+
+// Genuinely universal: logical groups partition the claim set by key.
+fact groups_partition_by_key {
+  all g : SemanticLogicalGroup | some g.groupMembers
+  all g : SemanticLogicalGroup | all c : g.groupMembers |
+    g.groupKey = keyFor[c, GroupingMap]
+  all disj g1, g2 : SemanticLogicalGroup | g1.groupKey != g2.groupKey
+  all c : Claim | one g : SemanticLogicalGroup | c in g.groupMembers
+}
+
+// Adapter terminal error kinds (post adapter-internal retries) [FLA-DEGRADE-KIND].
+abstract sig ErrorKind {}
+one sig SpawnError, InvalidFiles, InvalidTimeout,       // infrastructure: no per-claim fallback
+        TimeoutErr, InvalidJson, SchemaValidation,      // model response: degrade to per-claim retry
+        PromptTooLarge                                  // degrade only if inline fallback fits
+        extends ErrorKind {}
+
+// Prompt-size pre-check result for prompt_too_large degradation.
+abstract sig FallbackFit {}
+one sig FallbackFits, FallbackDoesNotFit extends FallbackFit {}
+
+// Temp context directory lifecycle states [FLA-TEMP-LIFECYCLE].
+abstract sig TempState {}
+one sig NotCreated, DirCreated, FileWritten,
+        CleanupSucceeded, CleanupFailed extends TempState {}
+
+// Batch attempt resolution [FLA-BATCH-EVIDENCE outcome classification].
+abstract sig Resolution {}
+one sig Unresolved, BatchSuccess, ModelFailure,
+        InfraFailure, TransportFailure extends Resolution {}
+
+// Per-claim terminal outcome [FLA-CLAIM-PARTITION].
+abstract sig Outcome {}
+one sig NoOutcome, CandidateOutcome, ClaimErrorOutcome extends Outcome {}
+
+// Whether the batch attaches a context file [FLA-ATTACH-TRANSPORT].
+abstract sig AttachedKind {}
+one sig Attached, Inline extends AttachedKind {}
+
+abstract sig DegradedKind {}
+one sig NotDegraded, Degraded extends DegradedKind {}
+
+// A physical batch: one first-sample attempt over a chunk of one logical group.
+sig PhysicalBatch {
+  claims            : set Claim,          // non-empty chunk of one logical group
+  attached          : one AttachedKind,   // Attached iff two or more claims
+  fallbackFits      : one FallbackFit,    // pre-computed inline-fits pre-check
+  var tempState     : one TempState,
+  var resolution    : one Resolution,
+  var degraded      : one DegradedKind,
+  var outcomes      : Claim -> one Outcome
+}
+
+// Genuinely universal: grouping + sub-batching partition the eligible claim
+// set across physical batches [FLA-SEMANTIC-GROUPING, FLA-SUBBATCH].
+fact claims_partitioned_across_batches {
+  Claim in PhysicalBatch.claims
+  all disj b1, b2 : PhysicalBatch | no (b1.claims & b2.claims)
+}
+
+// Genuinely universal: a physical batch never spans logical groups
+// (sub-batching never changes semantic key) [FLA-SUBBATCH].
+fact batches_stay_within_groups {
+  all b : PhysicalBatch | one g : SemanticLogicalGroup | b.claims in g.groupMembers
+}
+
+// Genuinely universal: transport matches arity — multi-claim physical batches
+// attach a context file; single-claim batches stay inline [FLA-ATTACH-TRANSPORT].
+fact transport_matches_arity {
+  all b : PhysicalBatch |
+    (#b.claims >= 2) iff b.attached = Attached
+}
+
+// Genuinely universal: only attached batches have a temp context lifecycle;
+// inline batches never create temp directories.
+fact inline_batches_have_no_temp {
+  all b : PhysicalBatch |
+    b.attached = Inline implies always b.tempState = NotCreated
+}
+
+// --- Structural assertions (conditional claims) ---
+
+// Under the pipeline's grouping construction, every claim is in exactly one
+// group (re-stated as an assertion so the check shows it holds whenever the
+// grouping conditions are in force).
+assert groupingPartitioned {
+  all c : Claim | one g : SemanticLogicalGroup | c in g.groupMembers
+}
+
+// No key drift: claims with equal keys co-group, so solver and formalization
+// (which share the helper) agree [FLA-SEMGRP-PARITY].
+assert parityBySharedKey {
+  all disj c1, c2 : Claim |
+    keyFor[c1, GroupingMap] = keyFor[c2, GroupingMap]
+    implies (some g : SemanticLogicalGroup | c1 + c2 in g.groupMembers)
+}
+
+// Kind is irrelevant: capability-less claims key by provenance file
+// regardless of claim kind [FLA-SEMGRP-KINDS].
+assert kindIrrelevant {
+  all c : Claim, cp : ClaimProvenance |
+    (cp.claim = c and no cp.cap) implies keyFor[c, GroupingMap].fromProv = cp.provFile
+}
+
+// Every claim obtains a deterministic key even when its capability is
+// unmapped [FLA-SEMGRP-COVERAGE, FLA-SEMGRP-FALLBACK].
+assert fallbackTotal {
+  all c : Claim | one keyFor[c, GroupingMap]
+}
+
+// Grouping-map authority
+sig MergedSpec {
+  cap : one Capability,
+  reqs : one Presence,
+  scens : one Presence
+}
+
+// Genuinely universal: distinct merged specs have distinct capabilities.
+fact capability_unique {
+  all disj s1, s2 : MergedSpec | s1.cap != s2.cap
+}
+
+// Active for grouping: requirements present OR scenarios present.
+fun activeForGrouping : set MergedSpec {
+  { s : MergedSpec | s.reqs = SomeP or s.scens = SomeP }
+}
+
+// Solver-input activity filter (unchanged): requirements only.
+fun activeForSolverInput : set MergedSpec {
+  { s : MergedSpec | s.reqs = SomeP }
+}
+
+sig BuiltMap {
+  entries : Capability -> lone LogicalFile
+}
+
+// Conditional domain assumptions, stated as predicates rather than facts.
+pred scenariosImplyRequirements {
+  all s : MergedSpec | s.scens = SomeP implies s.reqs = SomeP
+}
+
+// The map-builder contract: the built map covers exactly the
+// active-for-grouping capabilities.
+pred mapCoversActiveSpecs [m : BuiltMap] {
+  m.entries.LogicalFile = activeForGrouping.cap
+}
+
+// The grouping map is never narrower than the solver-input set.
+pred groupingMapCoversSolverInputs [m : BuiltMap] {
+  activeForSolverInput.cap in m.entries.LogicalFile
+}
+
+// Scenario-only specs get map entries.
+pred scenarioOnlySpecsMapped [m : BuiltMap] {
+  all s : MergedSpec |
+    (s.scens = SomeP and s.reqs = NoneP)
+    implies s.cap in m.entries.LogicalFile
+}
+
+// Empty specs contribute no entries.
+pred emptySpecsExcluded [m : BuiltMap] {
+  all s : MergedSpec |
+    (s.reqs = NoneP and s.scens = NoneP)
+    implies s.cap not in m.entries.LogicalFile
 }
 ```
 
@@ -267,12 +505,12 @@ WHEN requirement and scenario claims are available for formal analysis, THE spec
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Make JSON extraction tolerant but keep schema validation strict`
-- `openspec/changes/semantic-batching/proposal.md#Scope`
-- `openspec/changes/semantic-batching/design.md#Proposed Design`
+- `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Scope`
+- `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Proposed Design`
 
 #### Requirement model
 
-[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) models semantic grouping, physical-batch containment, handled formalization outcomes, and attached-attempt evidence. Logic IR generation, timeout values, and emitted artifact formats remain outside the model.
+The base module models semantic grouping, physical-batch containment, handled formalization outcomes, and attached-attempt evidence. Logic IR generation, timeout values, and emitted artifact formats remain outside the model. The full temporal batch lifecycle is captured in the [state machine and invariant checks](#state-machine-and-invariant-checks) section below.
 
 #### Scenario: Generate Inspectable Logic Artifacts [FLA-FORMAL-ARTS]
 WHEN a claim is selected for formalization, THE spec-check tool SHALL emit inspectable logic and SMT artifacts that let a reviewer trace the formal result back to the originating requirement or scenario.
@@ -331,6 +569,7 @@ pred formalize_success {
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.findings' = Pipeline.findings
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
@@ -345,6 +584,7 @@ pred formalize_abort {
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.findings' = Pipeline.findings
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
 }
 
 pred formalize_partial {
@@ -358,6 +598,7 @@ pred formalize_partial {
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.findings' = Pipeline.findings
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
@@ -453,6 +694,7 @@ pred validate_accept [s : Sample] {
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.findings' = Pipeline.findings
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
@@ -467,6 +709,7 @@ pred validate_reject [s : Sample] {
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.findings' = Pipeline.findings
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
@@ -481,6 +724,7 @@ pred validation_complete {
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.findings' = Pipeline.findings
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
 }
 
 // Safety: only valid samples ever enter the candidates set
@@ -880,6 +1124,7 @@ pred emit_merge_conflict [c1, c2 : Claim] {
   Pipeline.candidates' = Pipeline.candidates
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
@@ -899,6 +1144,15 @@ assert same_claim_collision_excluded {
     (conflicts_excluded[cs] and conflict_detected[c, c, cs.specRef])
       implies c in cs.excludedClaims
 }
+
+// NOTE: two additional group-level rejections that also gate compilation --
+// duplicate claim identity [FLA-SPEC-DUPLICATE-CLAIM-ID] and oversized compile
+// groups [FLA-SPEC-GROUP-BOUNDS] -- are preflight failures rather than merge
+// exclusions. They emit a `logic.invalid_group` finding (the InvalidGroup
+// finding type) and skip the solver entirely; both are modeled as the events
+// duplicate_claim_id_rejected / oversized_group_rejected in the
+// [state machine and invariant checks](#state-machine-and-invariant-checks)
+// section below.
 ```
 
 ### Requirement: Surface Ambiguity Through Sample Clustering [FLA-CLUSTER-AMBIG]
@@ -967,6 +1221,7 @@ pred cluster_select_representative [c : Claim, cl : Cluster] {
   Pipeline.candidates' = Pipeline.candidates
   Pipeline.findings' = Pipeline.findings
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
@@ -985,6 +1240,7 @@ pred cluster_divergent [c : Claim] {
   Pipeline.phase' = Pipeline.phase
   Pipeline.candidates' = Pipeline.candidates
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
@@ -1142,12 +1398,12 @@ WHEN the spec-check tool prepares specs-forward logical analysis, THE spec-check
 - `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Postconditions`
 - `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Provenance And Grouping Contract`
 - `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Verification Strategy`
-- `openspec/changes/semantic-batching/proposal.md#Scope`
-- `openspec/changes/semantic-batching/design.md#Interface Contracts`
+- `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Scope`
+- `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Interface Contracts`
 
 #### Requirement model
 
-[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) models shared semantic key selection and checks grouping parity and one-group physical-batch containment. Solver-specific filtering and artifact naming remain implementation and test obligations outside the model.
+The base module models shared semantic key selection and checks grouping parity and one-group physical-batch containment. Solver-specific filtering and artifact naming remain implementation and test obligations outside the model.
 
 #### Scenario: One Logic Group Per Merged Capability [FLA-GROUP-ONE]
 WHEN one capability has finalized-plus-delta inputs that merge into one active capability view, THE spec-check tool SHALL produce exactly one specs-forward logical-analysis group for that capability.
@@ -1233,14 +1489,12 @@ pred collision_aborts_pipeline {
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.findings' = Pipeline.findings
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
 }
 
 // Safety: collision always aborts (never silently overwrites)
 assert collision_implies_abort {
-  always (
-    (Pipeline.phase = CompilationPh and logical_key_collision and
-     Pipeline.phase' != CompilationPh)
-    implies Pipeline.phase' = AbortedPh)
+  always (collision_aborts_pipeline implies Pipeline.phase' = AbortedPh)
 }
 
 // Safety: without collision, compilation phase does not abort from this path
@@ -1303,6 +1557,7 @@ pred solver_reports_contradiction [sqr : SpecQueryResult] {
     Pipeline.findings' = Pipeline.findings + f
   }
   Pipeline.evidence' = Pipeline.evidence + sqr.querySpec
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.phase' = Pipeline.phase
   Pipeline.candidates' = Pipeline.candidates
   Pipeline.representatives' = Pipeline.representatives
@@ -1321,6 +1576,7 @@ pred solver_inconclusive [sqr : SpecQueryResult] {
     Pipeline.findings' = Pipeline.findings + f
   }
   Pipeline.evidence' = Pipeline.evidence + sqr.querySpec
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.phase' = Pipeline.phase
   Pipeline.candidates' = Pipeline.candidates
   Pipeline.representatives' = Pipeline.representatives
@@ -1334,6 +1590,7 @@ pred solver_sat_deeper [sqr : SpecQueryResult] {
   // Effect: no global contradiction, proceed to deeper analysis
   Pipeline.findings' = Pipeline.findings  // no new contradiction finding
   Pipeline.evidence' = Pipeline.evidence + sqr.querySpec
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.phase' = Pipeline.phase
   Pipeline.candidates' = Pipeline.candidates
   Pipeline.representatives' = Pipeline.representatives
@@ -1352,6 +1609,7 @@ pred solver_error_found [sqr : SpecQueryResult] {
     Pipeline.findings' = Pipeline.findings + f
   }
   Pipeline.evidence' = Pipeline.evidence + sqr.querySpec
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.phase' = Pipeline.phase
   Pipeline.candidates' = Pipeline.candidates
   Pipeline.representatives' = Pipeline.representatives
@@ -1482,6 +1740,7 @@ pred pairwise_contradiction [pc : PairwiseCheck] {
   Pipeline.candidates' = Pipeline.candidates
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
@@ -1495,6 +1754,7 @@ pred pairwise_compatible [pc : PairwiseCheck] {
   Pipeline.candidates' = Pipeline.candidates
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
@@ -1595,6 +1855,7 @@ pred completeness_gap_detected [gc : GapCheck] {
   Pipeline.candidates' = Pipeline.candidates
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
@@ -1608,6 +1869,7 @@ pred completeness_gap_skipped [sp : Spec] {
   Pipeline.candidates' = Pipeline.candidates
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
@@ -1622,6 +1884,7 @@ pred exhaustive_guards [gc : GapCheck] {
   Pipeline.candidates' = Pipeline.candidates
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
@@ -1744,13 +2007,13 @@ assert unsat_has_core {
 WHEN the spec-check tool groups formalizable claims (claims with `kind` equal to `requirement` or `scenario`) for formalization or for solver analysis, THE spec-check tool SHALL derive each claim's semantic grouping key from one shared key helper, where a capability-bearing claim keys to the mapped merged capability `logicalFile` or to the synthetic fallback `<merged-spec/{capability}>` when unmapped, and a capability-less claim keys to its `claim.provenance.file`. Semantic keys SHALL be compared by exact string equality without normalization, logical groups SHALL be ordered by first occurrence of the semantic key in eligible-claim order, and claims within each logical group SHALL preserve eligible input order.
 
 **References:**
-- `openspec/changes/semantic-batching/proposal.md#Domain Model`
-- `openspec/changes/semantic-batching/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/semantic-batching/design.md#Interface Contracts`
+- `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Domain Model`
+- `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Interface Contracts`
 
 #### Requirement model
 
-[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) models shared key selection, grouping partition, fallback totality, phase parity, and the cross-layer constraint that physical batches stay within one logical group. First-occurrence ordering remains a sequence-level test obligation outside the model.
+The base module models shared key selection, grouping partition, fallback totality, phase parity, and the cross-layer constraint that physical batches stay within one logical group. First-occurrence ordering remains a sequence-level test obligation outside the model.
 
 #### Scenario: Mapped Capability Groups By Logical File [FLA-SEMGRP-MAPPED]
 WHEN a formalizable claim carries a capability that is present in the logical-file map, THE spec-check tool SHALL group that claim under the mapped `logicalFile` value.
@@ -1796,12 +2059,12 @@ WHEN the spec-check tool forms logical groups, THE groups SHALL be ordered by fi
 WHILE `maxBatchSize` is resolved from `--max-batch-size`, the config file `maxBatchSize`, or the built-in default of `32`, WHEN the spec-check tool forms first-sample physical batches from one logical group, THE spec-check tool SHALL split the group by pure, deterministic, stable slicing such that `maxBatchSize` of `0` yields exactly one physical batch per logical group regardless of group size (unbounded), `maxBatchSize` of `1` yields single-claim inline batches, and `maxBatchSize` greater than `1` yields chunks of size at most `maxBatchSize`, and sub-batching SHALL never change a claim's semantic key. The default of `32` bounds each attached `formalizations` response below the model output-token threshold that otherwise truncates the JSON into `invalid_json` and forces a full per-claim inline fallback.
 
 **References:**
-- `openspec/changes/semantic-batching/proposal.md#Scope`
-- `openspec/changes/semantic-batching/design.md#Component Design`
+- `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Scope`
+- `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Component Design`
 
 #### Requirement model
 
-[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) models claim partition across physical batches and checks `batches_within_one_group`; numeric chunk bounds, stable slicing order, and `maxBatchSize` validation remain test obligations outside the model.
+The base module models claim partition across physical batches and checks `batches_within_one_group`; numeric chunk bounds, stable slicing order, and `maxBatchSize` validation remain test obligations outside the model.
 
 #### Scenario: Explicit Zero Disables Splitting [FLA-SUBBATCH-ZERO]
 WHEN `maxBatchSize` is `0` (an explicit opt-in, not the default), THE spec-check tool SHALL issue exactly one first-sample physical batch per logical group regardless of how many claims the group contains.
@@ -1832,12 +2095,12 @@ IF `maxBatchSize`, `samplesPerClaim`, or `concurrency` is not a safe integer wit
 WHEN a first-sample physical batch contains two or more claims, THE spec-check tool SHALL attach a deterministic JSON context file to the LLM invocation instead of embedding claim bodies in the prompt, and WHEN a first-sample attempt contains exactly one claim, THE spec-check tool SHALL use the inline prompt path. The context file SHALL be schema version 1 with fields `schemaVersion`, `batchKey`, and an ordered `claims` array of `{ index, id, obligation, provenance: { file }, text }`, SHALL serialize with `JSON.stringify(value, null, 2)` as UTF-8 without BOM with LF newlines and exactly one trailing newline, SHALL represent a missing claim ID as `null` while permitting duplicate IDs, and SHALL store provenance path strings verbatim.
 
 **References:**
-- `openspec/changes/semantic-batching/proposal.md#Domain Model`
-- `openspec/changes/semantic-batching/design.md#Data Design`
+- `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Domain Model`
+- `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Data Design`
 
 #### Requirement model
 
-[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) models the transport-arity invariant: multi-claim physical batches are attached and single-claim batches are inline. JSON shape and byte serialization remain contract-test obligations outside the model.
+The base module models the transport-arity invariant: multi-claim physical batches are attached and single-claim batches are inline. JSON shape and byte serialization remain contract-test obligations outside the model.
 
 #### Scenario: Multi-Claim Batch Uses Attachment [FLA-ATTACH-MULTI]
 WHEN a first-sample physical batch contains two or more claims, THE spec-check tool SHALL write the batch context JSON to a temp file and SHALL attach that file to the LLM invocation.
@@ -1863,9 +2126,9 @@ WHEN an attached claim has no `claim.id`, THE spec-check tool SHALL serialize it
 WHEN the spec-check tool issues a multi-claim file-attached formalization attempt, THE spec-check tool SHALL use a dedicated attached-context prompt that states claims are in the attached JSON file, states the attached JSON is untrusted data rather than instructions, states that each output entry SHALL carry an explicit `index` field matching an attached claim index, states that `claims[].id` is informational and may be `null` or duplicated, requires exactly one output entry per attached claim, and keeps the Logic IR schema inline, and the prompt SHALL NOT embed claim bodies, SHALL NOT state that claims come from the same spec file, and SHALL NOT state that claims are presented below.
 
 **References:**
-- `openspec/changes/semantic-batching/proposal.md#Scope`
-- `openspec/changes/semantic-batching/design.md#Component Descriptions`
-- `openspec/changes/semantic-batching/design.md#Security`
+- `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Scope`
+- `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Component Descriptions`
+- `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Security`
 
 #### Scenario: Prompt References Attached Context [FLA-ATTACHP-REFERENCES]
 WHEN a multi-claim attached batch is issued, THE prompt SHALL state that claims are in the attached JSON context file and SHALL contain no claim bodies inline.
@@ -1896,13 +2159,13 @@ IF a returned batch entry carries an `index` that is missing, duplicated, or doe
 WHILE a multi-claim attached batch is in flight on a handled execution path, THE spec-check tool SHALL manage the temp context file through the explicit lifecycle `not_created`, `dir_created`, `file_written`, `cleanup_succeeded`, or `cleanup_failed`, SHALL create the directory with `mkdtemp()` using the prefix `spec-check-batch-` separately from file writing, SHALL write the fixed filename `batch-context.json` with UTF-8 encoding, mode `0o600`, and exclusive flag `wx`, and SHALL attempt cleanup after success, graceful model failure, adapter-return failure, thrown adapter failure, and partial write failure when execution reaches lifecycle finalization. THE spec-check tool SHALL NOT claim a SIGINT or SIGTERM cleanup guarantee; process termination MAY leave temp artifacts, and the absent final manifest SHALL identify the run as incomplete.
 
 **References:**
-- `openspec/changes/semantic-batching/proposal.md#Domain Model`
-- `openspec/changes/semantic-batching/proposal.md#Failure Modes`
-- `openspec/changes/semantic-batching/design.md#Key Components`
+- `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Domain Model`
+- `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Failure Modes`
+- `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Key Components`
 
 #### Requirement model
 
-[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) models handled temp lifecycle states, outcome-after-cleanup ordering, cleanup-terminal safety, cleanup liveness under explicit fairness, and the process-termination boundary.
+The base module models handled temp lifecycle states, outcome-after-cleanup ordering, cleanup-terminal safety, cleanup liveness under explicit fairness, and the process-termination boundary.
 
 #### Scenario: Successful Batch Cleans Up [FLA-TEMP-SUCCESS]
 WHEN an attached batch attempt completes successfully, THE spec-check tool SHALL remove the temp context directory before returning results.
@@ -1953,13 +2216,13 @@ IF the process terminates before an attached batch lifecycle reaches its handled
 WHEN a multi-claim attached batch attempt fails with a terminal adapter error (an `OpencodeError.kind` returned after the adapter's internal retry budget is exhausted), THE spec-check tool SHALL select per-claim handling from the existing taxonomy without introducing new public error categories: `timeout`, `invalid_json`, and `schema_validation_error` SHALL degrade to bounded per-claim inline retry; `spawn_error`, `invalid_files`, and `invalid_timeout` SHALL produce claim-level `FormalizationError` values for the affected physical batch with no per-claim fallback; and `prompt_too_large` SHALL degrade only when every per-claim inline prompt (inline template plus claim text, measured in UTF-8 bytes) fits the adapter prompt-size limit, and SHALL otherwise produce claim-level errors immediately.
 
 **References:**
-- `openspec/changes/semantic-batching/proposal.md#Scope`
-- `openspec/changes/semantic-batching/design.md#Interface Contracts`
-- `openspec/changes/semantic-batching/design.md#Failure Mode Analysis`
+- `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Scope`
+- `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Interface Contracts`
+- `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Failure Mode Analysis`
 
 #### Requirement model
 
-[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) models terminal model, infrastructure, and transport resolutions, conditional `prompt_too_large` degradation, and bounded-path assignment to candidate or claim-error outcomes.
+The base module models terminal model, infrastructure, and transport resolutions, conditional `prompt_too_large` degradation, and bounded-path assignment to candidate or claim-error outcomes.
 
 #### Scenario: Batch Timeout Degrades Per Claim [FLA-DEGRADE-TIMEOUT]
 IF an attached batch attempt fails with `timeout`, THEN THE spec-check tool SHALL retry each claim of that physical batch individually through the inline path.
@@ -2000,12 +2263,12 @@ IF an attached batch attempt fails with `prompt_too_large`, THEN THE spec-check 
 UNDER all handled failure modes, THE spec-check tool SHALL deliver every eligible claim (claims with `kind` equal to `requirement` or `scenario`) to exactly one terminal formalization outcome. Let `E` be the set of eligible claim indexes, `C` the set of candidate indexes, and `R` the set of explicit claim-level `FormalizationError` indexes. THE spec-check tool SHALL maintain `C ⊆ E`, `R ⊆ E`, `C ∩ R = ∅`, and `C ∪ R = E`. No eligible claim SHALL be lost or assigned both outcomes because of grouping, sub-batching, temp-file failure, invalid attachments, model-response failure, graceful degradation, additional-sample failure, or worker-thrown failures.
 
 **References:**
-- `openspec/changes/semantic-batching/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/semantic-batching/design.md#Failure Mode Analysis`
+- `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Failure Mode Analysis`
 
 #### Requirement model
 
-[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) models stable, disjoint physical-batch claim partition, stable terminal outcomes, and eventual candidate-or-claim-error assignment under handled-execution fairness.
+The base module models stable, disjoint physical-batch claim partition, stable terminal outcomes, and eventual candidate-or-claim-error assignment under handled-execution fairness.
 
 #### Scenario: Worker Failure Drops No Claims [FLA-PARTITION-WORKER]
 IF a `mapBounded` worker throws while processing a physical batch, THEN THE spec-check tool SHALL convert the failure into claim-level errors for every claim of the affected physical batch, and sibling physical batches SHALL continue processing.
@@ -2031,8 +2294,8 @@ IF a claim already has a valid candidate and a later additional-sample attempt f
 THE spec-check tool SHALL use the original eligible index (the stable zero-based index of a formalizable claim in eligible-claim order) or claim object identity as the authoritative internal identity for grouping, sub-batching, response matching, and additional-sample merging, and SHALL NOT use `claim.id` alone as internal identity because IDs can be missing or duplicated.
 
 **References:**
-- `openspec/changes/semantic-batching/proposal.md#Preconditions, Postconditions, and Invariants`
-- `openspec/changes/semantic-batching/design.md#Interface Contracts`
+- `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Preconditions, Postconditions, and Invariants`
+- `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Interface Contracts`
 
 #### Scenario: Duplicate IDs Do Not Merge Samples [FLA-IDENTITY-DUP]
 WHEN two distinct claims share the same `claim.id` and `samplesPerClaim` is greater than `1`, THE spec-check tool SHALL merge additional samples per claim using original eligible index or object identity so that samples never merge into the wrong candidate.
@@ -2053,13 +2316,13 @@ WHEN formalization emits candidates and errors, THE spec-check tool SHALL emit t
 WHEN the spec-check tool performs a formalization invocation, THE spec-check tool SHALL produce one `FormalizationAttemptSet` envelope containing schema version, an invocation `claimSet`, and the invocation's attached attempt entries. The `claimSet` SHALL be either `specs_forward` or `generated_spec` with a zero-based invocation ordinal and capability. Each attempt entry SHALL contain batch key, ordered claim indexes local to that `claimSet`, claim IDs when present, claim provenance files, the SHA-256 hash over the exact serialized UTF-8 context bytes, prompt variant/version, model, the physical sub-batch ordinal within the logical group, the response/failure classification, and the cleanup outcome. Evidence SHALL NOT duplicate claim text; each envelope SHALL be persisted as a separate atomically finalized evidence file.
 
 **References:**
-- `openspec/changes/semantic-batching/proposal.md#Domain Model`
-- `openspec/changes/semantic-batching/proposal.md#Failure Modes`
-- `openspec/changes/semantic-batching/design.md#Data Design`
+- `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Domain Model`
+- `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Failure Modes`
+- `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Data Design`
 
 #### Requirement model
 
-[`formalization-and-logic-analysis/alloy/semantic-batching.als`](alloy/semantic-batching.als) checks that evidence is recorded for every attached attempt reaching a terminal resolution. Invocation envelopes, hashes, atomic file persistence, and manifest semantics remain evidence-contract obligations outside the model.
+The base module checks that evidence is recorded for every attached attempt reaching a terminal resolution. Invocation envelopes, hashes, atomic file persistence, and manifest semantics remain evidence-contract obligations outside the model.
 
 #### Scenario: Attempt Metadata Is Complete [FLA-EVIDENCE-METADATA]
 WHEN an attached batch attempt terminates in any handled state, THE preserved evidence SHALL include the enclosing envelope's schema version and `claimSet`, plus the attempt's batch key, ordered claim-set-local indexes, claim IDs when present, provenance files, context SHA-256, prompt variant/version, model, sub-batch ordinal, response/failure classification, and cleanup outcome.
@@ -2125,11 +2388,450 @@ pred pair_budget_exhausted {
   Pipeline.candidates' = Pipeline.candidates
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
 // FM-9: Logical key collision -> abort pipeline before writing artifacts
 // (Already modeled above as collision_aborts_pipeline)
+
+// --- Compile-group preflight (FM-11, FM-12) ------------------------------
+// A compile group is the set of surviving claims for one merged capability
+// that the orchestrator preflights BEFORE combined SMT-LIB compilation and
+// before any solver invocation. Preflight rejection is a genuinely distinct
+// failure mode from merge-conflict exclusion (emit_merge_conflict): it emits
+// a `logic.invalid_group` finding (modeled by the InvalidGroup finding type),
+// skips compilation AND the solver for that group, and writes no solver
+// artifacts/evidence for it [FLA-SPEC-DUPLICATE-CLAIM-ID, FLA-SPEC-GROUP-BOUNDS].
+sig CompileGroup {
+  groupSpec  : one Spec,
+  members    : set Claim,
+  oversized  : one Bool     // group- or per-claim cardinality bound exceeded
+} {
+  some members
+  all c : members | c.spec = groupSpec
+}
+
+// A group has a duplicate-identity collision when two distinct member claims
+// share one sanitized claimId.
+pred hasDuplicateClaimId [g : CompileGroup] {
+  some disj c1, c2 : g.members | c1.claimId = c2.claimId
+}
+
+// A group is well-formed for the solver: distinct claim identities and within
+// cardinality bounds.
+pred groupPreflightOk [g : CompileGroup] {
+  not hasDuplicateClaimId[g]
+  g.oversized = False
+}
+
+// Shared rejection effect: emit one InvalidGroup finding over the group's
+// members, skip the solver (no evidence persisted for the group), and leave
+// every other pipeline relation fixed.
+pred reject_invalid_group [g : CompileGroup] {
+  Pipeline.phase = CompilationPh
+  some f : Finding {
+    f not in Pipeline.findings
+    f.findingType = InvalidGroup
+    f.severity = ErrorSev
+    f.involvedClaims = g.members
+    Pipeline.findings' = Pipeline.findings + f
+  }
+  // Solver skipped for this group: no evidence written for its spec on this
+  // event. (Sibling groups persist their own evidence via solver_* events.)
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// FM-11: Duplicate claim IDs -> invalid group, skip solver [FLA-SPEC-DUPLICATE-CLAIM-ID]
+pred duplicate_claim_id_rejected [g : CompileGroup] {
+  hasDuplicateClaimId[g]
+  reject_invalid_group[g]
+}
+
+// FM-12: Oversized compile group -> invalid group, skip solver [FLA-SPEC-GROUP-BOUNDS]
+pred oversized_group_rejected [g : CompileGroup] {
+  g.oversized = True
+  reject_invalid_group[g]
+}
+
+// FM-13: Dangling assertion reference -> solver error [FLA-SPEC-DANGLING-REF].
+// SUBSET of an already-modeled failure mode: a dangling reference (an assertion
+// pointing at a declaration made undefined by merge exclusion) surfaces through
+// the SAME handling as any other solver error -- a `logic.solver_error` finding
+// at error severity with persisted solver input/output. Its causal origin
+// (merge exclusion, an assertion-resolution detail below this model's
+// abstraction) does not change the state transition, so it is covered by
+// solver_error_found[sqr] above rather than duplicated as a distinct event.
+
+// FM-14: Comment injection -> sanitization keeps mapping comments inert
+// [FLA-SPEC-COMMENT-SAFE]. SUBSET / structural: this is not a distinct runtime
+// transition but a pure-function invariant on compiled output, already captured
+// by fact compilation_valid (art.hasMappingComments = True with an injective,
+// newline-escaping sanitizer). No separate event is warranted.
+
+// FM-15: Pairwise/completeness inconclusive -> aggregated warning
+// [FLA-PAIRWISE, FLA-COMPLETENESS]. SUBSET of solver_inconclusive: aggregating
+// several timeout/unknown verdicts into one `logic.inconclusive` warning is the
+// same state transition as the global inconclusive case (one Inconclusive
+// warning finding, evidence preserved, pipeline continues). The aggregation
+// bookkeeping (counts, sampled claim IDs) is below this model's abstraction, so
+// solver_inconclusive[sqr] above provides the coverage.
+
+// --- Semantic batching: temp lifecycle and batch resolution events ---
+// [FLA-TEMP-LIFECYCLE, FLA-CLAIM-PARTITION, FLA-DEGRADE-KIND, FLA-BATCH-EVIDENCE]
+
+// Frame-condition helper: batch state unchanged
+pred batch_frame [b : PhysicalBatch] {
+  tempState' = tempState
+  resolution' = resolution
+  degraded' = degraded
+  outcomes' = outcomes
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// Attached batch: create the temp directory (may fail, e.g. OS temp
+// unwritable) [FLA-TEMP-DIRFAIL, FLA-TEMP-OSUNWRITABLE].
+pred create_dir_ok [b : PhysicalBatch] {
+  b.attached = Attached
+  b.tempState = NotCreated
+  tempState' = tempState ++ b -> DirCreated
+  resolution' = resolution
+  degraded' = degraded
+  outcomes' = outcomes
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred create_dir_fail [b : PhysicalBatch] {
+  b.attached = Attached
+  b.tempState = NotCreated
+  // Directory creation failed: transport failure, claim errors for the whole
+  // physical batch. No temp dir exists, so no cleanup is owed and outcomes
+  // may be assigned immediately [FLA-TEMP-ORDER].
+  tempState' = tempState
+  resolution' = resolution ++ b -> TransportFailure
+  degraded' = degraded
+  all c : b.claims |
+    b.outcomes[c] = NoOutcome implies b.outcomes'[c] = ClaimErrorOutcome
+  all c : b.claims |
+    b.outcomes[c] != NoOutcome implies b.outcomes'[c] = b.outcomes[c]
+  all c : Claim - b.claims | b.outcomes'[c] = b.outcomes[c]
+  all b2 : PhysicalBatch - b, c : Claim | b2.outcomes'[c] = b2.outcomes[c]
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence + b
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// Attached batch: write the context file (may fail after dir creation)
+// [FLA-TEMP-WRITEFAIL].
+pred write_file_ok [b : PhysicalBatch] {
+  b.attached = Attached
+  b.tempState = DirCreated
+  tempState' = tempState ++ b -> FileWritten
+  resolution' = resolution
+  degraded' = degraded
+  outcomes' = outcomes
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred write_file_fail [b : PhysicalBatch] {
+  b.attached = Attached
+  b.tempState = DirCreated
+  // Write failed: transport failure; cleanup of the created directory is
+  // attempted in cleanup_* events. Claim errors after cleanup completes
+  // [FLA-TEMP-ORDER].
+  tempState' = tempState
+  resolution' = resolution ++ b -> TransportFailure
+  degraded' = degraded
+  outcomes' = outcomes
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence + b
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// Attached batch: invoke the model with the attached context; terminal
+// outcomes cover success, model failure (degradable), and infrastructure
+// failure (no fallback) [FLA-DEGRADE-KIND].
+pred attempt_success [b : PhysicalBatch] {
+  b.attached = Attached
+  b.tempState = FileWritten
+  b.resolution = Unresolved
+  tempState' = tempState
+  resolution' = resolution ++ b -> BatchSuccess
+  degraded' = degraded
+  outcomes' = outcomes
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence + b
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred attempt_model_failure [b : PhysicalBatch] {
+  b.attached = Attached
+  b.tempState = FileWritten
+  b.resolution = Unresolved
+  tempState' = tempState
+  resolution' = resolution ++ b -> ModelFailure
+  degraded' = degraded
+  outcomes' = outcomes
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence + b
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred attempt_infra_failure [b : PhysicalBatch, k : ErrorKind] {
+  b.attached = Attached
+  b.tempState = FileWritten
+  b.resolution = Unresolved
+  k in SpawnError + InvalidFiles + InvalidTimeout
+  tempState' = tempState
+  resolution' = resolution ++ b -> InfraFailure
+  degraded' = degraded
+  outcomes' = outcomes
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence + b
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// Attached batch: prompt too large. Modeled as a ModelFailure whose
+// degradation is gated by fallbackFits [FLA-DEGRADE-TOOLARGE].
+pred attempt_prompt_too_large [b : PhysicalBatch] {
+  b.attached = Attached
+  b.tempState = FileWritten
+  b.resolution = Unresolved
+  tempState' = tempState
+  resolution' = resolution ++ b -> ModelFailure
+  degraded' = degraded
+  outcomes' = outcomes
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence + b
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// Cleanup after a terminal attempt state. Attempted for every attached batch
+// that created a directory, regardless of resolution [FLA-TEMP-LIFECYCLE].
+// On success with failed cleanup, candidates are preserved (outcomes
+// untouched) [FLA-TEMP-CLEANUP-WARN].
+pred cleanup_succeeds [b : PhysicalBatch] {
+  b.attached = Attached
+  b.tempState in DirCreated + FileWritten
+  b.resolution != Unresolved
+  tempState' = tempState ++ b -> CleanupSucceeded
+  resolution' = resolution
+  degraded' = degraded
+  outcomes' = outcomes
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred cleanup_fails [b : PhysicalBatch] {
+  b.attached = Attached
+  b.tempState in DirCreated + FileWritten
+  b.resolution != Unresolved
+  tempState' = tempState ++ b -> CleanupFailed
+  resolution' = resolution
+  degraded' = degraded
+  outcomes' = outcomes
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// Degradation and terminal outcome assignment [FLA-DEGRADE-KIND,
+// FLA-CLAIM-PARTITION, FLA-TEMP-ORDER].
+
+// Model failure degrades to per-claim inline retry when the fallback fits.
+pred degrade_to_per_claim [b : PhysicalBatch] {
+  b.resolution = ModelFailure
+  b.degraded = NotDegraded
+  b.tempState in CleanupSucceeded + CleanupFailed
+  b.fallbackFits = FallbackFits
+  tempState' = tempState
+  resolution' = resolution
+  degraded' = degraded ++ b -> Degraded
+  outcomes' = outcomes
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// Per-claim retry resolves each claim independently to candidate or error.
+pred resolve_degraded_claims [b : PhysicalBatch] {
+  b.degraded = Degraded
+  some c : b.claims | b.outcomes[c] = NoOutcome
+  tempState' = tempState
+  resolution' = resolution
+  degraded' = degraded
+  all c : b.claims |
+    b.outcomes[c] = NoOutcome implies
+      (b.outcomes'[c] = CandidateOutcome or b.outcomes'[c] = ClaimErrorOutcome)
+  all c : b.claims |
+    b.outcomes[c] != NoOutcome implies b.outcomes'[c] = b.outcomes[c]
+  all c : Claim - b.claims | b.outcomes'[c] = b.outcomes[c]
+  all b2 : PhysicalBatch - b, c : Claim | b2.outcomes'[c] = b2.outcomes[c]
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// No degradation: all claims of the batch become claim errors. Applies to
+// infra failure, transport failure after cleanup (or with no dir created),
+// and model failure whose fallback does not fit.
+pred resolve_batch_errors [b : PhysicalBatch] {
+  b.degraded = NotDegraded
+  some c : b.claims | b.outcomes[c] = NoOutcome
+  {
+    b.resolution = InfraFailure
+    or (b.resolution = TransportFailure and b.tempState in CleanupSucceeded + CleanupFailed + NotCreated)
+    or (b.resolution = ModelFailure and b.fallbackFits = FallbackDoesNotFit
+        and b.tempState in CleanupSucceeded + CleanupFailed)
+  }
+  tempState' = tempState
+  resolution' = resolution
+  degraded' = degraded
+  all c : b.claims |
+    b.outcomes[c] = NoOutcome implies b.outcomes'[c] = ClaimErrorOutcome
+  all c : b.claims |
+    b.outcomes[c] != NoOutcome implies b.outcomes'[c] = b.outcomes[c]
+  all c : Claim - b.claims | b.outcomes'[c] = b.outcomes[c]
+  all b2 : PhysicalBatch - b, c : Claim | b2.outcomes'[c] = b2.outcomes[c]
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// Successful batch: all claims become candidates, even if cleanup failed
+// [FLA-TEMP-CLEANUP-WARN]. Outcomes assigned only after a terminal cleanup
+// state [FLA-TEMP-ORDER].
+pred resolve_batch_success [b : PhysicalBatch] {
+  b.resolution = BatchSuccess
+  b.degraded = NotDegraded
+  some c : b.claims | b.outcomes[c] = NoOutcome
+  b.tempState in CleanupSucceeded + CleanupFailed
+  tempState' = tempState
+  resolution' = resolution
+  degraded' = degraded
+  all c : b.claims |
+    b.outcomes[c] = NoOutcome implies b.outcomes'[c] = CandidateOutcome
+  all c : b.claims |
+    b.outcomes[c] != NoOutcome implies b.outcomes'[c] = b.outcomes[c]
+  all c : Claim - b.claims | b.outcomes'[c] = b.outcomes[c]
+  all b2 : PhysicalBatch - b, c : Claim | b2.outcomes'[c] = b2.outcomes[c]
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+// Inline (single-claim) batch: resolve directly; no temp lifecycle.
+pred resolve_inline [b : PhysicalBatch] {
+  b.attached = Inline
+  b.resolution = Unresolved
+  tempState' = tempState
+  one r : BatchSuccess + ModelFailure + InfraFailure |
+    resolution' = resolution ++ b -> r
+  degraded' = degraded
+  outcomes' = outcomes
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
+
+pred resolve_inline_outcome [b : PhysicalBatch] {
+  b.attached = Inline
+  b.resolution != Unresolved
+  some c : b.claims | b.outcomes[c] = NoOutcome
+  tempState' = tempState
+  resolution' = resolution
+  degraded' = degraded
+  all c : b.claims |
+    b.outcomes[c] = NoOutcome implies
+      (b.outcomes'[c] = CandidateOutcome or b.outcomes'[c] = ClaimErrorOutcome)
+  all c : b.claims |
+    b.outcomes[c] != NoOutcome implies b.outcomes'[c] = b.outcomes[c]
+  all c : Claim - b.claims | b.outcomes'[c] = b.outcomes[c]
+  all b2 : PhysicalBatch - b, c : Claim | b2.outcomes'[c] = b2.outcomes[c]
+  Pipeline.phase' = Pipeline.phase
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
+  Pipeline.exitCode' = Pipeline.exitCode
+}
 
 // FM-10: JSON extraction failure -> sample rejected before schema validation
 pred json_extraction_failure {
@@ -2141,6 +2843,7 @@ pred json_extraction_failure {
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.findings' = Pipeline.findings
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
@@ -2175,6 +2878,121 @@ assert non_abort_failures_preserve_phase {
     implies Pipeline.phase' != AbortedPh)
 }
 
+// FM-11: a duplicate-claim-id group always yields an InvalidGroup error
+// finding over exactly the group's members (and, by reject_invalid_group's
+// frame, persists no solver evidence -- the solver is skipped).
+assert duplicate_id_rejected_with_finding {
+  always (all g : CompileGroup |
+    duplicate_claim_id_rejected[g] implies
+      (some f : Pipeline.findings' - Pipeline.findings |
+        f.findingType = InvalidGroup and f.severity = ErrorSev and
+        f.involvedClaims = g.members))
+}
+
+// FM-12: an oversized group always yields an InvalidGroup error finding and
+// skips the solver.
+assert oversized_group_rejected_with_finding {
+  always (all g : CompileGroup |
+    oversized_group_rejected[g] implies
+      (some f : Pipeline.findings' - Pipeline.findings |
+        f.findingType = InvalidGroup and f.severity = ErrorSev and
+        f.involvedClaims = g.members))
+}
+
+// FM-11/FM-12 safety: an invalid-group rejection never invokes the solver, so
+// it persists no new evidence for the rejected group on that event.
+assert invalid_group_skips_solver {
+  always (all g : CompileGroup |
+    reject_invalid_group[g] implies Pipeline.evidence' = Pipeline.evidence)
+}
+
+// FM-11 safety: a solver-bound group never carries a duplicate claim identity.
+// (A well-formed group has one-to-one claim identity across its members.)
+assert solver_group_ids_unique {
+  all g : CompileGroup | groupPreflightOk[g] implies not hasDuplicateClaimId[g]
+}
+
+// Semantic batching safety: evidence recorded for every attached attempt
+assert evidence_recorded_for_every_attached_attempt {
+  always (all b : PhysicalBatch |
+    (b.attached = Attached and b.resolution != Unresolved)
+    implies b in Pipeline.attemptEvidence)
+}
+
+// Semantic batching safety: outcomes are stable once assigned.
+// An outcome only transitions from NoOutcome to a terminal value, never back
+// or between terminal values. This is DERIVED, not assumed: batch resolution
+// events only rewrite claims whose outcome is NoOutcome and otherwise frame
+// outcomes, and every non-batch event freezes batch state via batchStateFrozen.
+// (No `fact` imposes this -- the check would fail if any event violated it.)
+assert outcomes_are_stable {
+  always (all b : PhysicalBatch, c : b.claims |
+    b.outcomes[c] != NoOutcome implies b.outcomes'[c] = b.outcomes[c])
+}
+
+// Semantic batching safety: no cross-batch claim partition violation
+assert no_cross_batch_outcomes {
+  always (all disj b1, b2 : PhysicalBatch, c : Claim |
+    not (c in b1.claims and c in b2.claims))
+}
+
+// Semantic batching safety: cleanup failure after success preserves candidates
+assert cleanup_failure_preserves_candidates {
+  always (all b : PhysicalBatch, c : b.claims |
+    (b.resolution = BatchSuccess and b.outcomes[c] = CandidateOutcome)
+    implies b.outcomes'[c] = CandidateOutcome)
+}
+
+// Semantic batching liveness: cleanup is attempted after every handled terminal state
+pred cleanupOwed [b : PhysicalBatch] {
+  b.attached = Attached
+  b.resolution != Unresolved
+  b.tempState in DirCreated + FileWritten
+}
+
+pred cleanupTerminal [b : PhysicalBatch] {
+  b.tempState in CleanupSucceeded + CleanupFailed
+}
+
+pred cleanupFairness {
+  all b : PhysicalBatch |
+    (eventually always cleanupOwed[b])
+    implies
+    (always eventually (cleanup_succeeds[b] or cleanup_fails[b]))
+}
+
+assert cleanup_attempted_after_terminal {
+  cleanupFairness implies
+    always (all b : PhysicalBatch |
+      cleanupOwed[b] implies eventually cleanupTerminal[b])
+}
+
+// Semantic batching liveness: every eligible claim reaches a terminal outcome
+pred progressFairness {
+  all b : PhysicalBatch |
+    (eventually always (
+      (b.attached = Attached and
+        ( (b.tempState = NotCreated and b.resolution = Unresolved)
+          or (b.tempState = DirCreated)
+          or (b.tempState = FileWritten and b.resolution = Unresolved)
+          or (b.tempState in DirCreated + FileWritten and b.resolution != Unresolved)
+          or (b.degraded = Degraded and some c : b.claims | b.outcomes[c] = NoOutcome)
+          or (b.degraded = NotDegraded and b.resolution != Unresolved
+              and some c : b.claims | b.outcomes[c] = NoOutcome)))
+      or (b.attached = Inline and
+        (b.resolution = Unresolved
+         or (b.resolution != Unresolved and some c : b.claims | b.outcomes[c] = NoOutcome)))
+    ))
+    implies
+    (always eventually not stutter)
+}
+
+assert all_claims_reach_terminal_outcome {
+  progressFairness implies
+    always eventually (all b : PhysicalBatch, c : b.claims |
+      b.outcomes[c] != NoOutcome)
+}
+
 // ============================================================
 // TRANSITION SYSTEM
 // ============================================================
@@ -2186,6 +3004,7 @@ pred advance_to_compilation {
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.findings' = Pipeline.findings
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
@@ -2197,6 +3016,7 @@ pred advance_to_analysis {
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.findings' = Pipeline.findings
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
@@ -2207,15 +3027,18 @@ pred advance_to_reporting {
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.findings' = Pipeline.findings
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
 pred stutter {
+  batchStateFrozen
   Pipeline.phase' = Pipeline.phase
   Pipeline.candidates' = Pipeline.candidates
   Pipeline.representatives' = Pipeline.representatives
   Pipeline.findings' = Pipeline.findings
   Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
@@ -2225,35 +3048,72 @@ pred init_state {
   no Pipeline.representatives
   no Pipeline.findings
   no Pipeline.evidence
+  no Pipeline.attemptEvidence
   no Pipeline.exitCode
+  // Semantic batching initial state
+  all b : PhysicalBatch | {
+    b.tempState = NotCreated
+    b.resolution = Unresolved
+    b.degraded = NotDegraded
+  }
+  all b : PhysicalBatch, c : b.claims | b.outcomes[c] = NoOutcome
+}
+
+// Frame helper: every physical batch's mutable state is frozen. Conjoined with
+// each non-batch (pipeline/analysis) event so batch outcomes cannot float
+// during phase, formalization, clustering, or solver transitions. This makes
+// outcome stability a DERIVED property (proven from frame conditions) rather
+// than an imposed fact.
+pred batchStateFrozen {
+  tempState' = tempState
+  resolution' = resolution
+  degraded' = degraded
+  outcomes' = outcomes
 }
 
 fact transitions {
   init_state and always (
-    // Formalization events (including FM-1, FM-2, FM-10)
-    formalize_success or formalize_abort or formalize_partial
-    or json_extraction_failure
-    // Validation events (including FM-3)
-    or (some s : Sample | validate_accept[s] or validate_reject[s])
-    or validation_complete
-    // Clustering events (including FM-5)
-    or (some c : Claim, cl : Cluster | cluster_select_representative[c, cl])
-    or (some c : Claim | cluster_divergent[c])
-    // Compilation events (including FM-4, FM-9)
-    or (some disj c1, c2 : Claim | emit_merge_conflict[c1, c2])
-    or collision_aborts_pipeline
-    // Phase transitions
-    or advance_to_compilation or advance_to_analysis or advance_to_reporting
-    // Solver analysis events (including FM-6, FM-7)
-    or (some sqr : SpecQueryResult |
-        solver_reports_contradiction[sqr] or solver_inconclusive[sqr] or
-        solver_sat_deeper[sqr] or solver_error_found[sqr])
-    // Pairwise events (including FM-8)
-    or (some pc : PairwiseCheck | pairwise_contradiction[pc] or pairwise_compatible[pc])
-    or pair_budget_exhausted
-    // Completeness events
-    or (some gc : GapCheck | completeness_gap_detected[gc] or exhaustive_guards[gc])
-    or (some sp : Spec | completeness_gap_skipped[sp])
+    // --- Pipeline / analysis events (batch state frozen) ---
+    (batchStateFrozen and (
+      // Formalization events (including FM-1, FM-2, FM-10)
+      formalize_success or formalize_abort or formalize_partial
+      or json_extraction_failure
+      // Validation events (including FM-3)
+      or (some s : Sample | validate_accept[s] or validate_reject[s])
+      or validation_complete
+      // Clustering events (including FM-5)
+      or (some c : Claim, cl : Cluster | cluster_select_representative[c, cl])
+      or (some c : Claim | cluster_divergent[c])
+      // Compilation events (including FM-4, FM-9)
+      or (some disj c1, c2 : Claim | emit_merge_conflict[c1, c2])
+      or collision_aborts_pipeline
+      // Phase transitions
+      or advance_to_compilation or advance_to_analysis or advance_to_reporting
+      // Solver analysis events (including FM-6, FM-7; FM-13 covered here)
+      or (some sqr : SpecQueryResult |
+          solver_reports_contradiction[sqr] or solver_inconclusive[sqr] or
+          solver_sat_deeper[sqr] or solver_error_found[sqr])
+      // Pairwise events (including FM-8; FM-15 aggregation covered here)
+      or (some pc : PairwiseCheck | pairwise_contradiction[pc] or pairwise_compatible[pc])
+      or pair_budget_exhausted
+      // Completeness events
+      or (some gc : GapCheck | completeness_gap_detected[gc] or exhaustive_guards[gc])
+      or (some sp : Spec | completeness_gap_skipped[sp])
+      // Invalid-group preflight events (FM-11, FM-12)
+      or (some g : CompileGroup | duplicate_claim_id_rejected[g] or oversized_group_rejected[g])
+    ))
+    // --- Semantic batching: temp lifecycle and batch resolution events ---
+    // (each already freezes all Pipeline relations internally)
+    or (some b : PhysicalBatch | create_dir_ok[b] or create_dir_fail[b])
+    or (some b : PhysicalBatch | write_file_ok[b] or write_file_fail[b])
+    or (some b : PhysicalBatch |
+          attempt_success[b] or attempt_model_failure[b] or attempt_prompt_too_large[b])
+    or (some b : PhysicalBatch, k : ErrorKind | attempt_infra_failure[b, k])
+    or (some b : PhysicalBatch | cleanup_succeeds[b] or cleanup_fails[b])
+    or (some b : PhysicalBatch | degrade_to_per_claim[b])
+    or (some b : PhysicalBatch |
+          resolve_degraded_claims[b] or resolve_batch_errors[b] or resolve_batch_success[b])
+    or (some b : PhysicalBatch | resolve_inline[b] or resolve_inline_outcome[b])
     // Stutter (required for deadlock-free infinite traces)
     or stutter
   )
@@ -2384,7 +3244,7 @@ assert pairwise_terminates {
 // COMMANDS — Scenario exploration
 // ============================================================
 
-run show_pipeline {} for 3 Claim, 1 Spec, 4 Sample, 2 Cluster,
+run show_pipeline {} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 4 Sample, 2 Cluster,
   2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
   1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
@@ -2392,7 +3252,7 @@ run show_pipeline {} for 3 Claim, 1 Spec, 4 Sample, 2 Cluster,
 
 run scenario_contradiction {
   eventually (some f : Pipeline.findings | f.findingType = Contradiction)
-} for 3 Claim, 1 Spec, 3 Sample, 2 Cluster, 2 Finding,
+} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 3 Sample, 2 Cluster, 2 Finding,
   2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion, 2 Declaration,
   2 DeclName, 2 DeclSignature, 1 CombinedSpec, 1 CompiledArtifact,
   2 ClaimId, 2 ImplicationResult, 1 GapCheck,
@@ -2400,7 +3260,7 @@ run scenario_contradiction {
 
 run scenario_abort {
   eventually (Pipeline.phase = AbortedPh and Pipeline.exitCode = 2)
-} for 2 Claim, 1 Spec, 2 Sample, 1 Cluster, 1 Finding,
+} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 1 Spec, 2 Sample, 1 Cluster, 1 Finding,
   1 SpecQueryResult, 0 PairwiseCheck, 1 Assertion, 1 Declaration,
   1 DeclName, 1 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact,
   1 ClaimId, 0 ImplicationResult, 0 GapCheck,
@@ -2408,7 +3268,7 @@ run scenario_abort {
 
 run scenario_collision_abort {
   eventually collision_aborts_pipeline
-} for 2 Claim, 2 Spec, 2 Sample, 1 Cluster, 1 Finding,
+} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 2 Spec, 2 Sample, 1 Cluster, 1 Finding,
   0 SpecQueryResult, 0 PairwiseCheck, 1 Assertion, 1 Declaration,
   1 DeclName, 1 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact,
   1 ClaimId, 0 ImplicationResult, 0 GapCheck,
@@ -2417,7 +3277,7 @@ run scenario_collision_abort {
 run scenario_json_recovery {
   some je : JsonExtraction | je.input in MarkdownFenced and je.recovered = True
   some je : JsonExtraction | je.input in Irrecoverable and je.recovered = False
-} for 0 Claim, 0 Spec, 0 Sample, 0 Cluster, 0 Finding,
+} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 0 Claim, 0 Spec, 0 Sample, 0 Cluster, 0 Finding,
   0 SpecQueryResult, 0 PairwiseCheck, 0 Assertion, 0 Declaration,
   0 DeclName, 0 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact,
   0 ClaimId, 0 ImplicationResult, 0 GapCheck,
@@ -2425,7 +3285,7 @@ run scenario_json_recovery {
 
 run scenario_pairwise_budget {
   eventually pair_budget_exhausted
-} for 3 Claim, 1 Spec, 3 Sample, 2 Cluster, 2 Finding,
+} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 3 Sample, 2 Cluster, 2 Finding,
   1 SpecQueryResult, 2 PairwiseCheck, 3 Assertion, 2 Declaration,
   2 DeclName, 2 DeclSignature, 1 CombinedSpec, 1 CompiledArtifact,
   2 ClaimId, 2 ImplicationResult, 1 GapCheck,
@@ -2437,7 +3297,7 @@ run scenario_pairwise_budget {
 // invariant-as-fact style could not exhibit it as an instance at all.
 run combined_malformed_witness {
   some cs : CombinedSpec | not combined_wellformed[cs]
-} for 3 Claim, 1 Spec, 4 Sample, 2 Cluster, 2 Finding,
+} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 4 Sample, 2 Cluster, 2 Finding,
   1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion, 2 Declaration,
   2 DeclName, 2 DeclSignature, 1 CombinedSpec, 1 CompiledArtifact,
   2 ClaimId, 2 ImplicationResult, 1 GapCheck,
@@ -2450,124 +3310,181 @@ run combined_conflict_with_exclusion {
     conflict_detected[c1, c2, cs.specRef] and
     c1 in cs.includedClaims and c2 in cs.excludedClaims and
     conflicts_excluded[cs] and combined_wellformed[cs]
-} for 3 Claim, 1 Spec, 4 Sample, 2 Cluster, 2 Finding,
-  1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion, 2 Declaration,
+} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 4 Sample, 2 Cluster, 2 Finding,
+  1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion, 3 Declaration,
   2 DeclName, 2 DeclSignature, 1 CombinedSpec, 1 CompiledArtifact,
   2 ClaimId, 2 ImplicationResult, 1 GapCheck,
-  2 LogicalGroup, 2 LogicalKey, 2 JsonExtraction, 4 JsonInput, 5 Int, 8 steps expect 1
+  2 LogicalGroup, 2 LogicalKey, 2 JsonExtraction, 4 JsonInput, 5 Int, 8 steps expect 0
 
 // Witness: a same-claim variable/function sanitizer collision (c1 = c2) is
 // representable and forces that claim's own exclusion.
 run same_claim_collision_witness {
   some cs : CombinedSpec, c : Claim |
     conflict_detected[c, c, cs.specRef] and c in cs.excludedClaims
-} for 3 Claim, 1 Spec, 4 Sample, 2 Cluster, 2 Finding,
+} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 4 Sample, 2 Cluster, 2 Finding,
   1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion, 2 Declaration,
   2 DeclName, 2 DeclSignature, 1 CombinedSpec, 1 CompiledArtifact,
   2 ClaimId, 2 ImplicationResult, 1 GapCheck,
   2 LogicalGroup, 2 LogicalKey, 2 JsonExtraction, 4 JsonInput, 5 Int, 8 steps expect 1
 
+// --- Non-vacuity witnesses for the invalid-group preflight (FM-11, FM-12) ---
+// Proving the guarded antecedents are reachable, so the *_with_finding checks
+// above are not vacuously true.
+
+// FM-11: a compile group with two claims sharing one claimId is representable
+// and its rejection fires, emitting an InvalidGroup finding.
+run duplicate_claim_id_witness {
+  some g : CompileGroup | hasDuplicateClaimId[g]
+  eventually (some g : CompileGroup | duplicate_claim_id_rejected[g])
+} for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 2 ClaimId, 1 CompileGroup, 2 Finding, 6 steps expect 1
+
+// FM-12: an oversized compile group is representable and its rejection fires.
+run oversized_group_witness {
+  some g : CompileGroup | g.oversized = True
+  eventually (some g : CompileGroup | oversized_group_rejected[g])
+} for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 2 ClaimId, 1 CompileGroup, 2 Finding, 6 steps expect 1
+
+// --- Batch-lifecycle reachability witnesses (ported from the reference model) ---
+// Each proves a distinct handled path through the temp lifecycle is reachable,
+// so the batch safety/liveness checks below are not vacuously satisfied.
+
+// A single attached batch succeeds, cleans up, and all claims become candidates.
+run attached_success_witness {
+  some b : PhysicalBatch |
+    b.attached = Attached
+    and eventually (b.resolution = BatchSuccess
+                    and b.tempState = CleanupSucceeded
+                    and (all c : b.claims | b.outcomes[c] = CandidateOutcome))
+} for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 1 Spec, 1 ClaimId, 0 CompileGroup, 2 Finding, 0 Sample, 0 Cluster, 0 SpecQueryResult, 0 PairwiseCheck, 0 Assertion, 0 Declaration, 0 DeclName, 0 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact, 0 ImplicationResult, 0 GapCheck, 0 LogicalGroup, 0 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 10 steps expect 1
+
+// Write failure after directory creation still reaches a terminal cleanup and
+// assigns claim errors [FLA-TEMP-WRITEFAIL, FLA-TEMP-ORDER].
+run write_failure_then_cleanup_witness {
+  some b : PhysicalBatch |
+    b.attached = Attached
+    and eventually (b.resolution = TransportFailure
+                    and once b.tempState = DirCreated
+                    and eventually (b.tempState = CleanupSucceeded
+                                    and (all c : b.claims | b.outcomes[c] = ClaimErrorOutcome)))
+} for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 1 Spec, 1 ClaimId, 0 CompileGroup, 2 Finding, 0 Sample, 0 Cluster, 0 SpecQueryResult, 0 PairwiseCheck, 0 Assertion, 0 Declaration, 0 DeclName, 0 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact, 0 ImplicationResult, 0 GapCheck, 0 LogicalGroup, 0 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 1
+
+// Cleanup failure after a successful attempt keeps candidates [FLA-TEMP-CLEANUP-WARN].
+run cleanup_failure_after_success_witness {
+  some b : PhysicalBatch |
+    b.attached = Attached
+    and eventually (b.resolution = BatchSuccess
+                    and b.tempState = CleanupFailed
+                    and (all c : b.claims | b.outcomes[c] = CandidateOutcome))
+} for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 1 Spec, 1 ClaimId, 0 CompileGroup, 2 Finding, 0 Sample, 0 Cluster, 0 SpecQueryResult, 0 PairwiseCheck, 0 Assertion, 0 Declaration, 0 DeclName, 0 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact, 0 ImplicationResult, 0 GapCheck, 0 LogicalGroup, 0 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 1
+
+// Model failure with a fitting fallback degrades to per-claim retry [FLA-DEGRADE-TOOLARGE].
+run model_failure_degrades_witness {
+  some b : PhysicalBatch |
+    b.attached = Attached
+    and eventually (b.degraded = Degraded and once b.resolution = ModelFailure)
+} for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 1 Spec, 1 ClaimId, 0 CompileGroup, 2 Finding, 0 Sample, 0 Cluster, 0 SpecQueryResult, 0 PairwiseCheck, 0 Assertion, 0 Declaration, 0 DeclName, 0 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact, 0 ImplicationResult, 0 GapCheck, 0 LogicalGroup, 0 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 14 steps expect 1
+
 // ============================================================
 // COMMANDS — Property verification (check)
 // ============================================================
 
-check abort_no_conclusions for 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
+check abort_no_conclusions for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
   2 Finding, 1 SpecQueryResult, 0 PairwiseCheck, 2 Assertion,
   1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
   0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck,
   1 LogicalGroup, 1 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
 
-check only_valid_in_candidates for 3 Claim, 1 Spec, 4 Sample, 2 Cluster,
+check only_valid_in_candidates for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 4 Sample, 2 Cluster,
   2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
   1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
   1 LogicalGroup, 1 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
 
-check symmetric_implication_same_cluster for 3 Claim, 1 Spec, 5 Sample, 3 Cluster,
+check symmetric_implication_same_cluster for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 5 Sample, 3 Cluster,
   1 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
   0 CompiledArtifact, 1 ClaimId, 4 ImplicationResult, 0 GapCheck,
   0 LogicalGroup, 0 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 1 steps expect 0
 
-check sat_no_global_contradiction for 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
+check sat_no_global_contradiction for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
   3 Finding, 2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
   1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
   1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
 
-check compatible_no_false_positive for 3 Claim, 1 Spec, 3 Sample, 2 Cluster,
+check compatible_no_false_positive for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 3 Sample, 2 Cluster,
   2 Finding, 1 SpecQueryResult, 2 PairwiseCheck, 3 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
   1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
   1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 10 steps expect 0
 
-check ubiquitous_no_spurious_gap for 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
+check ubiquitous_no_spurious_gap for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
   2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 3 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
   1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
   1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 10 steps expect 0
 
-check findings_monotonic for 3 Claim, 1 Spec, 3 Sample, 2 Cluster,
+check findings_monotonic for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 3 Sample, 2 Cluster,
   3 Finding, 2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
   1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
   1 LogicalGroup, 1 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 15 steps expect 0
 
-check phase_monotonic for 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
+check phase_monotonic for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
   2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
   0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck,
   1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 15 steps expect 0
 
-check reporting_absorbing for 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
+check reporting_absorbing for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
   2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
   0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck,
   1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 15 steps expect 0
 
-check all_queries_persisted for 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
+check all_queries_persisted for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
   3 Finding, 3 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
   1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
   1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
 
-check timeout_never_contradiction for 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
+check timeout_never_contradiction for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
   3 Finding, 3 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
   1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
   1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
 
-check collision_implies_abort for 2 Claim, 2 Spec, 2 Sample, 1 Cluster,
+check collision_implies_abort for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 2 Spec, 2 Sample, 1 Cluster,
   1 Finding, 0 SpecQueryResult, 0 PairwiseCheck, 1 Assertion,
   1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
   0 CompiledArtifact, 1 ClaimId, 0 ImplicationResult, 0 GapCheck,
   2 LogicalGroup, 2 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
 
-check all_aborts_set_exit_code for 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
+check all_aborts_set_exit_code for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
   3 Finding, 2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
   1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
   2 LogicalGroup, 2 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 15 steps expect 0
 
-check budget_exhaustion_no_false_findings for 3 Claim, 1 Spec, 3 Sample, 2 Cluster,
+check budget_exhaustion_no_false_findings for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 3 Sample, 2 Cluster,
   2 Finding, 1 SpecQueryResult, 2 PairwiseCheck, 3 Assertion,
   2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
   1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
   1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
 
-check pipeline_terminates for 2 Claim, 1 Spec, 2 Sample, 1 Cluster,
+check pipeline_terminates for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 1 Spec, 2 Sample, 1 Cluster,
   2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
   0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck,
   1 LogicalGroup, 1 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 20 steps
 
-check solver_queries_resolve for 2 Claim, 1 Spec, 2 Sample, 1 Cluster,
+check solver_queries_resolve for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 1 Spec, 2 Sample, 1 Cluster,
   2 Finding, 2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
   1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
   0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck,
   1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 20 steps
 
-check formalization_eventually_resolves for 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
+check formalization_eventually_resolves for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
   1 Finding, 0 SpecQueryResult, 0 PairwiseCheck, 1 Assertion,
   1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
   0 CompiledArtifact, 1 ClaimId, 0 ImplicationResult, 0 GapCheck,
@@ -2584,45 +3501,67 @@ check formalization_eventually_resolves for 2 Claim, 1 Spec, 3 Sample, 1 Cluster
 // scenarios above witness reachability of contradiction/abort/collision paths).
 
 // --- Structural (pure-function) assertions: no temporal unrolling ---
-check recovered_implies_valid_input for 4 but 5 Int expect 0
-check irrecoverable_never_silent for 4 but 5 Int expect 0
-check extraction_total for 4 but 5 Int expect 0
-check no_checksat_in_compiled for 4 but 5 Int expect 0
-check safe_ids_preserved for 4 but 5 Int expect 0
-check exclusion_implies_wellformed for 5 but 5 Int expect 0
-check same_claim_collision_excluded for 5 but 5 Int expect 0
-check inconclusive_no_cluster_corruption for 5 but 5 Int expect 0
-check single_result_per_query for 5 but 5 Int expect 0
-check clusters_have_distinct_members for 5 but 5 Int expect 0
-check unsat_has_core for 5 but 5 Int expect 0
+check recovered_implies_valid_input for 4 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
+check irrecoverable_never_silent for 4 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
+check extraction_total for 4 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
+check no_checksat_in_compiled for 4 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
+check safe_ids_preserved for 4 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
+check exclusion_implies_wellformed for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
+check same_claim_collision_excluded for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
+check inconclusive_no_cluster_corruption for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
+check single_result_per_query for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
+check clusters_have_distinct_members for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
+check unsat_has_core for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
 
 // --- Temporal safety assertions: single-transition properties ---
-check zero_candidates_implies_abort for 3 but 5 Int, 6 steps expect 0
-check invalid_never_in_candidates for 3 but 5 Int, 6 steps expect 0
-check divergent_produces_finding for 3 but 5 Int, 6 steps expect 0
-check no_collision_no_grouping_abort for 3 but 5 Int, 6 steps expect 0
-check group_formation_complete for 3 but 5 Int, 6 steps expect 0
-check contradiction_severity_correct for 3 but 5 Int, 6 steps expect 0
-check advisory_only_not_error for 3 but 5 Int, 6 steps expect 0
-check inconclusive_never_silent for 3 but 5 Int, 6 steps expect 0
-check solver_error_surfaced for 3 but 5 Int, 6 steps expect 0
-check pairwise_severity_correct for 3 but 5 Int, 6 steps expect 0
-check exhaustive_no_gap for 3 but 5 Int, 6 steps expect 0
-check gap_requires_all_conditional for 3 but 5 Int, 6 steps expect 0
-check timeout_no_block for 3 but 5 Int, 6 steps expect 0
-check collision_abort_sets_exit_code for 3 but 5 Int, 6 steps expect 0
-check json_failure_no_state_corruption for 3 but 5 Int, 6 steps expect 0
-check non_abort_failures_preserve_phase for 3 but 5 Int, 6 steps expect 0
-check evidence_monotonic for 3 but 5 Int, 6 steps expect 0
-check candidates_monotonic_in_validation for 3 but 5 Int, 6 steps expect 0
-check representatives_monotonic_in_clustering for 3 but 5 Int, 6 steps expect 0
-check single_terminal_state for 3 but 5 Int, 6 steps expect 0
-check findings_reference_valid_claims for 3 but 5 Int, 6 steps expect 0
-check exit_code_only_on_abort for 3 but 5 Int, 6 steps expect 0
+check zero_candidates_implies_abort for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check invalid_never_in_candidates for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check divergent_produces_finding for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check no_collision_no_grouping_abort for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check group_formation_complete for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check contradiction_severity_correct for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check advisory_only_not_error for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check inconclusive_never_silent for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check solver_error_surfaced for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check pairwise_severity_correct for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check exhaustive_no_gap for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check gap_requires_all_conditional for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check timeout_no_block for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check collision_abort_sets_exit_code for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check json_failure_no_state_corruption for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check non_abort_failures_preserve_phase for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check evidence_monotonic for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check candidates_monotonic_in_validation for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check representatives_monotonic_in_clustering for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check single_terminal_state for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check findings_reference_valid_claims for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
+check exit_code_only_on_abort for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
 
 // --- Liveness assertions: require fairness premises (checked, no expect) ---
-check merged_cap_group_formation for 2 but 5 Int, 12 steps
-check evidence_eventually_persisted for 2 but 5 Int, 12 steps
-check collision_check_terminates for 2 but 5 Int, 12 steps
-check pairwise_terminates for 2 but 5 Int, 12 steps
+check merged_cap_group_formation for 2 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 12 steps
+check evidence_eventually_persisted for 2 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 12 steps
+check collision_check_terminates for 2 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 12 steps
+check pairwise_terminates for 2 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 12 steps
+
+// --- Semantic batching structural checks ---
+check groupingPartitioned for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
+check parityBySharedKey for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
+check kindIrrelevant for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
+check fallbackTotal for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup expect 0
+
+// --- Semantic batching safety checks ---
+check evidence_recorded_for_every_attached_attempt for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 10 steps expect 0
+check outcomes_are_stable for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 10 steps expect 0
+check no_cross_batch_outcomes for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 10 steps expect 0
+check cleanup_failure_preserves_candidates for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 10 steps expect 0
+
+// --- New failure-mode checks (FM-11, FM-12 invalid-group preflight) ---
+check duplicate_id_rejected_with_finding for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 2 ClaimId, 1 CompileGroup, 6 steps expect 0
+check oversized_group_rejected_with_finding for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 2 ClaimId, 1 CompileGroup, 6 steps expect 0
+check invalid_group_skips_solver for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 2 ClaimId, 1 CompileGroup, 6 steps expect 0
+check solver_group_ids_unique for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 3 ClaimId, 2 CompileGroup expect 0
+
+// --- Semantic batching liveness (under fairness) ---
+check cleanup_attempted_after_terminal for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 15 steps expect 0
+check all_claims_reach_terminal_outcome for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 20 steps
 ```

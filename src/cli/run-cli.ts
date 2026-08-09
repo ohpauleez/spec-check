@@ -8,13 +8,12 @@
 import type { RunConfig } from "./config.js";
 import type { Finding } from "../domain/findings.js";
 import type { LogicIrClaim } from "../domain/logic-ir.js";
-import type { Claim, ClaimGraphOutput } from "../domain/claim-graph.js";
-import type { PipelineContext, IngestionResult, AnalysisResult } from "./pipeline-types.js";
+import type { Claim, ClaimGraph } from "../domain/claim-graph.js";import type { PipelineContext, IngestionResult, AnalysisResult } from "./pipeline-types.js";
 import { createInitialRunState, addFindings, type RunState } from "../domain/run-state.js";
 import { buildCatalog, inferCapabilityName, type CatalogEmptyReason } from "../domain/parser/catalog.js";
 import { assertNever, precondition } from "../domain/assert.js";
 import { runQualitativePasses } from "../domain/spec-forward/qualitative.js";
-import { formalizeClaims, type FormalizationError } from "../domain/formal/formalize.js";
+import { formalizeClaims, type FormalizationError, type FormalizationOutput } from "../domain/formal/formalize.js";
 import { runLogicAnalysis } from "../domain/formal/logic-analysis.js";
 import { writeManifest, buildManifestEntries, invalidateStaleManifest } from "../domain/reporting/manifest.js";
 import { writePhaseReports, writeSummaryReport } from "../domain/reporting/render.js";
@@ -288,27 +287,10 @@ async function runIngestionPhases(config: RunConfig): Promise<IngestionResult> {
  * calls will surface as PipelineAbortError after internal retry exhaustion.
  */
 async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult): Promise<AnalysisResult> {
-  let state = ingestion.state;
-  let ctx = ingestion.ctx;
-
-  const mergeResult = await runPhaseWithResult("merge", state, async () => {
-    return runMergePhase({
-      catalogDocuments: ingestion.catalogResult.catalog.documents,
-      parsedSpecs: ctx.specs,
-    });
-  });
-  state = mergeResult.state;
-  ctx = {
-    ...ctx,
-    mergedSpecs: mergeResult.value,
-  };
-  state = addFindings(state, ctx.mergedSpecs.flatMap((spec) => spec.findings));
-
-  const logicalFileResult = buildLogicalFileByCapability(activeMergedSpecsForGrouping(ctx.mergedSpecs));
-  if (!logicalFileResult.ok) {
-    throw new PipelineAbortError("ValidationError", logicalFileResult.error.map((error) => error.message).join("; "));
-  }
-  const logicalFileByCapability = logicalFileResult.value;
+  const merged = await runMergeAndGroupingMap(ingestion);
+  let state = merged.state;
+  const ctx = merged.ctx;
+  const logicalFileByCapability = merged.logicalFileByCapability;
 
   // Phase 4: Build claim graph and analyze coverage.
   const claimGraphResult = await runPhaseWithResult("claim-graph", state, async () => {
@@ -334,9 +316,73 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
   state = addFindings(qualResult.state, [...qualResult.value.pass1Findings, ...qualResult.value.pass2Findings]);
 
   // Phase 6: Formalize claims via LLM.
+  const formalization = await runFormalizationPhaseWithEvidence(config, state, claimGraphResult.value.graph, logicalFileByCapability);
+  state = formalization.state;
+
+  // Phase 7: Cluster formalization samples and select representatives.
+  const clusterResult = await runPhaseWithResult("clustering", state, async () => {
+    return await runClusteringPhase(config, formalization.output.candidates);
+  });
+  state = addFindings(clusterResult.state, clusterResult.value.findings);
+
+  // Phase 8: Run formal logic analysis on per-spec combined SMT-LIB.
+  const logicResult = await runPhaseWithResult("logic", state, async () => {
+    const groups = groupRepresentativesBySpec(
+      formalization.output.candidates,
+      clusterResult.value.representatives,
+      logicalFileByCapability,
+    );
+    const output = await runLogicAnalysis({
+      groups,
+      outputDir: config.output,
+      ...(config.z3 === undefined ? {} : { z3Path: config.z3 }),
+    });
+    return output;
+  });
+  state = addFindings(logicResult.state, logicResult.value.findings);
+
+  return {
+    state,
+    claimGraphResult: claimGraphResult.value,
+    clusterResult: clusterResult.value,
+    qualResult: qualResult.value,
+    logicResult: logicResult.value,
+    formalization: {
+      evidenceFile: formalization.evidenceFile,
+      errors: formalization.output.errors,
+    },
+  };
+}
+
+/**
+ * Run the formalization phase and persist its invocation evidence first.
+ *
+ * @param config - resolved runtime configuration
+ * @param state - run state before the formalization phase
+ * @param claimGraph - claim-graph output supplying the eligible claims
+ * @param logicalFileByCapability - shared semantic grouping map
+ * @returns post-phase state, formalization output, and evidence descriptor
+ *
+ * @remarks
+ * The attempt-set evidence file is atomically written before any abort
+ * decision, so a failed run retains auditable evidence while the absent
+ * manifest marks the run incomplete. A zero-candidate output aborts with
+ * `PipelineAbortError("FormalizationError", ...)`; partial errors become
+ * warning findings keyed by eligible index. Performs LLM and filesystem I/O.
+ */
+async function runFormalizationPhaseWithEvidence(
+  config: RunConfig,
+  state: RunState,
+  claimGraph: ClaimGraph,
+  logicalFileByCapability: ReadonlyMap<string, string>,
+): Promise<{
+  readonly state: RunState;
+  readonly output: FormalizationOutput;
+  readonly evidenceFile: FormalizationEvidenceFile;
+}> {
   const formalResult = await runPhaseWithResult("formalization", state, async () => {
     const result = await formalizeClaims({
-      claims: claimGraphResult.value.graph.claims,
+      claims: claimGraph.claims,
       model: config.model,
       samplesPerClaim: 1,
       timeoutMs: config.timeoutMs,
@@ -357,44 +403,53 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
     }
     return { output: result.value, evidenceFile };
   });
-  const formalizationErrorFindings = formalResult.value.output.candidates.length === 0
+  const errorFindings = formalResult.value.output.candidates.length === 0
     ? []
-    : formalizationErrorsToFindings(formalResult.value.output.errors, claimGraphResult.value.graph.claims);
-  state = addFindings(formalResult.state, [...formalResult.value.output.findings, ...formalizationErrorFindings]);
-
-  // Phase 7: Cluster formalization samples and select representatives.
-  const clusterResult = await runPhaseWithResult("clustering", state, async () => {
-    return await runClusteringPhase(config, formalResult.value.output.candidates);
-  });
-  state = addFindings(clusterResult.state, clusterResult.value.findings);
-
-  // Phase 8: Run formal logic analysis on per-spec combined SMT-LIB.
-  const logicResult = await runPhaseWithResult("logic", state, async () => {
-    const groups = groupRepresentativesBySpec(
-      formalResult.value.output.candidates,
-      clusterResult.value.representatives,
-      logicalFileByCapability,
-    );
-    const output = await runLogicAnalysis({
-      groups,
-      outputDir: config.output,
-      ...(config.z3 === undefined ? {} : { z3Path: config.z3 }),
-    });
-    return output;
-  });
-  state = addFindings(logicResult.state, logicResult.value.findings);
-
+    : formalizationErrorsToFindings(formalResult.value.output.errors, claimGraph.claims);
   return {
-    state,
-    claimGraphResult: claimGraphResult.value,
-    clusterResult: clusterResult.value,
-    qualResult: qualResult.value,
-    logicResult: logicResult.value,
-    formalization: {
-      evidenceFile: formalResult.value.evidenceFile,
-      errors: formalResult.value.output.errors,
-    },
+    state: addFindings(formalResult.state, [...formalResult.value.output.findings, ...errorFindings]),
+    output: formalResult.value.output,
+    evidenceFile: formalResult.value.evidenceFile,
   };
+}
+
+// ---------------------------------------------------------------------------
+// Phase group: Reporting (Phase 11)
+// ---------------------------------------------------------------------------
+
+/**
+ * Merge capability specs and build the shared semantic grouping map.
+ *
+ * @param ingestion - ingestion output supplying parsed specs and prior state
+ * @returns post-merge state, context carrying merged specs, and the validated
+ *   capability-to-logical-file map shared by formalization and solver grouping
+ *
+ * @remarks
+ * Postcondition: the returned map is built once from
+ * `activeMergedSpecsForGrouping(ctx.mergedSpecs)` so formalization and solver
+ * grouping cannot drift. Empty logical-file values abort with
+ * `PipelineAbortError("ValidationError", ...)` before any claim work. Performs
+ * no LLM or filesystem I/O.
+ */
+async function runMergeAndGroupingMap(ingestion: IngestionResult): Promise<{
+  readonly state: RunState;
+  readonly ctx: PipelineContext;
+  readonly logicalFileByCapability: ReadonlyMap<string, string>;
+}> {
+  const mergeResult = await runPhaseWithResult("merge", ingestion.state, async () => {
+    return runMergePhase({
+      catalogDocuments: ingestion.catalogResult.catalog.documents,
+      parsedSpecs: ingestion.ctx.specs,
+    });
+  });
+  const ctx: PipelineContext = { ...ingestion.ctx, mergedSpecs: mergeResult.value };
+  const state = addFindings(mergeResult.state, mergeResult.value.flatMap((spec) => spec.findings));
+
+  const logicalFileResult = buildLogicalFileByCapability(activeMergedSpecsForGrouping(ctx.mergedSpecs));
+  if (!logicalFileResult.ok) {
+    throw new PipelineAbortError("ValidationError", logicalFileResult.error.map((error) => error.message).join("; "));
+  }
+  return { state, ctx, logicalFileByCapability: logicalFileResult.value };
 }
 
 // ---------------------------------------------------------------------------
@@ -491,7 +546,7 @@ async function runSourcePhases(
   config: RunConfig,
   srcDir: string,
   initialState: RunState,
-  claimGraphResult: { readonly graph: ClaimGraphOutput["graph"] },
+  claimGraphResult: { readonly graph: ClaimGraph },
   representativeClaims: readonly LogicIrClaim[],
   knownCapabilities: readonly string[],
 ): Promise<{

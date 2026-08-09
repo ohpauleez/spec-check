@@ -2,7 +2,6 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { traceSpec } from "../support/spec-trace.js";
 import {
-  buildBatchFormalizationPrompt,
   buildFormalizationPrompt,
   extractSamplePayload,
   formalizeClaims,
@@ -370,12 +369,11 @@ describe("formalize contract", () => {
     expect(prompt).toContain("</claim>");
   });
 
-  it("escapes fence-breaking text in single and compatibility batch prompts", () => {
+  it("escapes fence-breaking text in the single-claim prompt", () => {
     const hostileText = makeFenceBreakingText("inline prompt attack");
     const claim = makeClaim({ text: hostileText });
 
     expectFenceBreakingTextEscaped(buildFormalizationPrompt(claim), hostileText);
-    expectFenceBreakingTextEscaped(buildBatchFormalizationPrompt([claim]), hostileText);
   });
 
   it("returns successful candidates alongside errors on partial failure", async () => {

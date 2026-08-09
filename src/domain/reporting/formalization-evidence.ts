@@ -73,6 +73,18 @@ export function buildFormalizationAttemptSet(
   });
 }
 
+/**
+ * Project one attempt record onto the declared pointer-only schema.
+ *
+ * @param attempt - runtime attempt metadata produced by formalization
+ * @returns a frozen copy containing only declared fields, with fresh arrays
+ *
+ * @remarks
+ * Preconditions: the claim reference arrays are parallel and every index is a
+ * non-negative safe integer; violations throw via {@link precondition}.
+ * Postcondition: undeclared runtime properties (such as attached claim text)
+ * cannot enter durable output. The function is pure and performs no I/O.
+ */
 function copyAttemptEvidence(attempt: BatchAttemptEvidence): BatchAttemptEvidence {
   precondition(
     attempt.claimIndexes.length === attempt.claimIds.length
@@ -97,6 +109,17 @@ function copyAttemptEvidence(attempt: BatchAttemptEvidence): BatchAttemptEvidenc
   });
 }
 
+/**
+ * Copy an outcome classification into a fresh frozen value.
+ *
+ * @param outcome - attempt outcome classification
+ * @returns a structurally identical frozen outcome
+ *
+ * @remarks
+ * The copy is exhaustive over the outcome union; an unknown variant is a
+ * compile-time error via {@link assertNever}. The function is pure, performs
+ * no I/O, and never mutates the input.
+ */
 function copyAttemptOutcome(
   outcome: BatchAttemptEvidence["outcome"],
 ): BatchAttemptEvidence["outcome"] {

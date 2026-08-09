@@ -23,6 +23,8 @@ import {
   prepareBatchContextData,
   writeBatchContextFile,
   type BatchAttemptEvidence,
+  type BatchContextCleanup,
+  type BatchContextDirectory,
   type BatchContextFile,
   type WrittenBatchContext,
 } from "./batch-transport.js";
@@ -169,6 +171,20 @@ export async function formalizeClaims(input: {
   });
 }
 
+/**
+ * Validate adapter and batching controls before any filesystem or adapter work.
+ *
+ * @param input - resolved numeric controls and the shared grouping map
+ * @returns `ok` when every control is in range; otherwise all collected
+ *   validation errors, in field check order, with no eligible indexes attached
+ *
+ * @remarks
+ * Precondition (checked here): `samplesPerClaim` and `concurrency` must be
+ * safe integers >= 1, `maxBatchSize` must be a safe integer >= 0, and every
+ * `logicalFileByCapability` value must be a non-empty string. Errors carry no
+ * `eligibleIndex`, so the exported comparator sinks them to the end. The
+ * function is total, side-effect free, and mutates only its local error list.
+ */
 function validateControls(input: {
   readonly samplesPerClaim: number;
   readonly concurrency: number;
@@ -193,6 +209,21 @@ function validateControls(input: {
   return errors.length === 0 ? ok(undefined) : err(errors);
 }
 
+/**
+ * Dispatch one physical batch to its inline or attached formalization path.
+ *
+ * @param input - physical batch and adapter controls shared by both paths
+ * @returns terminal claim outcomes and attempt evidence for this batch; an
+ *   empty batch yields an all-empty result without any adapter call
+ *
+ * @remarks
+ * Postcondition: every claim in the batch has exactly one terminal candidate
+ * or error outcome in the returned result. A single-claim batch always uses
+ * the inline path; multi-claim batches always use the attached context path.
+ * No concurrency occurs inside this function; per-claim parallelism lives in
+ * the fallback and additional-sample helpers. The caller is responsible for
+ * catching unexpected throws (see the worker boundary in `formalizeClaims`).
+ */
 async function formalizePhysicalBatch(input: {
   readonly batch: PhysicalBatch<IndexedFormalizationClaim>;
   readonly model: string;
@@ -209,6 +240,22 @@ async function formalizePhysicalBatch(input: {
   return await formalizeAttachedBatch(input);
 }
 
+/**
+ * Formalize a single-claim batch through the inline prompt path.
+ *
+ * @param indexedClaim - the sole claim with its authoritative eligible index
+ * @param model - adapter model identifier
+ * @param samplesPerClaim - target valid-sample count (safe integer >= 1)
+ * @param timeoutMs - per-call adapter timeout
+ * @returns the candidate and findings, or exactly one claim-level error when
+ *   no valid sample is obtained; attempt evidence stays empty because the
+ *   inline path has no temp context to account for
+ *
+ * @remarks
+ * Expected failures (adapter errors, all-invalid samples, thrown adapter
+ * calls) are normalized by {@link sampleFormalizationsForClaim} into the
+ * returned error rather than thrown. Inputs are never mutated.
+ */
 async function formalizeSingleClaim(
   indexedClaim: IndexedFormalizationClaim,
   model: string,
@@ -286,63 +333,98 @@ async function formalizeAttachedBatch(input: {
     preparedData.contextSha256,
   );
   if (!prepared.ok) {
-    const outcome: BatchAttemptEvidence["outcome"] = {
-      kind: "transport_failure",
-      detail: prepared.error.message,
-    };
-    const evidenceDraft = buildBatchEvidenceDraft(evidenceMetadata, outcome);
-    const cleanup = await cleanupBatchContext(created.value);
-    const cleanupDetail = cleanup.state === "cleanup_failed"
-      ? `; temporary batch cleanup also failed: ${cleanup.detail}`
-      : "";
-    return {
+    return await transportWriteFailureResult(input.batch, evidenceMetadata, created.value, prepared.error.message);
+  }
+
+  return await runAttachedAttempt(input, evidenceMetadata, preparedData.contextSha256, prepared.value);
+}
+
+/**
+ * Build terminal claim errors for a batch context write failure.
+ *
+ * @param batch - physical batch whose context file could not be written
+ * @param evidenceMetadata - frozen pointer metadata for the failed attempt
+ * @param directory - created temp directory owed a cleanup attempt
+ * @param message - the write failure message, reported before cleanup detail
+ * @returns claim errors for every batch claim and one finalized evidence record
+ *
+ * @remarks
+ * Preconditions: the directory exists and the file write failed. Postcondition:
+ * cleanup is attempted exactly once before this result is returned; a cleanup
+ * failure is appended to each claim error message without masking the original
+ * write failure. No adapter call occurs on this path.
+ */
+async function transportWriteFailureResult(
+  batch: PhysicalBatch<IndexedFormalizationClaim>,
+  evidenceMetadata: BatchAttemptEvidenceMetadata,
+  directory: BatchContextDirectory,
+  message: string,
+): Promise<BatchResult> {
+  const evidenceDraft = buildBatchEvidenceDraft(evidenceMetadata, {
+    kind: "transport_failure",
+    detail: message,
+  });
+  const cleanup = await cleanupBatchContext(directory);
+  const cleanupDetail = cleanup.state === "cleanup_failed"
+    ? `; temporary batch cleanup also failed: ${cleanup.detail}`
+    : "";
+  return {
+    candidates: [],
+    findings: [],
+    errors: batch.claims.map((claim) => makeClaimError(claim, `${message}${cleanupDetail}`)),
+    batchAttempts: [finalizeBatchEvidence(
+      evidenceDraft,
+      cleanup.state === "cleanup_succeeded" ? "succeeded" : "failed",
+    )],
+  };
+}
+
+/**
+ * Run the attached adapter attempt and resolve outcomes after cleanup.
+ *
+ * @param input - physical batch and adapter controls for the attached attempt
+ * @param evidenceMetadata - frozen pointer metadata for this attempt
+ * @param contextSha256 - hash of the exact serialized context bytes, used in
+ *   the cleanup-failure warning
+ * @param prepared - written temp context owed a `finally` cleanup attempt
+ * @returns terminal claim outcomes and one evidence record finalized with the
+ *   cleanup classification
+ *
+ * @remarks
+ * Postconditions: cleanup is attempted exactly once in a `finally` block
+ * before any outcome is returned. Cleanup failure preserves successful
+ * candidates and adds a warning; when no candidate survived, the cleanup
+ * detail is appended to every claim error instead. A thrown adapter or
+ * assembly failure is normalized to claim errors and still passes through the
+ * same `finally` cleanup.
+ */
+async function runAttachedAttempt(
+  input: {
+    readonly batch: PhysicalBatch<IndexedFormalizationClaim>;
+    readonly model: string;
+    readonly samplesPerClaim: number;
+    readonly timeoutMs: number;
+  },
+  evidenceMetadata: BatchAttemptEvidenceMetadata,
+  contextSha256: string,
+  prepared: WrittenBatchContext,
+): Promise<BatchResult> {
+  let assembly: AttachedAssembly;
+  try {
+    assembly = await callAndAssembleAttached(input, prepared);
+  } catch (error: unknown) {
+    const message = describeUnknownError(error, "formalization attached transport failed");
+    assembly = {
       candidates: [],
       findings: [],
-      errors: input.batch.claims.map((claim) => makeClaimError(
-        claim,
-        `${prepared.error.message}${cleanupDetail}`,
-      )),
-      batchAttempts: [finalizeBatchEvidence(
-        evidenceDraft,
-        cleanup.state === "cleanup_succeeded" ? "succeeded" : "failed",
-      )],
+      errors: input.batch.claims.map((claim) => makeClaimError(claim, message)),
+      batchAttempts: [],
+      outcome: { kind: "transport_failure", detail: "formalization adapter threw" },
     };
   }
-
-  let assembly: AttachedAssembly;
-  let evidenceDraft: BatchAttemptEvidenceDraft;
-  let cleanup: Awaited<ReturnType<typeof cleanupBatchContext>>;
-  try {
-    try {
-      assembly = await callAndAssembleAttached(input, prepared.value);
-    } catch (error: unknown) {
-      const message = describeUnknownError(error, "formalization attached transport failed");
-      assembly = {
-        candidates: [],
-        findings: [],
-        errors: input.batch.claims.map((claim) => makeClaimError(claim, message)),
-        batchAttempts: [],
-        outcome: { kind: "transport_failure", detail: "formalization adapter threw" },
-      };
-    }
-    evidenceDraft = buildBatchEvidenceDraft(evidenceMetadata, assembly.outcome);
-  } finally {
-    cleanup = await cleanupBatchContext(prepared.value);
-  }
-
-  const findings = [...assembly.findings];
-  let errors = [...assembly.errors];
-  if (cleanup.state === "cleanup_failed") {
-    if (assembly.candidates.length > 0) {
-      findings.push(buildCleanupWarning(input.batch, preparedData.contextSha256, cleanup.detail));
-    } else {
-      const detail = `temporary batch cleanup also failed: ${cleanup.detail}`;
-      errors = errors.length === 0
-        ? input.batch.claims.map((claim) => makeClaimError(claim, detail))
-        : errors.map((error) => ({ ...error, message: `${error.message}; ${detail}` }));
-    }
-  }
-
+  const evidenceDraft = buildBatchEvidenceDraft(evidenceMetadata, assembly.outcome);
+  const cleanup = await cleanupBatchContext(prepared);
+  const { findings, errors } = applyCleanupOutcome(input.batch, assembly, contextSha256, cleanup);
   return {
     candidates: assembly.candidates,
     findings,
@@ -354,6 +436,65 @@ async function formalizeAttachedBatch(input: {
   };
 }
 
+/**
+ * Fold a terminal cleanup state into assembled findings and errors.
+ *
+ * @param batch - physical batch used for warning provenance and error fallback
+ * @param assembly - assembled candidates, findings, and errors from the attempt
+ * @param contextSha256 - context hash carried into the cleanup warning evidence
+ * @param cleanup - terminal cleanup state reached by the `finally` block
+ * @returns findings and errors with the cleanup classification applied
+ *
+ * @remarks
+ * Postcondition: successful cleanup returns the assembly unchanged. A failed
+ * cleanup with surviving candidates appends exactly one warning finding and
+ * keeps every candidate; with no surviving candidates it appends the cleanup
+ * detail to every claim error, creating one error per claim when the assembly
+ * had none. The assembly itself is never mutated.
+ */
+function applyCleanupOutcome(
+  batch: PhysicalBatch<IndexedFormalizationClaim>,
+  assembly: AttachedAssembly,
+  contextSha256: string,
+  cleanup: BatchContextCleanup,
+): { readonly findings: readonly Finding[]; readonly errors: readonly FormalizationError[] } {
+  if (cleanup.state !== "cleanup_failed") {
+    return { findings: assembly.findings, errors: assembly.errors };
+  }
+  if (assembly.candidates.length > 0) {
+    return {
+      findings: [...assembly.findings, buildCleanupWarning(batch, contextSha256, cleanup.detail)],
+      errors: assembly.errors,
+    };
+  }
+  const detail = `temporary batch cleanup also failed: ${cleanup.detail}`;
+  const errors = assembly.errors.length === 0
+    ? batch.claims.map((claim) => makeClaimError(claim, detail))
+    : assembly.errors.map((error) => ({ ...error, message: `${error.message}; ${detail}` }));
+  return { findings: assembly.findings, errors };
+}
+
+/**
+ * Invoke the attached adapter call and assemble the attached-path assembly.
+ *
+ * @param input - physical batch and adapter controls for the attached attempt
+ * @param prepared - written temp context whose path is attached to the call;
+ *   ownership of cleanup stays with the caller's `finally` block
+ * @returns an assembly carrying every terminal claim outcome plus the attempt
+ *   outcome classification for evidence; `batchAttempts` stays empty because
+ *   evidence is finalized only after the caller's cleanup attempt
+ *
+ * @throws Never intentionally: a thrown adapter call is caught and normalized
+ *   into per-claim errors with a `transport_failure` outcome, so the caller's
+ *   cleanup `finally` cannot be bypassed.
+ *
+ * @remarks
+ * Postcondition: exactly one of three shapes is returned — transport-failure
+ * claim errors for a thrown adapter, the recovery assembly from
+ * {@link recoverAttachedFailure} for an expected adapter error, or the
+ * acceptance assembly from {@link acceptAttachedResponse} for a parsed
+ * response. The batch and prepared context are never mutated.
+ */
 async function callAndAssembleAttached(
   input: {
     readonly batch: PhysicalBatch<IndexedFormalizationClaim>;
@@ -390,6 +531,22 @@ async function callAndAssembleAttached(
   return await acceptAttachedResponse(input, response.value);
 }
 
+/**
+ * Degrade an expected attached adapter error to claim errors or inline fallback.
+ *
+ * @param input - physical batch and adapter controls reused by the fallback
+ * @param failure - the terminal attached adapter error being recovered from
+ * @returns per-claim errors carrying the attached failure message, or the
+ *   inline fallback result; either shape carries the classified attached
+ *   outcome so evidence still records why the attached path failed
+ *
+ * @remarks
+ * The degradation decision is made by {@link decideBatchDegradation} from the
+ * failure kind and whether every inline prompt fits the adapter limit. When
+ * the decision is to emit claim errors, no further adapter work occurs. When
+ * it is to fall back, each claim is retried inline at
+ * `INLINE_FALLBACK_CONCURRENCY` so total adapter pressure stays bounded.
+ */
 async function recoverAttachedFailure(
   input: {
     readonly batch: PhysicalBatch<IndexedFormalizationClaim>;
@@ -422,6 +579,23 @@ async function recoverAttachedFailure(
   return { ...fallback, outcome };
 }
 
+/**
+ * Assemble candidates, findings, and errors from a parsed attached response.
+ *
+ * @param input - physical batch and adapter controls for fallback retries
+ * @param response - untrusted parsed model response from the attached call
+ * @returns merged candidates (batch successes, per-entry inline fallbacks, and
+ *   top-up samples), findings, and per-claim errors, with outcome `success`
+ *   only when every batch entry matched and validated
+ *
+ * @remarks
+ * Failure degradation ladder: an unmatchable envelope falls back every claim
+ * to inline sampling; individually invalid entries fall back per claim so one
+ * malformed entry cannot lose its claim; valid candidates short of
+ * `samplesPerClaim` are topped up by {@link addAdditionalSamples}. Every
+ * fallback is bounded by `INLINE_FALLBACK_CONCURRENCY`. Inputs are never
+ * mutated; candidate arrays are rebuilt rather than edited in place.
+ */
 async function acceptAttachedResponse(
   input: {
     readonly batch: PhysicalBatch<IndexedFormalizationClaim>;
@@ -445,25 +619,10 @@ async function acceptAttachedResponse(
     };
   }
 
-  const candidates: FormalizationCandidate[] = [];
-  const findings: Finding[] = [];
-  const failedClaims: IndexedFormalizationClaim[] = [];
-  for (const indexedClaim of input.batch.claims) {
-    const entry = matched.value.get(indexedClaim.index);
-    if (entry === undefined || !entry.ok) {
-      failedClaims.push(indexedClaim);
-      if (entry !== undefined) {
-        findings.push(buildBatchEntryInvalidFinding(indexedClaim.claim, entry.error));
-      }
-      continue;
-    }
-    candidates.push({
-      claim: indexedClaim.claim,
-      eligibleIndex: indexedClaim.index,
-      samples: [entry.value],
-      invalidSamples: [],
-    });
-  }
+  const collected = collectMatchedCandidates(input.batch.claims, matched.value);
+  const candidates: FormalizationCandidate[] = [...collected.candidates];
+  const findings: Finding[] = [...collected.findings];
+  const failedClaims = collected.failedClaims;
 
   const errors: FormalizationError[] = [];
   if (failedClaims.length > 0) {
@@ -495,6 +654,69 @@ async function acceptAttachedResponse(
   };
 }
 
+/**
+ * Partition matched batch entries into valid candidates and failed claims.
+ *
+ * @param claims - physical batch claims in eligible order
+ * @param matched - validated per-index results from {@link matchAttachedBatchResponse}
+ * @returns one-sample candidates, invalid-entry findings, and the claims that
+ *   must fall back to inline sampling
+ *
+ * @remarks
+ * Postconditions: a claim with a missing entry is queued for fallback with no
+ * finding; a claim with an invalid entry is queued and gains a
+ * `formalization.batch_entry_invalid` finding; a valid entry becomes a
+ * one-sample candidate preserving eligible index. Inputs are never mutated and
+ * iteration order follows the batch's eligible order.
+ */
+function collectMatchedCandidates(
+  claims: readonly IndexedFormalizationClaim[],
+  matched: ReadonlyMap<number, Result<LogicIrClaim, string>>,
+): {
+  readonly candidates: readonly FormalizationCandidate[];
+  readonly findings: readonly Finding[];
+  readonly failedClaims: readonly IndexedFormalizationClaim[];
+} {
+  const candidates: FormalizationCandidate[] = [];
+  const findings: Finding[] = [];
+  const failedClaims: IndexedFormalizationClaim[] = [];
+  for (const indexedClaim of claims) {
+    const entry = matched.get(indexedClaim.index);
+    if (entry === undefined || !entry.ok) {
+      failedClaims.push(indexedClaim);
+      if (entry !== undefined) {
+        findings.push(buildBatchEntryInvalidFinding(indexedClaim.claim, entry.error));
+      }
+      continue;
+    }
+    candidates.push({
+      claim: indexedClaim.claim,
+      eligibleIndex: indexedClaim.index,
+      samples: [entry.value],
+      invalidSamples: [],
+    });
+  }
+  return { candidates, findings, failedClaims };
+}
+
+/**
+ * Match untrusted batch entries to source claims by validated unique index.
+ *
+ * @param response - untrusted parsed model response from the attached call
+ * @param claims - the batch claims whose indexes form the only legal keys
+ * @returns a map from eligible claim index to a validated sample or its
+ *   rejection reason; or a batch-level error string when the entry count
+ *   differs, an index is unsafe/unknown/duplicated, or an index cannot be
+ *   resolved to a source claim
+ *
+ * @remarks
+ * Postcondition on success: the map key set is exactly the claim index set,
+ * so every claim has precisely one terminal per-entry verdict. Per-entry
+ * validation failures are data inside the map so the caller can fall back per
+ * claim; envelope-level failures abort the whole batch because no entry can
+ * be trusted. The function is total, side-effect free, and never mutates
+ * `claims`.
+ */
 function matchAttachedBatchResponse(
   response: unknown,
   claims: readonly IndexedFormalizationClaim[],
@@ -504,14 +726,17 @@ function matchAttachedBatchResponse(
     return err(`expected ${String(claims.length)} indexed formalizations, received ${String(entries.length)}`);
   }
 
-  const expected = new Set(claims.map((claim) => claim.index));
+  const claimsByIndex = new Map<number, IndexedFormalizationClaim>();
+  for (const claim of claims) {
+    claimsByIndex.set(claim.index, claim);
+  }
   const matched = new Map<number, Result<LogicIrClaim, string>>();
   for (const entry of entries) {
     const index = readBatchEntryIndex(entry);
-    if (index === undefined || !expected.has(index) || matched.has(index)) {
+    if (index === undefined || !claimsByIndex.has(index) || matched.has(index)) {
       return err("batch formalization indexes must be unique known safe integers");
     }
-    const claim = claims.find((candidate) => candidate.index === index);
+    const claim = claimsByIndex.get(index);
     if (claim === undefined) {
       return err("batch formalization index did not resolve to a source claim");
     }
@@ -521,6 +746,19 @@ function matchAttachedBatchResponse(
   return ok(matched);
 }
 
+/**
+ * Read the `index` field of one untrusted batch entry.
+ *
+ * @param entry - arbitrary parsed value from the batch `formalizations` array
+ * @returns the index when it is a non-negative safe integer; otherwise
+ *   `undefined` so the caller can reject the entry without trusting it
+ *
+ * @remarks
+ * Only safe integers in `[0, Number.MAX_SAFE_INTEGER]` are accepted because
+ * indexes key into the eligible-claim map and later sort candidates; floats,
+ * `NaN`, infinities, and negative numbers are all rejected. The function is
+ * total, side-effect free, and performs no allocation beyond the read.
+ */
 function readBatchEntryIndex(entry: unknown): number | undefined {
   if (typeof entry !== "object" || entry === null) {
     return undefined;
@@ -531,6 +769,24 @@ function readBatchEntryIndex(entry: unknown): number | undefined {
     : undefined;
 }
 
+/**
+ * Formalize claims one-by-one inline after an attached-path failure.
+ *
+ * @param claims - claims to retry, each with its authoritative eligible index
+ * @param model - adapter model identifier
+ * @param samplesPerClaim - target valid-sample count per claim
+ * @param timeoutMs - per-call adapter timeout
+ * @returns per-claim candidates and findings in claim order, or per-claim
+ *   errors; `batchAttempts` is empty because the inline path creates no temp
+ *   context
+ *
+ * @remarks
+ * Concurrency is pinned to `INLINE_FALLBACK_CONCURRENCY` (sequential) so a
+ * degraded batch cannot amplify adapter load. A worker that throws is caught
+ * per claim and normalized to an error, so one bad claim cannot discard the
+ * other claims' results. Postcondition: every input claim contributes exactly
+ * one candidate or one error. Inputs are never mutated.
+ */
 async function fallbackClaims(
   claims: readonly IndexedFormalizationClaim[],
   model: string,
@@ -558,6 +814,26 @@ async function fallbackClaims(
   return { candidates, findings, errors, batchAttempts: [] };
 }
 
+/**
+ * Top up batch-validated candidates that are short of `samplesPerClaim`.
+ *
+ * @param candidates - accepted batch candidates; treated as immutable
+ * @param samplesPerClaim - target valid-sample count per claim
+ * @param model - adapter model identifier
+ * @param timeoutMs - per-call adapter timeout
+ * @returns candidates sorted by eligible index with merged sample sets, plus
+ *   failure findings for claims whose top-up could not complete; with
+ *   `samplesPerClaim <= 1` the input array is returned unchanged
+ *
+ * @remarks
+ * Only the deficit (`samplesPerClaim - candidate.samples.length`) is
+ * requested, so per-claim adapter work stays bounded by the attempt budget in
+ * {@link sampleFormalizationsForClaim}. Top-up runs sequentially at
+ * `INLINE_FALLBACK_CONCURRENCY`; a thrown or failed top-up preserves the
+ * original candidate and emits a warning finding instead of an error, because
+ * the claim already has at least one valid sample. Postcondition: every input
+ * candidate appears exactly once in the output, ordered by eligible index.
+ */
 async function addAdditionalSamples(
   candidates: readonly FormalizationCandidate[],
   samplesPerClaim: number,
@@ -569,11 +845,9 @@ async function addAdditionalSamples(
   }
   const needMore = candidates.filter((candidate) => candidate.samples.length < samplesPerClaim);
   const results = await mapBounded(needMore, INLINE_FALLBACK_CONCURRENCY, async (candidate) => {
-    const indexedClaim: IndexedFormalizationClaim = {
-      claim: candidate.claim,
-      index: candidate.eligibleIndex,
-      logicalFile: candidate.claim.provenance.file,
-    };
+    // Only the claim and its eligible index are needed; the semantic key is
+    // intentionally not reconstructed here because sampling never re-groups.
+    const indexedClaim = { claim: candidate.claim, index: candidate.eligibleIndex };
     try {
       return await sampleFormalizationsForClaim({
         indexedClaim,
@@ -617,8 +891,28 @@ async function addAdditionalSamples(
   return { candidates: [...byIndex.values()].sort(compareCandidates), findings };
 }
 
+/**
+ * Collect up to `samplesPerClaim` valid Logic IR samples for one claim inline.
+ *
+ * @param input.indexedClaim - the claim and its authoritative eligible index;
+ *   only `claim` and `index` are read, so callers without a semantic key (such
+ *   as additional-sample merging) may pass the minimal shape
+ * @param input.model - adapter model identifier
+ * @param input.samplesPerClaim - target valid-sample count (safe integer >= 1)
+ * @param input.timeoutMs - per-call adapter timeout
+ * @returns the candidate and findings, or a claim-level error when no valid
+ *   sample is obtained
+ *
+ * @remarks
+ * The attempt budget is `samplesPerClaim * ADAPTER_RETRIES` and each adapter
+ * call has its own internal retry budget, so total subprocess spawns per claim
+ * stay bounded. A terminal adapter error after at least one valid sample
+ * preserves the candidate and records a sample-shortfall finding rather than
+ * discarding collected work. Thrown adapter failures are caught as `unknown`
+ * and normalized to a claim-level error. Inputs are never mutated.
+ */
 async function sampleFormalizationsForClaim(input: {
-  readonly indexedClaim: IndexedFormalizationClaim;
+  readonly indexedClaim: { readonly claim: Claim; readonly index: number };
   readonly model: string;
   readonly samplesPerClaim: number;
   readonly timeoutMs: number;
@@ -755,40 +1049,6 @@ export function extractSamplePayload(response: unknown): unknown {
 }
 
 /**
- * Build the legacy inline batch prompt retained for source compatibility.
- *
- * @param claims - claims to include in input order
- * @returns deterministic inline prompt with zero-based display indexes
- *
- * @remarks
- * Production multi-claim work uses the attached context prompt instead.
- * Security postcondition: every claim is fenced as untrusted data, and every
- * run of 3+ backticks in raw claim text is escaped so it cannot close or open a
- * prompt fence. The function performs no I/O, does not mutate `claims`, and has
- * no expected failure mode.
- *
- * @example
- * ```ts
- * const prompt = buildBatchFormalizationPrompt(claims);
- * ```
- */
-export function buildBatchFormalizationPrompt(claims: readonly Claim[]): string {
-  const sections = claims.map((claim, index) => [
-    `<claim index="${String(index)}" id=${JSON.stringify(claim.id ?? "UNNAMED")} obligation=${JSON.stringify(claim.obligation)}>`,
-    "```text",
-    sanitizeForCodeFence(claim.text),
-    "```",
-    "</claim>",
-  ].join("\n"));
-  return [
-    FORMALIZATION_INSTRUCTIONS,
-    FORMALIZATION_SANDBOXING,
-    `\n## Claims (${String(claims.length)} total)\n`,
-    ...sections,
-  ].join("\n\n");
-}
-
-/**
  * Extract indexed formalization entries from an untrusted batch response.
  *
  * @param response - arbitrary parsed model response
@@ -819,6 +1079,23 @@ export function extractBatchPayload(response: unknown): readonly unknown[] {
 type BatchAttemptEvidenceDraft = Readonly<Omit<BatchAttemptEvidence, "cleanup">>;
 type BatchAttemptEvidenceMetadata = Readonly<Omit<BatchAttemptEvidenceDraft, "outcome">>;
 
+/**
+ * Build the frozen pointer metadata shared by all evidence for one attempt.
+ *
+ * @param context - built batch context supplying the batch key and claims
+ * @param subBatchOrdinal - physical batch ordinal within its semantic group
+ * @param model - adapter model identifier recorded for replay
+ * @param contextSha256 - hash of the exact serialized context bytes
+ * @returns frozen metadata with parallel claim index/id/provenance arrays in
+ *   context order; claim text is intentionally excluded
+ *
+ * @remarks
+ * Precondition: `contextSha256` must be computed over the same canonical
+ * bytes later written to disk, so post-cleanup reconstruction can be
+ * verified. The three claim arrays stay parallel and in context order; this
+ * is preserved by mapping the same source array for each. The function is
+ * deterministic, performs no I/O, and deep-freezes every array it returns.
+ */
 function buildBatchEvidenceMetadata(
   context: BatchContextFile,
   subBatchOrdinal: number,
@@ -837,6 +1114,19 @@ function buildBatchEvidenceMetadata(
   });
 }
 
+/**
+ * Pair frozen metadata with a frozen outcome before cleanup is known.
+ *
+ * @param metadata - frozen pointer metadata for the attempt
+ * @param outcome - classified attempt outcome to freeze into the draft
+ * @returns a frozen evidence draft lacking only the cleanup classification
+ *
+ * @remarks
+ * The draft is a separate stage so evidence cannot be finalized before the
+ * cleanup attempt reaches a terminal state; `cleanup: "not_attempted"` is
+ * only legal when no directory was created. Neither input is mutated; the
+ * outcome object is frozen rather than copied.
+ */
 function buildBatchEvidenceDraft(
   metadata: BatchAttemptEvidenceMetadata,
   outcome: BatchAttemptEvidence["outcome"],
@@ -847,6 +1137,20 @@ function buildBatchEvidenceDraft(
   });
 }
 
+/**
+ * Complete an evidence draft with the terminal cleanup classification.
+ *
+ * @param draft - frozen metadata-plus-outcome assembled before cleanup
+ * @param cleanup - terminal cleanup state: `succeeded`, `failed`, or
+ *   `not_attempted` (valid only when no directory was ever created)
+ * @returns a frozen, complete `BatchAttemptEvidence` record
+ *
+ * @remarks
+ * Postcondition: the returned record is fully frozen and contains no claim
+ * text, keeping attempt evidence durable and safe to persist. The function
+ * performs no I/O and does not mutate the draft; the spread copies the
+ * draft's own references, which are already frozen by construction.
+ */
 function finalizeBatchEvidence(
   draft: BatchAttemptEvidenceDraft,
   cleanup: BatchAttemptEvidence["cleanup"],
@@ -854,6 +1158,21 @@ function finalizeBatchEvidence(
   return Object.freeze({ ...draft, cleanup });
 }
 
+/**
+ * Classify an adapter error kind into an attempt outcome for evidence.
+ *
+ * @param kind - the terminal `OpencodeError` kind from the attached call
+ * @returns `infrastructure_failure` for local environment defects
+ *   (`spawn_error`, `invalid_files`, `invalid_timeout`) and `model_failure`
+ *   for model- or payload-attributable defects (`timeout`, `invalid_json`,
+ *   `schema_validation_error`, `prompt_too_large`)
+ *
+ * @remarks
+ * The switch is total over the closed `OpencodeError["kind"]` union, so an
+ * added adapter error kind becomes a compile error here rather than silent
+ * misclassification. The classification feeds degradation and evidence only;
+ * it never changes the claim-facing error message. The function is pure.
+ */
 function classifyAdapterFailure(kind: OpencodeError["kind"]): BatchAttemptEvidence["outcome"] {
   switch (kind) {
     case "spawn_error":
@@ -868,6 +1187,21 @@ function classifyAdapterFailure(kind: OpencodeError["kind"]): BatchAttemptEviden
   }
 }
 
+/**
+ * Build the warning finding for one rejected inline formalization sample.
+ *
+ * @param claim - source claim whose sample was rejected
+ * @param attempt - 1-based attempt number within the bounded retry budget
+ * @param reason - human-readable validation rejection reason
+ * @returns a `formalization.invalid_sample` warning tied to the claim
+ *
+ * @remarks
+ * The attempt number is recorded as evidence so reviewers can tell early
+ * flakiness from budget exhaustion. `relatedClaimIdentifiers` is omitted
+ * (rather than set to undefined) for unnamed claims to satisfy
+ * `exactOptionalPropertyTypes`. The function is pure and never mutates
+ * `claim`.
+ */
 function buildInvalidSampleFinding(claim: Claim, attempt: number, reason: string): Finding {
   return {
     severity: "warning",
@@ -883,6 +1217,20 @@ function buildInvalidSampleFinding(claim: Claim, attempt: number, reason: string
   };
 }
 
+/**
+ * Build the warning finding for a malformed per-claim batch entry.
+ *
+ * @param claim - source claim whose matched batch entry failed validation
+ * @param reason - human-readable rejection reason from entry validation
+ * @returns a `formalization.batch_entry_invalid` warning tied to the claim
+ *
+ * @remarks
+ * Emitted only when the envelope matched but this claim's entry was invalid;
+ * the caller then retries the claim inline, so the finding explains why one
+ * claim took the degraded path. `relatedClaimIdentifiers` is omitted for
+ * unnamed claims to satisfy `exactOptionalPropertyTypes`. Pure; `claim` is
+ * never mutated.
+ */
 function buildBatchEntryInvalidFinding(claim: Claim, reason: string): Finding {
   return {
     severity: "warning",
@@ -895,6 +1243,23 @@ function buildBatchEntryInvalidFinding(claim: Claim, reason: string): Finding {
   };
 }
 
+/**
+ * Build the warning finding for a candidate short of the requested samples.
+ *
+ * @param claim - source claim whose sample set is incomplete
+ * @param validSamples - number of valid samples actually collected (>= 1)
+ * @param requestedSamples - target valid-sample count (`samplesPerClaim`)
+ * @param terminalFailure - adapter failure message that stopped sampling, or
+ *   `undefined` when the bounded attempt budget was simply exhausted
+ * @returns a `formalization.sample_shortfall` warning tied to the claim
+ *
+ * @remarks
+ * Precondition: `validSamples < requestedSamples` and `validSamples >= 1`;
+ * the caller emits this only on the preserved-candidate path, never when the
+ * claim has already errored. The description distinguishes adapter-stopped
+ * shortfall from budget exhaustion because the remediation differs. Pure;
+ * inputs are never mutated.
+ */
 function buildSampleShortfallFinding(
   claim: Claim,
   validSamples: number,
@@ -917,6 +1282,21 @@ function buildSampleShortfallFinding(
   };
 }
 
+/**
+ * Build the warning finding for a failed additional-sample top-up.
+ *
+ * @param candidate - preserved candidate whose top-up did not complete
+ * @param message - normalized failure or thrown-error description
+ * @returns a `formalization.additional_sample_failed` warning tied to the
+ *   candidate's claim
+ *
+ * @remarks
+ * This is a warning rather than an error because the claim already has at
+ * least one valid sample; the top-up failure only weakens the sample set.
+ * The eligible index is recorded as evidence so the warning can be joined
+ * back to the candidate without relying on claim identity. Pure; the
+ * candidate is never mutated.
+ */
 function buildAdditionalSampleFailureFinding(candidate: FormalizationCandidate, message: string): Finding {
   return {
     severity: "warning",
@@ -932,6 +1312,23 @@ function buildAdditionalSampleFailureFinding(candidate: FormalizationCandidate, 
   };
 }
 
+/**
+ * Build the warning finding for a failed temp-context cleanup.
+ *
+ * @param batch - physical batch whose context directory survived cleanup
+ * @param contextSha256 - context hash so leftover artifacts can be matched
+ *   to the attempt that created them
+ * @param detail - cleanup failure description from the transport layer
+ * @returns a `formalization.temp_cleanup_failed` warning with batch-level
+ *   provenance
+ *
+ * @remarks
+ * Provenance falls back to the batch logical file when the batch has no
+ * first claim (defensive; the caller only emits this for non-empty batches).
+ * The batch key, ordinal, and context hash are recorded so orphaned temp
+ * directories can be attributed and removed manually. Pure; `batch` is never
+ * mutated.
+ */
 function buildCleanupWarning(
   batch: PhysicalBatch<IndexedFormalizationClaim>,
   contextSha256: string,
@@ -953,6 +1350,21 @@ function buildCleanupWarning(
   };
 }
 
+/**
+ * Convert a thrown physical-batch worker into terminal per-claim errors.
+ *
+ * @param batch - physical batch whose worker threw before producing a result
+ * @param error - caught unknown value from the worker, normalized to a message
+ * @returns one claim error per batch claim with a shared normalized message;
+ *   candidates, findings, and attempt evidence are empty because the batch
+ *   produced no trustworthy partial work
+ *
+ * @remarks
+ * This is the last-resort normalization point in the worker pool: without it
+ * a single throwing batch would reject the whole `mapBounded` run and lose
+ * every other batch's results. Claim identity and eligible index are
+ * preserved on every error so terminal ordering still holds.
+ */
 function workerFailureResult(
   batch: PhysicalBatch<IndexedFormalizationClaim>,
   error: unknown,
@@ -966,7 +1378,25 @@ function workerFailureResult(
   };
 }
 
-function makeClaimError(claim: IndexedFormalizationClaim, message: string): FormalizationError {
+/**
+ * Build one terminal claim-level formalization error.
+ *
+ * @param claim - indexed claim; `index` is the authoritative eligible
+ *   position, while `claim.id` is recorded only as informational context
+ * @param message - already-normalized failure description appended after the
+ *   claim prefix
+ * @returns an error carrying the eligible index for stable ordering, with
+ *   `claimId` omitted (not undefined) for unnamed claims
+ *
+ * @remarks
+ * The eligible index is the ordering and join key everywhere downstream;
+ * `claimId` is never trusted for identity because claim identifiers are
+ * model-visible text. The function is pure and never mutates its input.
+ */
+function makeClaimError(
+  claim: { readonly claim: Claim; readonly index: number },
+  message: string,
+): FormalizationError {
   return {
     message: `failed to formalize claim ${claim.claim.id ?? "<unnamed>"}: ${message}`,
     eligibleIndex: claim.index,
@@ -974,18 +1404,76 @@ function makeClaimError(claim: IndexedFormalizationClaim, message: string): Form
   };
 }
 
+/**
+ * Order candidates by ascending eligible index.
+ *
+ * @param left - first candidate
+ * @param right - second candidate
+ * @returns negative, zero, or positive as `left.eligibleIndex` compares to
+ *   `right.eligibleIndex`
+ *
+ * @remarks
+ * Eligible indexes are unique across the run by construction, so this is a
+ * total order and the sort is deterministic. Indexes are validated safe
+ * integers, so the subtraction cannot overflow into `NaN`.
+ */
 function compareCandidates(left: FormalizationCandidate, right: FormalizationCandidate): number {
   return left.eligibleIndex - right.eligibleIndex;
 }
 
+/**
+ * Order errors by eligible index, sinking index-less errors to the end.
+ *
+ * @param left - first error
+ * @param right - second error
+ * @returns negative, zero, or positive as the effective indexes compare,
+ *   where a missing `eligibleIndex` sorts as `Number.MAX_SAFE_INTEGER`
+ *
+ * @remarks
+ * Claim-level errors always carry an eligible index; only boundary
+ * (pre-effects) validation errors omit it, and those must sort after every
+ * claim outcome so terminal ordering by eligible input position is preserved.
+ * Pure and deterministic for the validated safe-integer indexes in use.
+ */
 function compareErrors(left: FormalizationError, right: FormalizationError): number {
   return (left.eligibleIndex ?? Number.MAX_SAFE_INTEGER) - (right.eligibleIndex ?? Number.MAX_SAFE_INTEGER);
 }
 
+/**
+ * Normalize a caught unknown value into a human-readable failure message.
+ *
+ * @param error - value caught as `unknown` at a trust boundary
+ * @param fallback - context-specific message used when the value is not a
+ *   non-empty `Error`
+ * @returns `error.message` when it is a non-empty string; otherwise the
+ *   fallback, so the returned message is never empty
+ *
+ * @remarks
+ * Non-`Error` throws (strings, objects, `undefined`) deliberately collapse
+ * to the fallback rather than being stringified, because arbitrary thrown
+ * values carry no trustworthy shape and could leak uncontrolled text into
+ * claim-facing errors. The function is total and pure.
+ */
 function describeUnknownError(error: unknown, fallback: string): string {
   return error instanceof Error && error.message.length > 0 ? error.message : fallback;
 }
 
+/**
+ * Validate an untrusted sample and pin it to its source claim identity.
+ *
+ * @param sample - arbitrary parsed value from a model response
+ * @param claim - the source claim the sample must belong to
+ * @returns the validated `LogicIrClaim`, or a validation error describing
+ *   either the schema failure or the claim-identity mismatch
+ *
+ * @remarks
+ * Postcondition on success: the sample is schema-valid and, when the claim
+ * is named, `sample.claimId === claim.id`. The identity check is skipped for
+ * unnamed claims because there is no stable identifier to compare against;
+ * positional matching (index in batch, single-claim prompt inline) is the
+ * only trust anchor in that case. The function is total and side-effect
+ * free; all failures are returned as data.
+ */
 function validateSampleForClaim(
   sample: unknown,
   claim: Claim,
@@ -999,6 +1487,18 @@ function validateSampleForClaim(
   });
 }
 
+/**
+ * Produce the terminal result for a physical batch with no claims.
+ *
+ * @returns a result with every channel empty, preserving the invariant that
+ *   each batch returns exactly one `BatchResult`
+ *
+ * @remarks
+ * An empty batch is a degenerate-but-legal input from generic physical
+ * splitting; returning an empty result keeps downstream flattening total
+ * without special cases and triggers no adapter or filesystem work. The
+ * function is pure and allocates one fresh frozen-shape result per call.
+ */
 function emptyBatchResult(): BatchResult {
   return { candidates: [], findings: [], errors: [], batchAttempts: [] };
 }

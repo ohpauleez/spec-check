@@ -345,7 +345,7 @@ erDiagram
     MergedCapabilitySpec ||--o{ Claim : "spec claims"
     MergedCapabilitySpec ||--o{ Finding : "merge findings"
     Claim ||--o{ FormalizationSample : "formalization"
-    FormalizationAttemptSet ||--o{ FormalizationAttemptEvidence : contains
+    FormalizationAttemptSet ||--o{ BatchAttemptEvidence : contains
     FormalizationSample ||--o{ EquivalenceCluster : "clustering"
     EquivalenceCluster ||--|| SolverArtifact : "compiled"
     Claim ||--o{ Finding : "analysis findings"

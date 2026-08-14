@@ -169,9 +169,12 @@ fact clusters_respect_equivalence {
 }
 
 // --- Semantic batching: shared key helper, grouping, physical batches ---
-// Structural layer for the semantic-batching requirements [FLA-SEMANTIC-GROUPING,
-// FLA-SUBBATCH, FLA-ATTACH-TRANSPORT, FLA-CLAIM-PARTITION, FLA-BATCH-EVIDENCE,
-// FLA-TEMP-LIFECYCLE, FLA-DEGRADE-KIND].
+// Cross-cutting vocabulary for the semantic-batching requirements
+// [FLA-SEMANTIC-GROUPING, FLA-SUBBATCH, FLA-ATTACH-TRANSPORT, FLA-CLAIM-PARTITION,
+// FLA-BATCH-EVIDENCE, FLA-TEMP-LIFECYCLE, FLA-DEGRADE-KIND]: the semantic key
+// space, logical groups, and the PhysicalBatch carrier with its lifecycle enums.
+// Each requirement's own facts, invariants, and assertions live in that
+// requirement's model; the batch lifecycle events live in the transition system.
 
 // Whether a merged spec has requirements / scenarios.
 abstract sig Presence {}
@@ -291,35 +294,6 @@ sig PhysicalBatch {
   var degraded      : one DegradedKind,
   var outcomes      : Claim -> one Outcome
 }
-
-// Grouping and sub-batching together partition the eligible claim set across
-// physical batches: every claim belongs to some batch and no claim appears in
-// two batches [FLA-SEMANTIC-GROUPING, FLA-SUBBATCH].
-fact claims_partitioned_across_batches {
-  Claim in PhysicalBatch.claims
-  all disj b1, b2 : PhysicalBatch | no (b1.claims & b2.claims)
-}
-
-// A physical batch never spans logical groups: sub-batching splits a group
-// into chunks but never changes a claim's semantic key, so every batch's claims
-// come from one group [FLA-SUBBATCH].
-fact batches_stay_within_groups {
-  all b : PhysicalBatch | one g : SemanticLogicalGroup | b.claims in g.groupMembers
-}
-
-// Transport matches arity: a batch is Attached exactly when it carries two or
-// more claims; single-claim batches stay inline [FLA-ATTACH-TRANSPORT].
-fact transport_matches_arity {
-  all b : PhysicalBatch |
-    (#b.claims >= 2) iff b.attached = Attached
-}
-
-// Only attached batches have a temp context lifecycle; inline batches never
-// create a temp directory, so their temp state stays NotCreated forever.
-fact inline_batches_have_no_temp {
-  all b : PhysicalBatch |
-    b.attached = Inline implies always b.tempState = NotCreated
-}
 ```
 
 ## Requirements
@@ -433,10 +407,6 @@ WHEN requirement and scenario claims are available for formal analysis, THE spec
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Make JSON extraction tolerant but keep schema validation strict`
 - `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Scope`
 - `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Proposed Design`
-
-#### Requirement model
-
-The base module models semantic grouping, physical-batch containment, handled formalization outcomes, and attached-attempt evidence. Logic IR generation, timeout values, and emitted artifact formats remain outside the model. The full temporal batch lifecycle is captured in the [state machine and invariant checks](#state-machine-and-invariant-checks) section below.
 
 #### Scenario: Generate Inspectable Logic Artifacts [FLA-FORMAL-ARTS]
 WHEN a claim is selected for formalization, THE spec-check tool SHALL emit inspectable logic and SMT artifacts that let a reviewer trace the formal result back to the originating requirement or scenario.
@@ -1340,10 +1310,6 @@ WHEN the spec-check tool prepares specs-forward logical analysis, THE spec-check
 - `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Scope`
 - `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Interface Contracts`
 
-#### Requirement model
-
-The base module models shared semantic key selection and checks grouping parity and one-group physical-batch containment. Solver-specific filtering and artifact naming remain implementation and test obligations outside the model.
-
 #### Scenario: One Logic Group Per Merged Capability [FLA-GROUP-ONE]
 WHEN one capability has finalized-plus-delta inputs that merge into one active capability view, THE spec-check tool SHALL produce exactly one specs-forward logical-analysis group for that capability.
 
@@ -1952,8 +1918,6 @@ WHEN the spec-check tool groups formalizable claims (claims with `kind` equal to
 
 #### Requirement model
 
-The base module models shared key selection, grouping partition, fallback totality, phase parity, and the cross-layer constraint that physical batches stay within one logical group. First-occurrence ordering remains a sequence-level test obligation outside the model.
-
 ```alloy
 // --- Shared semantic key: grouping properties and grouping-map authority ---
 
@@ -2136,7 +2100,34 @@ WHILE `maxBatchSize` is resolved from `--max-batch-size`, the config file `maxBa
 
 #### Requirement model
 
-The base module models claim partition across physical batches and checks `batches_within_one_group`; numeric chunk bounds, stable slicing order, and `maxBatchSize` validation remain test obligations outside the model.
+```alloy
+// --- Deterministic physical sub-batching: claim partition within one group ---
+// Sub-batching slices a logical group into physical batches. The two facts
+// below capture the invariants the slicing must preserve, independent of the
+// numeric chunk bounds (which are a pure-function test obligation): every
+// eligible claim lands in exactly one physical batch, and a batch never spans
+// logical groups because slicing never changes a claim's semantic key.
+
+// Grouping plus sub-batching partition the eligible claim set across physical
+// batches: every claim belongs to some batch and no claim appears in two
+// [FLA-SEMANTIC-GROUPING, FLA-SUBBATCH].
+fact claims_partitioned_across_batches {
+  Claim in PhysicalBatch.claims
+  all disj b1, b2 : PhysicalBatch | no (b1.claims & b2.claims)
+}
+
+// A physical batch never spans logical groups [FLA-SUBBATCH].
+fact batches_stay_within_groups {
+  all b : PhysicalBatch | one g : SemanticLogicalGroup | b.claims in g.groupMembers
+}
+
+// A batch's claims all share one semantic key, so sub-batching preserves the
+// grouping key of every claim it slices.
+assert batches_within_one_group {
+  all b : PhysicalBatch, disj c1, c2 : b.claims |
+    keyFor[c1, GroupingMap] = keyFor[c2, GroupingMap]
+}
+```
 
 #### Scenario: Explicit Zero Disables Splitting [FLA-SUBBATCH-ZERO]
 WHEN `maxBatchSize` is `0` (an explicit opt-in, not the default), THE spec-check tool SHALL issue exactly one first-sample physical batch per logical group regardless of how many claims the group contains.
@@ -2194,7 +2185,36 @@ WHEN a first-sample physical batch contains two or more claims, THE spec-check t
 
 #### Requirement model
 
-The base module models the transport-arity invariant: multi-claim physical batches are attached and single-claim batches are inline. JSON shape and byte serialization remain contract-test obligations outside the model.
+```alloy
+// --- File-attached batch context transport: arity determines transport ---
+// Transport is a pure function of batch arity: a physical batch attaches a
+// context file exactly when it carries two or more claims, and a single-claim
+// batch stays inline. JSON shape and byte serialization are contract-test
+// obligations outside the model. Because only attached batches write a temp
+// context file, an inline batch has no temp-directory lifecycle at all.
+
+// A batch is Attached exactly when it carries two or more claims
+// [FLA-ATTACH-TRANSPORT].
+fact transport_matches_arity {
+  all b : PhysicalBatch |
+    (#b.claims >= 2) iff b.attached = Attached
+}
+
+// Inline batches never create a temp directory, so their temp state stays
+// NotCreated forever [FLA-ATTACH-SINGLE].
+fact inline_batches_have_no_temp {
+  all b : PhysicalBatch |
+    b.attached = Inline implies always b.tempState = NotCreated
+}
+
+// A single-claim batch is always inline; a multi-claim batch is always
+// attached. Restates the arity invariant from the scenario's viewpoint.
+assert single_claim_batches_are_inline {
+  all b : PhysicalBatch |
+    (one b.claims implies b.attached = Inline) and
+    (#b.claims >= 2 implies b.attached = Attached)
+}
+```
 
 #### Scenario: Multi-Claim Batch Uses Attachment [FLA-ATTACH-MULTI]
 WHEN a first-sample physical batch contains two or more claims, THE spec-check tool SHALL write the batch context JSON to a temp file and SHALL attach that file to the LLM invocation.
@@ -2300,7 +2320,51 @@ WHILE a multi-claim attached batch is in flight on a handled execution path, THE
 
 #### Requirement model
 
-The base module models handled temp lifecycle states, outcome-after-cleanup ordering, cleanup-terminal safety, cleanup liveness under explicit fairness, and the process-termination boundary.
+```alloy
+// --- Temp context file lifecycle: cleanup safety and liveness ---
+// An attached batch drives its temp directory through the TempState lifecycle
+// NotCreated -> DirCreated -> FileWritten -> (CleanupSucceeded | CleanupFailed).
+// The lifecycle transitions are realized by the shared events create_dir_*,
+// write_file_*, and cleanup_* in the transition system; the properties this
+// requirement guarantees are stated here.
+//
+// A directory is "cleanup-owed" once an attached batch that reached DirCreated
+// or FileWritten resolves; cleanup is terminal once it succeeds or fails.
+
+pred cleanupOwed [b : PhysicalBatch] {
+  b.attached = Attached
+  b.resolution != Unresolved
+  b.tempState in DirCreated + FileWritten
+}
+
+pred cleanupTerminal [b : PhysicalBatch] {
+  b.tempState in CleanupSucceeded + CleanupFailed
+}
+
+// Safety: a failed cleanup after a successful attempt never discards the
+// candidates that attempt produced [FLA-TEMP-CLEANUP-WARN].
+assert cleanup_failure_preserves_candidates {
+  always (all b : PhysicalBatch, c : b.claims |
+    (b.resolution = BatchSuccess and b.outcomes[c] = CandidateOutcome)
+    implies b.outcomes'[c] = CandidateOutcome)
+}
+
+// Liveness: under fairness on the cleanup events, every cleanup-owed batch
+// eventually reaches a terminal cleanup state, so no temp directory owed
+// cleanup is abandoned on a handled path [FLA-TEMP-SUCCESS, FLA-TEMP-ORDER].
+pred cleanupFairness {
+  all b : PhysicalBatch |
+    (eventually always cleanupOwed[b])
+    implies
+    (always eventually (cleanup_succeeds[b] or cleanup_fails[b]))
+}
+
+assert cleanup_attempted_after_terminal {
+  cleanupFairness implies
+    always (all b : PhysicalBatch |
+      cleanupOwed[b] implies eventually cleanupTerminal[b])
+}
+```
 
 #### Scenario: Successful Batch Cleans Up [FLA-TEMP-SUCCESS]
 WHEN an attached batch attempt completes successfully, THE spec-check tool SHALL remove the temp context directory before returning results.
@@ -2397,7 +2461,35 @@ WHEN a multi-claim attached batch attempt fails with a terminal adapter error (a
 
 #### Requirement model
 
-The base module models terminal model, infrastructure, and transport resolutions, conditional `prompt_too_large` degradation, and bounded-path assignment to candidate or claim-error outcomes.
+```alloy
+// --- Graceful degradation by adapter error kind ---
+// A terminal attached-batch attempt resolves to one of the shared Resolution
+// values, and the transition system realizes each kind:
+//   * BatchSuccess    -> resolve_batch_success (all claims become candidates);
+//   * ModelFailure    -> degrade_to_per_claim when the inline fallback fits,
+//                        else resolve_batch_errors (claim errors);
+//   * InfraFailure    -> resolve_batch_errors, never degraded (no per-claim
+//                        fallback for spawn/invalid-files/invalid-timeout);
+//   * TransportFailure -> resolve_batch_errors after any owed cleanup.
+// The properties this requirement guarantees about that decision are below.
+
+// Safety: degradation to per-claim retry happens only for a model failure whose
+// inline fallback fits; infrastructure failures never degrade
+// [FLA-DEGRADE-TOOLARGE, FLA-DEGRADE-SPAWN, FLA-DEGRADE-FILES, FLA-DEGRADE-INVTIMEOUT].
+assert degrade_only_when_model_failure_fits {
+  always (all b : PhysicalBatch |
+    degrade_to_per_claim[b] implies
+      (b.resolution = ModelFailure and b.fallbackFits = FallbackFits))
+}
+
+// Safety: an infrastructure failure is always resolved as claim errors without
+// per-claim fallback, so no infra failure is ever marked Degraded.
+assert infra_failure_never_degrades {
+  always (all b : PhysicalBatch |
+    (b.resolution = InfraFailure and some c : b.claims | b.outcomes[c] = NoOutcome)
+    implies not degrade_to_per_claim[b])
+}
+```
 
 #### Scenario: Batch Timeout Degrades Per Claim [FLA-DEGRADE-TIMEOUT]
 IF an attached batch attempt fails with `timeout`, THEN THE spec-check tool SHALL retry each claim of that physical batch individually through the inline path.
@@ -2478,7 +2570,60 @@ UNDER all handled failure modes, THE spec-check tool SHALL deliver every eligibl
 
 #### Requirement model
 
-The base module models stable, disjoint physical-batch claim partition, stable terminal outcomes, and eventual candidate-or-claim-error assignment under handled-execution fairness.
+```alloy
+// --- Claim partition and terminal outcomes ---
+// Each claim carries a per-batch Outcome (NoOutcome, CandidateOutcome, or
+// ClaimErrorOutcome). The shared resolve_* events assign terminal outcomes; the
+// disjoint physical-batch partition comes from the domain facts. The three
+// guarantees this requirement makes -- disjoint partition, outcome stability,
+// and eventual assignment -- are stated here.
+
+// Safety: no claim appears in two physical batches, so the batch partition of
+// the eligible claim set is disjoint at all times [FLA-CLAIM-PARTITION].
+assert no_cross_batch_outcomes {
+  always (all disj b1, b2 : PhysicalBatch, c : Claim |
+    not (c in b1.claims and c in b2.claims))
+}
+
+// Safety: an assigned outcome is stable -- a claim only moves from NoOutcome to
+// a terminal value, never back and never between terminal values. This follows
+// from the event frame conditions (resolve_* rewrite only NoOutcome claims and
+// frame the rest; non-batch events freeze batch state via batchStateFrozen), so
+// the check fails if any event breaks it.
+assert outcomes_are_stable {
+  always (all b : PhysicalBatch, c : b.claims |
+    b.outcomes[c] != NoOutcome implies b.outcomes'[c] = b.outcomes[c])
+}
+
+// Liveness: under handled-execution fairness, every eligible claim eventually
+// reaches a terminal outcome (candidate or claim error), so no claim is left
+// unresolved [FLA-CLAIM-PARTITION]. The fairness premise excludes an execution
+// that stutters forever while a batch still owes work.
+pred progressFairness {
+  all b : PhysicalBatch |
+    (eventually always (
+      (b.attached = Attached and
+        ( (b.tempState = NotCreated and b.resolution = Unresolved)
+          or (b.tempState = DirCreated)
+          or (b.tempState = FileWritten and b.resolution = Unresolved)
+          or (b.tempState in DirCreated + FileWritten and b.resolution != Unresolved)
+          or (b.degraded = Degraded and some c : b.claims | b.outcomes[c] = NoOutcome)
+          or (b.degraded = NotDegraded and b.resolution != Unresolved
+              and some c : b.claims | b.outcomes[c] = NoOutcome)))
+      or (b.attached = Inline and
+        (b.resolution = Unresolved
+         or (b.resolution != Unresolved and some c : b.claims | b.outcomes[c] = NoOutcome)))
+    ))
+    implies
+    (always eventually not stutter)
+}
+
+assert all_claims_reach_terminal_outcome {
+  progressFairness implies
+    always eventually (all b : PhysicalBatch, c : b.claims |
+      b.outcomes[c] != NoOutcome)
+}
+```
 
 #### Scenario: Worker Failure Drops No Claims [FLA-PARTITION-WORKER]
 IF a `mapBounded` worker throws while processing a physical batch, THEN THE spec-check tool SHALL convert the failure into claim-level errors for every claim of the affected physical batch, and sibling physical batches SHALL continue processing.
@@ -2564,7 +2709,23 @@ WHEN the spec-check tool performs a formalization invocation, THE spec-check too
 
 #### Requirement model
 
-The base module checks that evidence is recorded for every attached attempt reaching a terminal resolution. Invocation envelopes, hashes, atomic file persistence, and manifest semantics remain evidence-contract obligations outside the model.
+```alloy
+// --- Batch attempt evidence preservation ---
+// Every attached batch attempt that reaches a terminal resolution is recorded
+// in Pipeline.attemptEvidence. The shared events that resolve an attached batch
+// (create_dir_fail, write_file_fail, attempt_success, attempt_model_failure,
+// attempt_infra_failure, attempt_prompt_too_large) each add the batch to
+// attemptEvidence, so the model guarantees no terminal attached attempt goes
+// unrecorded. Envelope shape, hashes, atomic persistence, and manifest
+// semantics are evidence-contract obligations outside the model.
+
+// Safety: any attached batch with a terminal resolution has recorded evidence.
+assert evidence_recorded_for_every_attached_attempt {
+  always (all b : PhysicalBatch |
+    (b.attached = Attached and b.resolution != Unresolved)
+    implies b in Pipeline.attemptEvidence)
+}
+```
 
 #### Scenario: Attempt Metadata Is Complete [FLA-EVIDENCE-METADATA]
 WHEN an attached batch attempt terminates in any handled state, THE preserved evidence SHALL include the enclosing envelope's schema version and `claimSet`, plus the attempt's batch key, ordered claim-set-local indexes, claim IDs when present, provenance files, context SHA-256, prompt variant/version, model, sub-batch ordinal, response/failure classification, and cleanup outcome.
@@ -3169,87 +3330,6 @@ assert solver_group_ids_unique {
   all g : CompileGroup | groupPreflightOk[g] implies not hasDuplicateClaimId[g]
 }
 
-// Semantic batching safety: evidence recorded for every attached attempt
-assert evidence_recorded_for_every_attached_attempt {
-  always (all b : PhysicalBatch |
-    (b.attached = Attached and b.resolution != Unresolved)
-    implies b in Pipeline.attemptEvidence)
-}
-
-// Semantic batching safety: outcomes are stable once assigned. An outcome only
-// moves from NoOutcome to a terminal value, never back and never between
-// terminal values. The property follows from the event frame conditions: batch
-// resolution events rewrite only claims still at NoOutcome and frame the rest,
-// and every non-batch event freezes batch state via batchStateFrozen. The check
-// exercises all events, so it fails if any event breaks the property.
-assert outcomes_are_stable {
-  always (all b : PhysicalBatch, c : b.claims |
-    b.outcomes[c] != NoOutcome implies b.outcomes'[c] = b.outcomes[c])
-}
-
-// Semantic batching safety: no cross-batch claim partition violation
-assert no_cross_batch_outcomes {
-  always (all disj b1, b2 : PhysicalBatch, c : Claim |
-    not (c in b1.claims and c in b2.claims))
-}
-
-// Semantic batching safety: cleanup failure after success preserves candidates
-assert cleanup_failure_preserves_candidates {
-  always (all b : PhysicalBatch, c : b.claims |
-    (b.resolution = BatchSuccess and b.outcomes[c] = CandidateOutcome)
-    implies b.outcomes'[c] = CandidateOutcome)
-}
-
-// Semantic batching liveness: cleanup is attempted after every handled terminal state
-pred cleanupOwed [b : PhysicalBatch] {
-  b.attached = Attached
-  b.resolution != Unresolved
-  b.tempState in DirCreated + FileWritten
-}
-
-pred cleanupTerminal [b : PhysicalBatch] {
-  b.tempState in CleanupSucceeded + CleanupFailed
-}
-
-pred cleanupFairness {
-  all b : PhysicalBatch |
-    (eventually always cleanupOwed[b])
-    implies
-    (always eventually (cleanup_succeeds[b] or cleanup_fails[b]))
-}
-
-assert cleanup_attempted_after_terminal {
-  cleanupFairness implies
-    always (all b : PhysicalBatch |
-      cleanupOwed[b] implies eventually cleanupTerminal[b])
-}
-
-// Semantic batching liveness: every eligible claim reaches a terminal outcome
-pred progressFairness {
-  all b : PhysicalBatch |
-    (eventually always (
-      (b.attached = Attached and
-        ( (b.tempState = NotCreated and b.resolution = Unresolved)
-          or (b.tempState = DirCreated)
-          or (b.tempState = FileWritten and b.resolution = Unresolved)
-          or (b.tempState in DirCreated + FileWritten and b.resolution != Unresolved)
-          or (b.degraded = Degraded and some c : b.claims | b.outcomes[c] = NoOutcome)
-          or (b.degraded = NotDegraded and b.resolution != Unresolved
-              and some c : b.claims | b.outcomes[c] = NoOutcome)))
-      or (b.attached = Inline and
-        (b.resolution = Unresolved
-         or (b.resolution != Unresolved and some c : b.claims | b.outcomes[c] = NoOutcome)))
-    ))
-    implies
-    (always eventually not stutter)
-}
-
-assert all_claims_reach_terminal_outcome {
-  progressFairness implies
-    always eventually (all b : PhysicalBatch, c : b.claims |
-      b.outcomes[c] != NoOutcome)
-}
-
 // ============================================================
 // TRANSITION SYSTEM
 // ============================================================
@@ -3847,12 +3927,16 @@ check groupingPartitioned for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 S
 check parityBySharedKey for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
 check kindIrrelevant for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
 check fallbackTotal for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup expect 0
+check batches_within_one_group for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 1 steps expect 0
+check single_claim_batches_are_inline for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 1 steps expect 0
 
 // --- Semantic batching safety checks ---
 check evidence_recorded_for_every_attached_attempt for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 10 steps expect 0
 check outcomes_are_stable for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 10 steps expect 0
 check no_cross_batch_outcomes for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 10 steps expect 0
 check cleanup_failure_preserves_candidates for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 10 steps expect 0
+check degrade_only_when_model_failure_fits for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 10 steps expect 0
+check infra_failure_never_degrades for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 10 steps expect 0
 
 // --- New failure-mode checks (FM-11, FM-12 invalid-group preflight) ---
 check duplicate_id_rejected_with_finding for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 2 ClaimId, 1 CompileGroup, 6 steps expect 0

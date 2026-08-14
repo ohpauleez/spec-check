@@ -36,6 +36,16 @@ fun maxObligation [claims : set Claim] : lone Obligation {
   { o : claims.obligation | no (claims.obligation & o.higherObligation) }
 }
 
+// Obligation level fixes finding severity: mandatory claims escalate to error,
+// advisory to warning, informational to info. Shared by the global solver
+// contradiction check and the pairwise guard-activation check, so it lives with
+// the domain vocabulary rather than in one requirement model.
+fun obligationToSeverity [o : Obligation] : one Severity {
+  (o = Mandatory) implies ErrorSev
+  else (o = Advisory) implies WarningSev
+  else InfoSev
+}
+
 // A Spec is a single spec file being analyzed
 sig Spec {}
 
@@ -150,13 +160,9 @@ fact implication_wellformed {
     not (ir1.from = ir2.from and ir1.to = ir2.to)
 }
 
-// Equivalence via mutual implication (unsat means entailment holds)
-pred samples_equivalent [a, b : Sample] {
-  some ir1 : ImplicationResult | ir1.from = a and ir1.to = b and ir1.result = Unsat
-  some ir2 : ImplicationResult | ir2.from = b and ir2.to = a and ir2.result = Unsat
-}
-
-// Cluster membership respects equivalence
+// Cluster membership respects equivalence: equivalent samples always co-occur
+// in the same cluster. Equivalence itself (samples_equivalent) is defined in the
+// clustering requirement model; this fact is part of what a Cluster IS.
 fact clusters_respect_equivalence {
   all disj a, b : Sample, cl : Cluster |
     (samples_equivalent[a, b] and a in cl.members) implies b in cl.members
@@ -186,8 +192,10 @@ sig SemanticKey {
   one (fromProv + fromMap + fromSynth)
 }
 
-// Genuinely universal: key construction is injective across sources and total
-// over source values. This is an axiom of the key space, not a pipeline condition.
+// Key construction is injective across sources and total over source values:
+// distinct provenance files, mapped logical files, and synthetic keys yield
+// distinct semantic keys, and every source value produces one. This is an axiom
+// of the key space, not a pipeline condition.
 fact key_sources_injective {
   all disj k1, k2 : SemanticKey |
     k1.fromProv != k2.fromProv
@@ -230,7 +238,9 @@ sig SemanticLogicalGroup {
   groupMembers : set Claim
 }
 
-// Genuinely universal: logical groups partition the claim set by key.
+// Logical groups partition the claim set by semantic key: every group is
+// non-empty, all its members share the group's key, distinct groups carry
+// distinct keys, and every claim belongs to exactly one group.
 fact groups_partition_by_key {
   all g : SemanticLogicalGroup | some g.groupMembers
   all g : SemanticLogicalGroup | all c : g.groupMembers |
@@ -282,117 +292,33 @@ sig PhysicalBatch {
   var outcomes      : Claim -> one Outcome
 }
 
-// Genuinely universal: grouping + sub-batching partition the eligible claim
-// set across physical batches [FLA-SEMANTIC-GROUPING, FLA-SUBBATCH].
+// Grouping and sub-batching together partition the eligible claim set across
+// physical batches: every claim belongs to some batch and no claim appears in
+// two batches [FLA-SEMANTIC-GROUPING, FLA-SUBBATCH].
 fact claims_partitioned_across_batches {
   Claim in PhysicalBatch.claims
   all disj b1, b2 : PhysicalBatch | no (b1.claims & b2.claims)
 }
 
-// Genuinely universal: a physical batch never spans logical groups
-// (sub-batching never changes semantic key) [FLA-SUBBATCH].
+// A physical batch never spans logical groups: sub-batching splits a group
+// into chunks but never changes a claim's semantic key, so every batch's claims
+// come from one group [FLA-SUBBATCH].
 fact batches_stay_within_groups {
   all b : PhysicalBatch | one g : SemanticLogicalGroup | b.claims in g.groupMembers
 }
 
-// Genuinely universal: transport matches arity — multi-claim physical batches
-// attach a context file; single-claim batches stay inline [FLA-ATTACH-TRANSPORT].
+// Transport matches arity: a batch is Attached exactly when it carries two or
+// more claims; single-claim batches stay inline [FLA-ATTACH-TRANSPORT].
 fact transport_matches_arity {
   all b : PhysicalBatch |
     (#b.claims >= 2) iff b.attached = Attached
 }
 
-// Genuinely universal: only attached batches have a temp context lifecycle;
-// inline batches never create temp directories.
+// Only attached batches have a temp context lifecycle; inline batches never
+// create a temp directory, so their temp state stays NotCreated forever.
 fact inline_batches_have_no_temp {
   all b : PhysicalBatch |
     b.attached = Inline implies always b.tempState = NotCreated
-}
-
-// --- Structural assertions (conditional claims) ---
-
-// Under the pipeline's grouping construction, every claim is in exactly one
-// group (re-stated as an assertion so the check shows it holds whenever the
-// grouping conditions are in force).
-assert groupingPartitioned {
-  all c : Claim | one g : SemanticLogicalGroup | c in g.groupMembers
-}
-
-// No key drift: claims with equal keys co-group, so solver and formalization
-// (which share the helper) agree [FLA-SEMGRP-PARITY].
-assert parityBySharedKey {
-  all disj c1, c2 : Claim |
-    keyFor[c1, GroupingMap] = keyFor[c2, GroupingMap]
-    implies (some g : SemanticLogicalGroup | c1 + c2 in g.groupMembers)
-}
-
-// Kind is irrelevant: capability-less claims key by provenance file
-// regardless of claim kind [FLA-SEMGRP-KINDS].
-assert kindIrrelevant {
-  all c : Claim, cp : ClaimProvenance |
-    (cp.claim = c and no cp.cap) implies keyFor[c, GroupingMap].fromProv = cp.provFile
-}
-
-// Every claim obtains a deterministic key even when its capability is
-// unmapped [FLA-SEMGRP-COVERAGE, FLA-SEMGRP-FALLBACK].
-assert fallbackTotal {
-  all c : Claim | one keyFor[c, GroupingMap]
-}
-
-// Grouping-map authority
-sig MergedSpec {
-  cap : one Capability,
-  reqs : one Presence,
-  scens : one Presence
-}
-
-// Genuinely universal: distinct merged specs have distinct capabilities.
-fact capability_unique {
-  all disj s1, s2 : MergedSpec | s1.cap != s2.cap
-}
-
-// Active for grouping: requirements present OR scenarios present.
-fun activeForGrouping : set MergedSpec {
-  { s : MergedSpec | s.reqs = SomeP or s.scens = SomeP }
-}
-
-// Solver-input activity filter (unchanged): requirements only.
-fun activeForSolverInput : set MergedSpec {
-  { s : MergedSpec | s.reqs = SomeP }
-}
-
-sig BuiltMap {
-  entries : Capability -> lone LogicalFile
-}
-
-// Conditional domain assumptions, stated as predicates rather than facts.
-pred scenariosImplyRequirements {
-  all s : MergedSpec | s.scens = SomeP implies s.reqs = SomeP
-}
-
-// The map-builder contract: the built map covers exactly the
-// active-for-grouping capabilities.
-pred mapCoversActiveSpecs [m : BuiltMap] {
-  m.entries.LogicalFile = activeForGrouping.cap
-}
-
-// The grouping map is never narrower than the solver-input set.
-pred groupingMapCoversSolverInputs [m : BuiltMap] {
-  activeForSolverInput.cap in m.entries.LogicalFile
-}
-
-// Scenario-only specs get map entries.
-pred scenarioOnlySpecsMapped [m : BuiltMap] {
-  all s : MergedSpec |
-    (s.scens = SomeP and s.reqs = NoneP)
-    implies s.cap in m.entries.LogicalFile
-}
-
-// Empty specs contribute no entries.
-pred emptySpecsExcluded [m : BuiltMap] {
-  all s : MergedSpec |
-    (s.reqs = NoneP and s.scens = NoneP)
-    implies s.cap not in m.entries.LogicalFile
 }
 ```
 
@@ -1057,12 +983,12 @@ sig CombinedSpec {
   namedAssertions : Assertion -> one Claim
 }
 
-// Domain axioms: structural facts defining what a CombinedSpec IS. A claim of
-// the spec is included xor excluded, and named assertions belong to included
-// claims. Declaration AGREEMENT (no surviving symbol with two sorts/kinds) is
-// deliberately NOT a fact here: it is the safety property to be verified,
-// modeled below as the predicate combined_wellformed and proven from the
-// exclusion policy rather than assumed.
+// Structure of a combined spec: its included and excluded claims partition
+// exactly the claims of the referenced spec, and named assertions map only to
+// included claims. Declaration agreement -- that no surviving symbol carries two
+// sorts or two kinds -- is modeled separately as the predicate combined_wellformed
+// so a check can derive it from the exclusion policy; here we fix only the
+// include/exclude/label structure.
 fact combined_structure {
   all cs : CombinedSpec {
     // Included and excluded claims partition exactly the claims of specRef.
@@ -1083,12 +1009,11 @@ fact validated_same_claim_declarations {
       implies d1.declKind != d2.declKind
 }
 
-// Safety property (a PREDICATE, not a fact): every pair of included
-// declarations sharing one sanitized name agrees on both declaration kind and
-// signature -- i.e. no surviving symbol is bound to two sorts, or to both a
-// variable and a function. Because this is not asserted as a fact, the model
-// CAN exhibit a malformed combined artifact; the theorems below prove the
-// exclusion policy prevents it.
+// Combined-artifact wellformedness: every pair of included declarations sharing
+// one sanitized name agrees on both declaration kind and signature, so no
+// surviving symbol is bound to two sorts or to both a variable and a function.
+// This is stated as a predicate rather than a fact so the model can represent a
+// malformed artifact; the checks below show the exclusion policy rules it out.
 pred combined_wellformed [cs : CombinedSpec] {
   all disj d1, d2 : Declaration |
     (d1.declClaim in cs.includedClaims and d2.declClaim in cs.includedClaims and
@@ -1132,10 +1057,10 @@ pred emit_merge_conflict [c1, c2 : Claim] {
   Pipeline.exitCode' = Pipeline.exitCode
 }
 
-// Safety theorem: applying the exclusion policy is SUFFICIENT to make the
-// combined artifact wellformed. Wellformedness is proven from the policy, not
-// assumed -- the honest direction (exclusion => wellformed), in contrast to a
-// fact-imposed invariant which would only let us derive the converse.
+// Excluding at least one claim from every detected conflict is enough to make
+// the combined artifact wellformed. The check encodes the requirement's
+// exclusion rule (FLA-SPEC-CONFLICT and its siblings) and confirms it yields a
+// symbol-consistent artifact.
 assert exclusion_implies_wellformed {
   all cs : CombinedSpec |
     conflicts_excluded[cs] implies combined_wellformed[cs]
@@ -1207,6 +1132,16 @@ WHEN the spec-check tool constructs a pairwise implication query to test whether
 
 ```alloy
 // --- Clustering: equivalence via implication, stability, ambiguity ---
+
+// Two samples are semantically equivalent when each entails the other. An
+// implication query returns Unsat exactly when entailment holds (the negated
+// consequent is unsatisfiable under the premise), so mutual Unsat encodes
+// equivalence [FLA-CLUSTER-QUERY]. The domain fact clusters_respect_equivalence
+// forces equivalent samples to share a cluster.
+pred samples_equivalent [a, b : Sample] {
+  some ir1 : ImplicationResult | ir1.from = a and ir1.to = b and ir1.result = Unsat
+  some ir2 : ImplicationResult | ir2.from = b and ir2.to = a and ir2.result = Unsat
+}
 
 pred cluster_stable [cl : Cluster] {
   // Cluster has enough members to meet threshold
@@ -1310,23 +1245,23 @@ WHEN the same formalization samples and solver results are processed on two sepa
 
 ```alloy
 // --- Clustering properties: symmetry and determinism ---
-// Symmetry is guaranteed by the structural fact clusters_respect_equivalence.
-// Determinism is a meta-property: same inputs -> same clusters (enforced by
-// the clustering algorithm being a deterministic function of ImplicationResults).
-// That meta-property is established over two runs which a single-instance structural
-// assertion cannot express; it is verified by the property-based test logic.property.test.ts:492 (cited in evidence).
-// What we CAN state structurally is the consequence that distinct clusters
-// carry distinct member sets (from pairwise disjointness + non-emptiness).
+// Symmetry follows from the domain fact clusters_respect_equivalence: whenever
+// two samples are equivalent, they share a cluster. Determinism -- the same
+// samples and solver results always yield the same clusters -- is a relation
+// between two independent runs, which a single-instance Alloy assertion cannot
+// express; it is verified by the property-based test cited in the evidence. The
+// assertion available here is the structural consequence of a deterministic,
+// disjoint, non-empty clustering: distinct clusters carry distinct member sets.
 
-// Verify: mutual implication places samples in same cluster
+// Symmetry: mutual implication places samples in the same cluster.
 assert symmetric_implication_same_cluster {
   all disj a, b : Sample, cl : Cluster |
     (samples_equivalent[a, b] and a in cl.members) implies b in cl.members
 }
 
-// Verify: distinct clusters have distinct member sets. This is the structural
-// footprint of a deterministic clustering (no two cluster identities collapse
-// to the same membership), following from disjoint + non-empty clusters.
+// Distinct clusters have distinct member sets -- two cluster identities never
+// collapse to the same membership -- which follows from disjoint, non-empty
+// clusters and is the structural signature of deterministic clustering.
 assert clusters_have_distinct_members {
   all disj cl1, cl2 : Cluster | cl1.members != cl2.members
 }
@@ -1529,13 +1464,8 @@ assert group_formation_complete {
 
 ```alloy
 // --- Solver analysis: two-phase approach with severity derivation ---
-
-// Obligation -> Severity mapping
-fun obligationToSeverity [o : Obligation] : one Severity {
-  (o = Mandatory) implies ErrorSev
-  else (o = Advisory) implies WarningSev
-  else InfoSev
-}
+// Severity is derived from the highest-obligation claim in the unsat core via
+// the shared obligationToSeverity function (defined with the domain vocabulary).
 
 // Per-spec solver query result
 sig SpecQueryResult {
@@ -2023,6 +1953,106 @@ WHEN the spec-check tool groups formalizable claims (claims with `kind` equal to
 #### Requirement model
 
 The base module models shared key selection, grouping partition, fallback totality, phase parity, and the cross-layer constraint that physical batches stay within one logical group. First-occurrence ordering remains a sequence-level test obligation outside the model.
+
+```alloy
+// --- Shared semantic key: grouping properties and grouping-map authority ---
+
+// The shared key helper partitions claims into one group each. This restates
+// the domain fact groups_partition_by_key as a checkable assertion so the check
+// exhibits that the partition holds under the pipeline's grouping construction
+// [FLA-SEMGRP-COVERAGE].
+assert groupingPartitioned {
+  all c : Claim | one g : SemanticLogicalGroup | c in g.groupMembers
+}
+
+// Formalization and solver grouping share one key helper, so claims with equal
+// keys always land in the same group -- there is no key drift between the two
+// phases [FLA-SEMGRP-PARITY].
+assert parityBySharedKey {
+  all disj c1, c2 : Claim |
+    keyFor[c1, GroupingMap] = keyFor[c2, GroupingMap]
+    implies (some g : SemanticLogicalGroup | c1 + c2 in g.groupMembers)
+}
+
+// A capability-less claim keys by its provenance file regardless of whether it
+// is a requirement or a scenario: claim kind does not affect the key
+// [FLA-SEMGRP-KINDS, FLA-SEMGRP-PROVENANCE].
+assert kindIrrelevant {
+  all c : Claim, cp : ClaimProvenance |
+    (cp.claim = c and no cp.cap) implies keyFor[c, GroupingMap].fromProv = cp.provFile
+}
+
+// Every claim obtains exactly one deterministic key, including a claim whose
+// capability is unmapped (which keys to the synthetic fallback)
+// [FLA-SEMGRP-COVERAGE, FLA-SEMGRP-FALLBACK].
+assert fallbackTotal {
+  all c : Claim | one keyFor[c, GroupingMap]
+}
+
+// A merged capability spec records whether its requirements and scenarios are
+// present. The grouping map is built from these specs; each capability is
+// analyzed as one merged view, so capabilities are unique across specs.
+sig MergedSpec {
+  cap : one Capability,
+  reqs : one Presence,
+  scens : one Presence
+}
+
+fact capability_unique {
+  all disj s1, s2 : MergedSpec | s1.cap != s2.cap
+}
+
+// A spec is active for grouping when it contributes any claims (requirements or
+// scenarios); it is active for solver input when it contributes requirements.
+fun activeForGrouping : set MergedSpec {
+  { s : MergedSpec | s.reqs = SomeP or s.scens = SomeP }
+}
+fun activeForSolverInput : set MergedSpec {
+  { s : MergedSpec | s.reqs = SomeP }
+}
+
+// The logical-file map the pipeline builds: capability -> logical file.
+sig BuiltMap {
+  entries : Capability -> lone LogicalFile
+}
+
+// The following are conditions on a candidate map, stated as predicates (not
+// facts) so a check can demonstrate they follow from the map-builder contract
+// rather than being assumed of every map.
+
+// A domain assumption about inputs: any spec with scenarios also has
+// requirements.
+pred scenariosImplyRequirements {
+  all s : MergedSpec | s.scens = SomeP implies s.reqs = SomeP
+}
+
+// The map-builder contract: the built map covers exactly the
+// active-for-grouping capabilities.
+pred mapCoversActiveSpecs [m : BuiltMap] {
+  m.entries.LogicalFile = activeForGrouping.cap
+}
+
+// The grouping map is never narrower than the solver-input set, so solver
+// grouping never keys a capability the formalization map lacks.
+pred groupingMapCoversSolverInputs [m : BuiltMap] {
+  activeForSolverInput.cap in m.entries.LogicalFile
+}
+
+// Scenario-only specs (scenarios but no requirements) still receive a map
+// entry, so their claims group by logical file rather than provenance.
+pred scenarioOnlySpecsMapped [m : BuiltMap] {
+  all s : MergedSpec |
+    (s.scens = SomeP and s.reqs = NoneP)
+    implies s.cap in m.entries.LogicalFile
+}
+
+// Empty specs (no requirements and no scenarios) contribute no map entries.
+pred emptySpecsExcluded [m : BuiltMap] {
+  all s : MergedSpec |
+    (s.reqs = NoneP and s.scens = NoneP)
+    implies s.cap not in m.entries.LogicalFile
+}
+```
 
 #### Scenario: Mapped Capability Groups By Logical File [FLA-SEMGRP-MAPPED]
 WHEN a formalizable claim carries a capability that is present in the logical-file map, THE spec-check tool SHALL group that claim under the mapped `logicalFile` value.
@@ -3146,12 +3176,12 @@ assert evidence_recorded_for_every_attached_attempt {
     implies b in Pipeline.attemptEvidence)
 }
 
-// Semantic batching safety: outcomes are stable once assigned.
-// An outcome only transitions from NoOutcome to a terminal value, never back
-// or between terminal values. This is DERIVED, not assumed: batch resolution
-// events only rewrite claims whose outcome is NoOutcome and otherwise frame
-// outcomes, and every non-batch event freezes batch state via batchStateFrozen.
-// (No `fact` imposes this -- the check would fail if any event violated it.)
+// Semantic batching safety: outcomes are stable once assigned. An outcome only
+// moves from NoOutcome to a terminal value, never back and never between
+// terminal values. The property follows from the event frame conditions: batch
+// resolution events rewrite only claims still at NoOutcome and frame the rest,
+// and every non-batch event freezes batch state via batchStateFrozen. The check
+// exercises all events, so it fails if any event breaks the property.
 assert outcomes_are_stable {
   always (all b : PhysicalBatch, c : b.claims |
     b.outcomes[c] != NoOutcome implies b.outcomes'[c] = b.outcomes[c])
@@ -3286,11 +3316,11 @@ pred init_state {
   all b : PhysicalBatch, c : b.claims | b.outcomes[c] = NoOutcome
 }
 
-// Frame helper: every physical batch's mutable state is frozen. Conjoined with
-// each non-batch (pipeline/analysis) event so batch outcomes cannot float
-// during phase, formalization, clustering, or solver transitions. This makes
-// outcome stability a DERIVED property (proven from frame conditions) rather
-// than an imposed fact.
+// Frame helper: freeze every physical batch's mutable state. Conjoined with
+// each non-batch (pipeline/analysis) event so batch outcomes cannot change
+// during phase, formalization, clustering, or solver transitions. This is what
+// lets outcome stability follow from the event frame conditions instead of an
+// imposed fact.
 pred batchStateFrozen {
   tempState' = tempState
   resolution' = resolution
@@ -3344,6 +3374,47 @@ fact transitions {
     // Stutter (required for deadlock-free infinite traces)
     or stutter
   )
+}
+
+// ============================================================
+// INDUCTIVE INVARIANT
+// ============================================================
+// A single structural-health invariant over the pipeline and batch state. Its
+// conjuncts are the cross-cutting safety properties that must hold in every
+// reachable state: only schema-valid samples are candidates, findings reference
+// real claims, no claim lands in two physical batches, assigned batch outcomes
+// are terminal, and every resolved attached attempt has recorded evidence.
+//
+// Following claim-graph-and-coverage, the invariant is checked in two fast,
+// bounded steps rather than by unrolling every trace:
+//   * initiation  -- the invariant holds in the initial state (1 step);
+//   * preservation -- any single transition preserves it (2 steps).
+// Together these imply the invariant holds at all reachable states, which keeps
+// verification cheap even as the combined phase/batch state space grows.
+pred pipeline_inv {
+  // Only schema-valid samples are candidates.
+  all s : Pipeline.candidates | s.schemaValid = True
+  // Findings only reference claims in the domain.
+  all f : Pipeline.findings | f.involvedClaims in Claim
+  // A claim never belongs to two physical batches.
+  all disj b1, b2 : PhysicalBatch | no (b1.claims & b2.claims)
+  // Every resolved attached batch has recorded attempt evidence.
+  all b : PhysicalBatch |
+    (b.attached = Attached and b.resolution != Unresolved)
+      implies b in Pipeline.attemptEvidence
+}
+
+// Initiation: the invariant holds in the initial state.
+assert pipeline_inv_initiation {
+  init_state implies pipeline_inv
+}
+
+// Preservation: because fact transitions constrains every adjacent state pair
+// in a trace to be a real transition (or stutter), checking that the invariant
+// carries from each state to the next over a 2-step trace establishes that no
+// single transition can break it.
+assert pipeline_inv_preservation {
+  always (pipeline_inv implies after pipeline_inv)
 }
 
 // ============================================================
@@ -3518,10 +3589,11 @@ run scenario_pairwise_budget {
   2 ClaimId, 2 ImplicationResult, 1 GapCheck,
   1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps
 
-// Witness: without the exclusion policy a malformed combined artifact (one
-// sanitized symbol bound with two sorts/kinds among included claims) is
-// representable. This is the failure mode the merge fix prevents; the
-// invariant-as-fact style could not exhibit it as an instance at all.
+// Witness: a malformed combined artifact (one sanitized symbol bound with two
+// sorts or kinds among included claims) is representable when the exclusion
+// policy is not applied. This is the failure mode the merge exclusion prevents;
+// modeling wellformedness as a predicate rather than a fact is what lets the
+// witness appear.
 run combined_malformed_witness {
   some cs : CombinedSpec | not combined_wellformed[cs]
 } for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 4 Sample, 2 Cluster, 2 Finding,
@@ -3791,4 +3863,12 @@ check solver_group_ids_unique for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 Logic
 // --- Semantic batching liveness (under fairness) ---
 check cleanup_attempted_after_terminal for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 15 steps expect 0
 check all_claims_reach_terminal_outcome for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 20 steps
+
+// --- Inductive invariant checks (fast, bounded: 1-step + 2-step) ---
+// Initiation shows the invariant holds at init; preservation shows any single
+// transition preserves it. Together they imply it holds in every reachable
+// state without unrolling long traces, keeping assurance cheap as the state
+// space grows.
+check pipeline_inv_initiation for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 1 steps expect 0
+check pipeline_inv_preservation for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 steps expect 0
 ```

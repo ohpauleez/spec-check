@@ -1300,132 +1300,6 @@ IF the solver emits error diagnostics (such as `(error ...)` lines in stdout) in
 - Implementation: [logic-analysis.ts:380 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L380)
 - Test: [logic-analysis.test.ts:318 solver error produces logic.solver_error finding](/test/contract/logic-analysis.test.ts#L318)
 
-### Requirement: Group Specs-Forward Logic By Merged Capability [FLA-GROUP-MERGED]
-WHEN the spec-check tool prepares specs-forward logical analysis, THE spec-check tool SHALL group spec-derived claims by merged capability identity rather than by raw source-spec file path, SHALL use the merged capability `logicalFile` as the artifact-naming and report-grouping key, SHALL exclude non-spec claims from this capability-grouped logic path, and SHALL derive grouping keys from the same shared semantic key helper that formalization grouping uses.
-
-**References:**
-- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Postconditions`
-- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Provenance And Grouping Contract`
-- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Verification Strategy`
-- `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Scope`
-- `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Interface Contracts`
-
-#### Scenario: One Logic Group Per Merged Capability [FLA-GROUP-ONE]
-WHEN one capability has finalized-plus-delta inputs that merge into one active capability view, THE spec-check tool SHALL produce exactly one specs-forward logical-analysis group for that capability.
-
-**Postcondition:** Base and delta files for the same capability are no longer analyzed as separate solver groups.
-
-##### Evidence
-- Implementation: [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345)
-- Test: [pipeline-helpers.test.ts:77 produces one logic group per non-empty merged capability with no omissions](/test/contract/pipeline-helpers.test.ts#L77), [merge-logic-routing.test.ts:35 runs one logic group per merged capability and detects contradictions in one run](/test/contract/merge-logic-routing.test.ts#L35)
-
-#### Scenario: Synthetic Logical Key Drives Artifact Naming [FLA-GROUP-LOGICAL]
-WHEN the spec-check tool persists solver artifacts or reports for a merged capability logic group, THE spec-check tool SHALL derive those artifact names from the merged capability `logicalFile` key rather than from the original base or delta source file paths.
-
-**Postcondition:** Capability-scoped logic artifacts align with merged capability semantics while original claim provenance remains unchanged.
-
-##### Evidence
-- Implementation: [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345), [pipeline-helpers.ts:403 sanitizeLogicalFileForArtifacts()](/src/cli/pipeline-helpers.ts#L403), [logic-analysis.ts:414 artifactBase computation in analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L414)
-- Test: [pipeline-helpers.test.ts:126 groups by Claim.capability instead of provenance.file](/test/contract/pipeline-helpers.test.ts#L126), [merge-logic-routing.test.ts:57 writes logic artifacts under synthetic merged logicalFile artifact key](/test/contract/merge-logic-routing.test.ts#L57)
-
-#### Scenario: Sanitized Logical Key Collision Aborts Pipeline [FLA-GROUP-COLLISION]
-IF two merged capability logical keys would sanitize to the same artifact-path key, THEN THE spec-check tool SHALL abort the pipeline before writing any logic artifacts.
-
-**Postcondition:** Persisted solver evidence remains deterministic and collision-free.
-
-##### Evidence
-- Implementation: [pipeline-helpers.ts:386 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L386), [pipeline-helpers.ts:403 sanitizeLogicalFileForArtifacts()](/src/cli/pipeline-helpers.ts#L403)
-- Test: [pipeline-helpers.test.ts:150 fails on sanitized logicalFile collisions](/test/contract/pipeline-helpers.test.ts#L150)
-
-#### Scenario: Solver Grouping Uses Shared Key Helper [FLA-GROUP-SHARED]
-WHEN the spec-check tool groups claims for solver analysis, THE solver grouping path SHALL call the shared semantic key helper and SHALL NOT duplicate capability fallback logic locally.
-
-**Postcondition:** Any solver-specific filtering happens before grouping and is documented independently of the key function.
-
-##### Evidence
-- Implementation: [pipeline-helpers.ts:356 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L356), [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185)
-- Test: [safety-liveness.invariant.test.ts:177 LIVE-11: if opencode responds with valid output, formalization completes](/test/invariant/safety-liveness.invariant.test.ts#L177)
-- Test (property): [semantic-batching.property.test.ts:179 matches solver grouping after the same explicit filtering](/test/property/semantic-batching.property.test.ts#L179)
-
-#### Requirement model
-
-```alloy
-// --- Merged capability grouping: logical keys and collision detection ---
-
-sig LogicalKey {
-  sanitizedForm : one LogicalKey    // self-referencing: the sanitized version
-}
-
-sig LogicalGroup {
-  groupCap : one Spec,              // the merged capability this group represents
-  logicalKey : one LogicalKey,      // derived from merged capability identity
-  groupClaims : set Claim           // claims in this group (spec-derived only)
-}
-
-// Invariant: one logic group per merged capability [FLA-GROUP-ONE]
-fact one_group_per_capability {
-  all disj lg1, lg2 : LogicalGroup | lg1.groupCap != lg2.groupCap
-}
-
-// Invariant: groups only contain claims from their capability
-fact group_claims_from_capability {
-  all lg : LogicalGroup | lg.groupClaims in { c : Claim | c.spec = lg.groupCap }
-}
-
-// Invariant: non-spec claims excluded from capability-grouped logic path
-fact non_spec_excluded {
-  all lg : LogicalGroup, c : lg.groupClaims | c.spec = lg.groupCap
-}
-
-// Invariant: logical key drives artifact naming (not source file)
-fact logical_key_drives_naming {
-  all lg : LogicalGroup | some lg.logicalKey.sanitizedForm
-}
-
-// Collision predicate: two groups sanitize to same key [FLA-GROUP-COLLISION]
-pred logical_key_collision {
-  some disj lg1, lg2 : LogicalGroup |
-    lg1.logicalKey.sanitizedForm = lg2.logicalKey.sanitizedForm
-}
-
-// Failure mode: collision aborts pipeline before writing artifacts
-pred collision_aborts_pipeline {
-  Pipeline.phase = CompilationPh
-  logical_key_collision
-  // Effect: abort immediately
-  Pipeline.phase' = AbortedPh
-  Pipeline.exitCode' = 2
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-}
-
-// Safety: collision always aborts (never silently overwrites)
-assert collision_implies_abort {
-  always (collision_aborts_pipeline implies Pipeline.phase' = AbortedPh)
-}
-
-// Safety: without collision, compilation phase does not abort from this path
-assert no_collision_no_grouping_abort {
-  always (
-    (Pipeline.phase = CompilationPh and not logical_key_collision)
-    implies not collision_aborts_pipeline)
-}
-
-// Safety: during compilation without a key collision, each merged capability
-// is represented by at most one logic group (the structural footprint of
-// "exactly one group per capability" from fact one_group_per_capability).
-// The eventual FORMATION of that group is the liveness property stated below
-// as merged_cap_group_formation; this assertion is its safety counterpart.
-assert group_formation_complete {
-  always (
-    (Pipeline.phase = CompilationPh and not logical_key_collision)
-    implies (all sp : Spec | lone { lg : LogicalGroup | lg.groupCap = sp }))
-}
-```
-
 #### Requirement model
 
 ```alloy
@@ -1560,6 +1434,132 @@ assert solver_error_surfaced {
     solver_error_found[sqr] implies
       some f : Pipeline.findings' - Pipeline.findings |
         f.findingType = SolverErrType and f.severity = ErrorSev)
+}
+```
+
+### Requirement: Group Specs-Forward Logic By Merged Capability [FLA-GROUP-MERGED]
+WHEN the spec-check tool prepares specs-forward logical analysis, THE spec-check tool SHALL group spec-derived claims by merged capability identity rather than by raw source-spec file path, SHALL use the merged capability `logicalFile` as the artifact-naming and report-grouping key, SHALL exclude non-spec claims from this capability-grouped logic path, and SHALL derive grouping keys from the same shared semantic key helper that formalization grouping uses.
+
+**References:**
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Postconditions`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Provenance And Grouping Contract`
+- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Verification Strategy`
+- `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Scope`
+- `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Interface Contracts`
+
+#### Scenario: One Logic Group Per Merged Capability [FLA-GROUP-ONE]
+WHEN one capability has finalized-plus-delta inputs that merge into one active capability view, THE spec-check tool SHALL produce exactly one specs-forward logical-analysis group for that capability.
+
+**Postcondition:** Base and delta files for the same capability are no longer analyzed as separate solver groups.
+
+##### Evidence
+- Implementation: [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345)
+- Test: [pipeline-helpers.test.ts:77 produces one logic group per non-empty merged capability with no omissions](/test/contract/pipeline-helpers.test.ts#L77), [merge-logic-routing.test.ts:35 runs one logic group per merged capability and detects contradictions in one run](/test/contract/merge-logic-routing.test.ts#L35)
+
+#### Scenario: Synthetic Logical Key Drives Artifact Naming [FLA-GROUP-LOGICAL]
+WHEN the spec-check tool persists solver artifacts or reports for a merged capability logic group, THE spec-check tool SHALL derive those artifact names from the merged capability `logicalFile` key rather than from the original base or delta source file paths.
+
+**Postcondition:** Capability-scoped logic artifacts align with merged capability semantics while original claim provenance remains unchanged.
+
+##### Evidence
+- Implementation: [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345), [pipeline-helpers.ts:403 sanitizeLogicalFileForArtifacts()](/src/cli/pipeline-helpers.ts#L403), [logic-analysis.ts:414 artifactBase computation in analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L414)
+- Test: [pipeline-helpers.test.ts:126 groups by Claim.capability instead of provenance.file](/test/contract/pipeline-helpers.test.ts#L126), [merge-logic-routing.test.ts:57 writes logic artifacts under synthetic merged logicalFile artifact key](/test/contract/merge-logic-routing.test.ts#L57)
+
+#### Scenario: Sanitized Logical Key Collision Aborts Pipeline [FLA-GROUP-COLLISION]
+IF two merged capability logical keys would sanitize to the same artifact-path key, THEN THE spec-check tool SHALL abort the pipeline before writing any logic artifacts.
+
+**Postcondition:** Persisted solver evidence remains deterministic and collision-free.
+
+##### Evidence
+- Implementation: [pipeline-helpers.ts:386 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L386), [pipeline-helpers.ts:403 sanitizeLogicalFileForArtifacts()](/src/cli/pipeline-helpers.ts#L403)
+- Test: [pipeline-helpers.test.ts:150 fails on sanitized logicalFile collisions](/test/contract/pipeline-helpers.test.ts#L150)
+
+#### Scenario: Solver Grouping Uses Shared Key Helper [FLA-GROUP-SHARED]
+WHEN the spec-check tool groups claims for solver analysis, THE solver grouping path SHALL call the shared semantic key helper and SHALL NOT duplicate capability fallback logic locally.
+
+**Postcondition:** Any solver-specific filtering happens before grouping and is documented independently of the key function.
+
+##### Evidence
+- Implementation: [pipeline-helpers.ts:356 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L356), [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185)
+- Test: [safety-liveness.invariant.test.ts:177 LIVE-11: if opencode responds with valid output, formalization completes](/test/invariant/safety-liveness.invariant.test.ts#L177)
+- Test (property): [semantic-batching.property.test.ts:179 matches solver grouping after the same explicit filtering](/test/property/semantic-batching.property.test.ts#L179)
+
+#### Requirement model
+
+```alloy
+// --- Merged capability grouping: logical keys and collision detection ---
+
+sig LogicalKey {
+  sanitizedForm : one LogicalKey    // self-referencing: the sanitized version
+}
+
+sig LogicalGroup {
+  groupCap : one Spec,              // the merged capability this group represents
+  logicalKey : one LogicalKey,      // derived from merged capability identity
+  groupClaims : set Claim           // claims in this group (spec-derived only)
+}
+
+// Invariant: one logic group per merged capability [FLA-GROUP-ONE]
+fact one_group_per_capability {
+  all disj lg1, lg2 : LogicalGroup | lg1.groupCap != lg2.groupCap
+}
+
+// Invariant: groups only contain claims from their capability
+fact group_claims_from_capability {
+  all lg : LogicalGroup | lg.groupClaims in { c : Claim | c.spec = lg.groupCap }
+}
+
+// Invariant: non-spec claims excluded from capability-grouped logic path
+fact non_spec_excluded {
+  all lg : LogicalGroup, c : lg.groupClaims | c.spec = lg.groupCap
+}
+
+// Invariant: logical key drives artifact naming (not source file)
+fact logical_key_drives_naming {
+  all lg : LogicalGroup | some lg.logicalKey.sanitizedForm
+}
+
+// Collision predicate: two groups sanitize to same key [FLA-GROUP-COLLISION]
+pred logical_key_collision {
+  some disj lg1, lg2 : LogicalGroup |
+    lg1.logicalKey.sanitizedForm = lg2.logicalKey.sanitizedForm
+}
+
+// Failure mode: collision aborts pipeline before writing artifacts
+pred collision_aborts_pipeline {
+  Pipeline.phase = CompilationPh
+  logical_key_collision
+  // Effect: abort immediately
+  Pipeline.phase' = AbortedPh
+  Pipeline.exitCode' = 2
+  Pipeline.candidates' = Pipeline.candidates
+  Pipeline.representatives' = Pipeline.representatives
+  Pipeline.findings' = Pipeline.findings
+  Pipeline.evidence' = Pipeline.evidence
+  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
+}
+
+// Safety: collision always aborts (never silently overwrites)
+assert collision_implies_abort {
+  always (collision_aborts_pipeline implies Pipeline.phase' = AbortedPh)
+}
+
+// Safety: without collision, compilation phase does not abort from this path
+assert no_collision_no_grouping_abort {
+  always (
+    (Pipeline.phase = CompilationPh and not logical_key_collision)
+    implies not collision_aborts_pipeline)
+}
+
+// Safety: during compilation without a key collision, each merged capability
+// is represented by at most one logic group (the structural footprint of
+// "exactly one group per capability" from fact one_group_per_capability).
+// The eventual FORMATION of that group is the liveness property stated below
+// as merged_cap_group_formation; this assertion is its safety counterpart.
+assert group_formation_complete {
+  always (
+    (Pipeline.phase = CompilationPh and not logical_key_collision)
+    implies (all sp : Spec | lone { lg : LogicalGroup | lg.groupCap = sp }))
 }
 ```
 
@@ -1916,6 +1916,79 @@ WHEN the spec-check tool groups formalizable claims (claims with `kind` equal to
 - `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Interface Contracts`
 
+#### Scenario: Mapped Capability Groups By Logical File [FLA-SEMGRP-MAPPED]
+WHEN a formalizable claim carries a capability that is present in the logical-file map, THE spec-check tool SHALL group that claim under the mapped `logicalFile` value.
+
+**Postcondition:** The claim's semantic key equals the mapped `logicalFile` string exactly.
+
+##### Evidence
+- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
+- Test: [semantic-grouping.test.ts:112 selects mapped, provenance, and synthetic fallback keys exactly](/test/contract/semantic-grouping.test.ts#L112)
+
+#### Scenario: Capability-Less Claim Groups By Provenance File [FLA-SEMGRP-PROVENANCE]
+WHEN a formalizable claim has no capability, THE spec-check tool SHALL group that claim under its `claim.provenance.file` string, stored verbatim without normalization or resolution.
+
+**Postcondition:** The claim's semantic key equals its provenance file string exactly.
+
+##### Evidence
+- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
+- Test: [semantic-grouping.test.ts:112 selects mapped, provenance, and synthetic fallback keys exactly](/test/contract/semantic-grouping.test.ts#L112)
+
+#### Scenario: Unmapped Capability Uses Synthetic Fallback [FLA-SEMGRP-FALLBACK]
+WHEN a formalizable claim carries a capability that is absent from the logical-file map (including when the map is empty), THE spec-check tool SHALL group that claim under the synthetic key `<merged-spec/{capability}>`.
+
+**Postcondition:** Capability-bearing claims never fall back to provenance-file grouping merely because the map lacks an entry.
+
+##### Evidence
+- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
+- Test: [semantic-grouping.test.ts:112 selects mapped, provenance, and synthetic fallback keys exactly](/test/contract/semantic-grouping.test.ts#L112)
+
+#### Scenario: Historical File Grouping Is Emergent Only [FLA-SEMGRP-EMERGENT]
+WHEN the semantic keys of the input claims equal their provenance files, THE spec-check tool SHALL produce groups identical to historical file grouping as an emergent outcome, and SHALL NOT provide file grouping as a selectable mode.
+
+**Postcondition:** There is exactly one production grouping path; legacy-style grouping is an output equivalence, not a configuration.
+
+##### Evidence
+- Implementation: [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
+- Test (property): [semantic-batching.property.test.ts:207 equals historical file grouping when semantic keys equal provenance files](/test/property/semantic-batching.property.test.ts#L207)
+
+#### Scenario: Requirements And Scenarios Share Grouping Semantics [FLA-SEMGRP-KINDS]
+WHEN a logical group contains both requirement claims and scenario claims, THE spec-check tool SHALL compute their semantic keys with the same shared key helper and SHALL place them in the same logical group when their keys are equal.
+
+**Postcondition:** Requirement and scenario claims with equal semantic keys are never split into separate logical groups by kind.
+
+##### Evidence
+- Implementation: [grouping.ts:208 isFormalizableClaim()](/src/domain/formal/grouping.ts#L208), [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
+- Test (integration): [semantic-batching.integration.test.ts:173 aligns merged grouping, provenance, bounds, prompt, cleanup, and evidence](/test/integration/semantic-batching.integration.test.ts#L173)
+
+#### Scenario: Grouping Map Covers All Eligible Capabilities [FLA-SEMGRP-COVERAGE]
+WHEN the grouping map is constructed from active merged specs and an eligible claim carries a capability, THE map SHALL contain an entry for that capability, or the claim SHALL receive the synthetic fallback key `<merged-spec/{capability}>`.
+
+**Postcondition:** No capability-bearing claim ever fails to obtain a deterministic semantic key.
+
+##### Evidence
+- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [grouping.ts:136 buildLogicalFileByCapability()](/src/domain/formal/grouping.ts#L136), [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185)
+- Test: [semantic-grouping.test.ts:112 selects mapped, provenance, and synthetic fallback keys exactly](/test/contract/semantic-grouping.test.ts#L112)
+
+#### Scenario: Solver And Formalization Grouping Parity [FLA-SEMGRP-PARITY]
+WHEN solver grouping and formalization grouping process the same claims after the same explicit pre-grouping filtering, THE spec-check tool SHALL produce the same semantic key for the same claim inputs in both phases.
+
+**Postcondition:** No key drift exists between formalization groups and solver groups.
+
+##### Evidence
+- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224), [pipeline-helpers.ts:356 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L356)
+- Test (property): [semantic-batching.property.test.ts:179 matches solver grouping after the same explicit filtering](/test/property/semantic-batching.property.test.ts#L179)
+- Test (integration): [semantic-batching.integration.test.ts:173 aligns merged grouping, provenance, bounds, prompt, cleanup, and evidence](/test/integration/semantic-batching.integration.test.ts#L173)
+
+#### Scenario: Deterministic Group And Claim Ordering [FLA-SEMGRP-ORDER]
+WHEN the spec-check tool forms logical groups, THE groups SHALL be ordered by first occurrence of each semantic key in eligible-claim order, and the claims inside each group SHALL preserve eligible input order.
+
+**Postcondition:** Identical eligible inputs always produce identically ordered groups and group members.
+
+##### Evidence
+- Implementation: [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
+- Test (property): [semantic-batching.property.test.ts:155 groups every eligible claim exactly once in stable order](/test/property/semantic-batching.property.test.ts#L155), [semantic-batching.property.test.ts:340 repeats groups, chunks, context bytes, and hashes identically](/test/property/semantic-batching.property.test.ts#L340)
+
 #### Requirement model
 
 ```alloy
@@ -2018,116 +2091,12 @@ pred emptySpecsExcluded [m : BuiltMap] {
 }
 ```
 
-#### Scenario: Mapped Capability Groups By Logical File [FLA-SEMGRP-MAPPED]
-WHEN a formalizable claim carries a capability that is present in the logical-file map, THE spec-check tool SHALL group that claim under the mapped `logicalFile` value.
-
-**Postcondition:** The claim's semantic key equals the mapped `logicalFile` string exactly.
-
-##### Evidence
-- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
-- Test: [semantic-grouping.test.ts:112 selects mapped, provenance, and synthetic fallback keys exactly](/test/contract/semantic-grouping.test.ts#L112)
-
-#### Scenario: Capability-Less Claim Groups By Provenance File [FLA-SEMGRP-PROVENANCE]
-WHEN a formalizable claim has no capability, THE spec-check tool SHALL group that claim under its `claim.provenance.file` string, stored verbatim without normalization or resolution.
-
-**Postcondition:** The claim's semantic key equals its provenance file string exactly.
-
-##### Evidence
-- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
-- Test: [semantic-grouping.test.ts:112 selects mapped, provenance, and synthetic fallback keys exactly](/test/contract/semantic-grouping.test.ts#L112)
-
-#### Scenario: Unmapped Capability Uses Synthetic Fallback [FLA-SEMGRP-FALLBACK]
-WHEN a formalizable claim carries a capability that is absent from the logical-file map (including when the map is empty), THE spec-check tool SHALL group that claim under the synthetic key `<merged-spec/{capability}>`.
-
-**Postcondition:** Capability-bearing claims never fall back to provenance-file grouping merely because the map lacks an entry.
-
-##### Evidence
-- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
-- Test: [semantic-grouping.test.ts:112 selects mapped, provenance, and synthetic fallback keys exactly](/test/contract/semantic-grouping.test.ts#L112)
-
-#### Scenario: Historical File Grouping Is Emergent Only [FLA-SEMGRP-EMERGENT]
-WHEN the semantic keys of the input claims equal their provenance files, THE spec-check tool SHALL produce groups identical to historical file grouping as an emergent outcome, and SHALL NOT provide file grouping as a selectable mode.
-
-**Postcondition:** There is exactly one production grouping path; legacy-style grouping is an output equivalence, not a configuration.
-
-##### Evidence
-- Implementation: [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
-- Test (property): [semantic-batching.property.test.ts:207 equals historical file grouping when semantic keys equal provenance files](/test/property/semantic-batching.property.test.ts#L207)
-
-#### Scenario: Requirements And Scenarios Share Grouping Semantics [FLA-SEMGRP-KINDS]
-WHEN a logical group contains both requirement claims and scenario claims, THE spec-check tool SHALL compute their semantic keys with the same shared key helper and SHALL place them in the same logical group when their keys are equal.
-
-**Postcondition:** Requirement and scenario claims with equal semantic keys are never split into separate logical groups by kind.
-
-##### Evidence
-- Implementation: [grouping.ts:208 isFormalizableClaim()](/src/domain/formal/grouping.ts#L208), [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
-- Test (integration): [semantic-batching.integration.test.ts:173 aligns merged grouping, provenance, bounds, prompt, cleanup, and evidence](/test/integration/semantic-batching.integration.test.ts#L173)
-
-#### Scenario: Grouping Map Covers All Eligible Capabilities [FLA-SEMGRP-COVERAGE]
-WHEN the grouping map is constructed from active merged specs and an eligible claim carries a capability, THE map SHALL contain an entry for that capability, or the claim SHALL receive the synthetic fallback key `<merged-spec/{capability}>`.
-
-**Postcondition:** No capability-bearing claim ever fails to obtain a deterministic semantic key.
-
-##### Evidence
-- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [grouping.ts:136 buildLogicalFileByCapability()](/src/domain/formal/grouping.ts#L136), [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185)
-- Test: [semantic-grouping.test.ts:112 selects mapped, provenance, and synthetic fallback keys exactly](/test/contract/semantic-grouping.test.ts#L112)
-
-#### Scenario: Solver And Formalization Grouping Parity [FLA-SEMGRP-PARITY]
-WHEN solver grouping and formalization grouping process the same claims after the same explicit pre-grouping filtering, THE spec-check tool SHALL produce the same semantic key for the same claim inputs in both phases.
-
-**Postcondition:** No key drift exists between formalization groups and solver groups.
-
-##### Evidence
-- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224), [pipeline-helpers.ts:356 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L356)
-- Test (property): [semantic-batching.property.test.ts:179 matches solver grouping after the same explicit filtering](/test/property/semantic-batching.property.test.ts#L179)
-- Test (integration): [semantic-batching.integration.test.ts:173 aligns merged grouping, provenance, bounds, prompt, cleanup, and evidence](/test/integration/semantic-batching.integration.test.ts#L173)
-
-#### Scenario: Deterministic Group And Claim Ordering [FLA-SEMGRP-ORDER]
-WHEN the spec-check tool forms logical groups, THE groups SHALL be ordered by first occurrence of each semantic key in eligible-claim order, and the claims inside each group SHALL preserve eligible input order.
-
-**Postcondition:** Identical eligible inputs always produce identically ordered groups and group members.
-
-##### Evidence
-- Implementation: [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
-- Test (property): [semantic-batching.property.test.ts:155 groups every eligible claim exactly once in stable order](/test/property/semantic-batching.property.test.ts#L155), [semantic-batching.property.test.ts:340 repeats groups, chunks, context bytes, and hashes identically](/test/property/semantic-batching.property.test.ts#L340)
-
 ### Requirement: Deterministic Physical Sub-Batching [FLA-SUBBATCH]
 WHILE `maxBatchSize` is resolved from `--max-batch-size`, the config file `maxBatchSize`, or the built-in default of `32`, WHEN the spec-check tool forms first-sample physical batches from one logical group, THE spec-check tool SHALL split the group by pure, deterministic, stable slicing such that `maxBatchSize` of `0` yields exactly one physical batch per logical group regardless of group size (unbounded), `maxBatchSize` of `1` yields single-claim inline batches, and `maxBatchSize` greater than `1` yields chunks of size at most `maxBatchSize`, and sub-batching SHALL never change a claim's semantic key. The default of `32` bounds each attached `formalizations` response below the model output-token threshold that otherwise truncates the JSON into `invalid_json` and forces a full per-claim inline fallback.
 
 **References:**
 - `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Scope`
 - `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Component Design`
-
-#### Requirement model
-
-```alloy
-// --- Deterministic physical sub-batching: claim partition within one group ---
-// Sub-batching slices a logical group into physical batches. The two facts
-// below capture the invariants the slicing must preserve, independent of the
-// numeric chunk bounds (which are a pure-function test obligation): every
-// eligible claim lands in exactly one physical batch, and a batch never spans
-// logical groups because slicing never changes a claim's semantic key.
-
-// Grouping plus sub-batching partition the eligible claim set across physical
-// batches: every claim belongs to some batch and no claim appears in two
-// [FLA-SEMANTIC-GROUPING, FLA-SUBBATCH].
-fact claims_partitioned_across_batches {
-  Claim in PhysicalBatch.claims
-  all disj b1, b2 : PhysicalBatch | no (b1.claims & b2.claims)
-}
-
-// A physical batch never spans logical groups [FLA-SUBBATCH].
-fact batches_stay_within_groups {
-  all b : PhysicalBatch | one g : SemanticLogicalGroup | b.claims in g.groupMembers
-}
-
-// A batch's claims all share one semantic key, so sub-batching preserves the
-// grouping key of every claim it slices.
-assert batches_within_one_group {
-  all b : PhysicalBatch, disj c1, c2 : b.claims |
-    keyFor[c1, GroupingMap] = keyFor[c2, GroupingMap]
-}
-```
 
 #### Scenario: Explicit Zero Disables Splitting [FLA-SUBBATCH-ZERO]
 WHEN `maxBatchSize` is `0` (an explicit opt-in, not the default), THE spec-check tool SHALL issue exactly one first-sample physical batch per logical group regardless of how many claims the group contains.
@@ -2176,45 +2145,43 @@ IF `maxBatchSize`, `samplesPerClaim`, or `concurrency` is not a safe integer wit
 - Implementation: [formalize.ts:202 validateControls()](/src/domain/formal/formalize.ts#L202), [grouping.ts:283 splitPhysicalBatches()](/src/domain/formal/grouping.ts#L283)
 - Test: [formalize.test.ts:265 validates controls and logical-file map values before effects](/test/contract/formalize.test.ts#L265), [semantic-batching-failures.test.ts:215 rejects %s=%s before adapter, filesystem, or worker effects](/test/contract/semantic-batching-failures.test.ts#L215), [semantic-grouping.test.ts:157 rejects invalid direct-call batch bounds instead of risking non-termination](/test/contract/semantic-grouping.test.ts#L157)
 
+#### Requirement model
+
+```alloy
+// --- Deterministic physical sub-batching: claim partition within one group ---
+// Sub-batching slices a logical group into physical batches. The two facts
+// below capture the invariants the slicing must preserve, independent of the
+// numeric chunk bounds (which are a pure-function test obligation): every
+// eligible claim lands in exactly one physical batch, and a batch never spans
+// logical groups because slicing never changes a claim's semantic key.
+
+// Grouping plus sub-batching partition the eligible claim set across physical
+// batches: every claim belongs to some batch and no claim appears in two
+// [FLA-SEMANTIC-GROUPING, FLA-SUBBATCH].
+fact claims_partitioned_across_batches {
+  Claim in PhysicalBatch.claims
+  all disj b1, b2 : PhysicalBatch | no (b1.claims & b2.claims)
+}
+
+// A physical batch never spans logical groups [FLA-SUBBATCH].
+fact batches_stay_within_groups {
+  all b : PhysicalBatch | one g : SemanticLogicalGroup | b.claims in g.groupMembers
+}
+
+// A batch's claims all share one semantic key, so sub-batching preserves the
+// grouping key of every claim it slices.
+assert batches_within_one_group {
+  all b : PhysicalBatch, disj c1, c2 : b.claims |
+    keyFor[c1, GroupingMap] = keyFor[c2, GroupingMap]
+}
+```
+
 ### Requirement: File-Attached Batch Context Transport [FLA-ATTACH-TRANSPORT]
 WHEN a first-sample physical batch contains two or more claims, THE spec-check tool SHALL attach a deterministic JSON context file to the LLM invocation instead of embedding claim bodies in the prompt, and WHEN a first-sample attempt contains exactly one claim, THE spec-check tool SHALL use the inline prompt path. The context file SHALL be schema version 1 with fields `schemaVersion`, `batchKey`, and an ordered `claims` array of `{ index, id, obligation, provenance: { file }, text }`, SHALL serialize with `JSON.stringify(value, null, 2)` as UTF-8 without BOM with LF newlines and exactly one trailing newline, SHALL represent a missing claim ID as `null` while permitting duplicate IDs, and SHALL store provenance path strings verbatim.
 
 **References:**
 - `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Domain Model`
 - `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Data Design`
-
-#### Requirement model
-
-```alloy
-// --- File-attached batch context transport: arity determines transport ---
-// Transport is a pure function of batch arity: a physical batch attaches a
-// context file exactly when it carries two or more claims, and a single-claim
-// batch stays inline. JSON shape and byte serialization are contract-test
-// obligations outside the model. Because only attached batches write a temp
-// context file, an inline batch has no temp-directory lifecycle at all.
-
-// A batch is Attached exactly when it carries two or more claims
-// [FLA-ATTACH-TRANSPORT].
-fact transport_matches_arity {
-  all b : PhysicalBatch |
-    (#b.claims >= 2) iff b.attached = Attached
-}
-
-// Inline batches never create a temp directory, so their temp state stays
-// NotCreated forever [FLA-ATTACH-SINGLE].
-fact inline_batches_have_no_temp {
-  all b : PhysicalBatch |
-    b.attached = Inline implies always b.tempState = NotCreated
-}
-
-// A single-claim batch is always inline; a multi-claim batch is always
-// attached. Restates the arity invariant from the scenario's viewpoint.
-assert single_claim_batches_are_inline {
-  all b : PhysicalBatch |
-    (one b.claims implies b.attached = Inline) and
-    (#b.claims >= 2 implies b.attached = Attached)
-}
-```
 
 #### Scenario: Multi-Claim Batch Uses Attachment [FLA-ATTACH-MULTI]
 WHEN a first-sample physical batch contains two or more claims, THE spec-check tool SHALL write the batch context JSON to a temp file and SHALL attach that file to the LLM invocation.
@@ -2254,6 +2221,39 @@ WHEN an attached claim has no `claim.id`, THE spec-check tool SHALL serialize it
 ##### Evidence
 - Implementation: [batch-transport.ts:219 buildBatchContextFile()](/src/domain/formal/batch-transport.ts#L219)
 - Test: [semantic-batching.test.ts:128 serializes deterministic UTF-8 context bytes with null IDs and verbatim paths](/test/contract/semantic-batching.test.ts#L128)
+
+#### Requirement model
+
+```alloy
+// --- File-attached batch context transport: arity determines transport ---
+// Transport is a pure function of batch arity: a physical batch attaches a
+// context file exactly when it carries two or more claims, and a single-claim
+// batch stays inline. JSON shape and byte serialization are contract-test
+// obligations outside the model. Because only attached batches write a temp
+// context file, an inline batch has no temp-directory lifecycle at all.
+
+// A batch is Attached exactly when it carries two or more claims
+// [FLA-ATTACH-TRANSPORT].
+fact transport_matches_arity {
+  all b : PhysicalBatch |
+    (#b.claims >= 2) iff b.attached = Attached
+}
+
+// Inline batches never create a temp directory, so their temp state stays
+// NotCreated forever [FLA-ATTACH-SINGLE].
+fact inline_batches_have_no_temp {
+  all b : PhysicalBatch |
+    b.attached = Inline implies always b.tempState = NotCreated
+}
+
+// A single-claim batch is always inline; a multi-claim batch is always
+// attached. Restates the arity invariant from the scenario's viewpoint.
+assert single_claim_batches_are_inline {
+  all b : PhysicalBatch |
+    (one b.claims implies b.attached = Inline) and
+    (#b.claims >= 2 implies b.attached = Attached)
+}
+```
 
 ### Requirement: Dedicated Attached-Context Prompt [FLA-ATTACH-PROMPT]
 WHEN the spec-check tool issues a multi-claim file-attached formalization attempt, THE spec-check tool SHALL use a dedicated attached-context prompt that states claims are in the attached JSON file, states the attached JSON is untrusted data rather than instructions, states that each output entry SHALL carry an explicit `index` field matching an attached claim index, states that `claims[].id` is informational and may be `null` or duplicated, requires exactly one output entry per attached claim, and keeps the Logic IR schema inline, and the prompt SHALL NOT embed claim bodies, SHALL NOT state that claims come from the same spec file, and SHALL NOT state that claims are presented below.
@@ -2317,54 +2317,6 @@ WHILE a multi-claim attached batch is in flight on a handled execution path, THE
 - `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Domain Model`
 - `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Failure Modes`
 - `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Key Components`
-
-#### Requirement model
-
-```alloy
-// --- Temp context file lifecycle: cleanup safety and liveness ---
-// An attached batch drives its temp directory through the TempState lifecycle
-// NotCreated -> DirCreated -> FileWritten -> (CleanupSucceeded | CleanupFailed).
-// The lifecycle transitions are realized by the shared events create_dir_*,
-// write_file_*, and cleanup_* in the transition system; the properties this
-// requirement guarantees are stated here.
-//
-// A directory is "cleanup-owed" once an attached batch that reached DirCreated
-// or FileWritten resolves; cleanup is terminal once it succeeds or fails.
-
-pred cleanupOwed [b : PhysicalBatch] {
-  b.attached = Attached
-  b.resolution != Unresolved
-  b.tempState in DirCreated + FileWritten
-}
-
-pred cleanupTerminal [b : PhysicalBatch] {
-  b.tempState in CleanupSucceeded + CleanupFailed
-}
-
-// Safety: a failed cleanup after a successful attempt never discards the
-// candidates that attempt produced [FLA-TEMP-CLEANUP-WARN].
-assert cleanup_failure_preserves_candidates {
-  always (all b : PhysicalBatch, c : b.claims |
-    (b.resolution = BatchSuccess and b.outcomes[c] = CandidateOutcome)
-    implies b.outcomes'[c] = CandidateOutcome)
-}
-
-// Liveness: under fairness on the cleanup events, every cleanup-owed batch
-// eventually reaches a terminal cleanup state, so no temp directory owed
-// cleanup is abandoned on a handled path [FLA-TEMP-SUCCESS, FLA-TEMP-ORDER].
-pred cleanupFairness {
-  all b : PhysicalBatch |
-    (eventually always cleanupOwed[b])
-    implies
-    (always eventually (cleanup_succeeds[b] or cleanup_fails[b]))
-}
-
-assert cleanup_attempted_after_terminal {
-  cleanupFairness implies
-    always (all b : PhysicalBatch |
-      cleanupOwed[b] implies eventually cleanupTerminal[b])
-}
-```
 
 #### Scenario: Successful Batch Cleans Up [FLA-TEMP-SUCCESS]
 WHEN an attached batch attempt completes successfully, THE spec-check tool SHALL remove the temp context directory before returning results.
@@ -2451,6 +2403,54 @@ IF the process terminates before an attached batch lifecycle reaches its handled
 ##### Evidence
 - Test: [semantic-batching-failures.test.ts:413 waits for cleanup to terminate before resolving claim outcomes](/test/contract/semantic-batching-failures.test.ts#L413)
 
+#### Requirement model
+
+```alloy
+// --- Temp context file lifecycle: cleanup safety and liveness ---
+// An attached batch drives its temp directory through the TempState lifecycle
+// NotCreated -> DirCreated -> FileWritten -> (CleanupSucceeded | CleanupFailed).
+// The lifecycle transitions are realized by the shared events create_dir_*,
+// write_file_*, and cleanup_* in the transition system; the properties this
+// requirement guarantees are stated here.
+//
+// A directory is "cleanup-owed" once an attached batch that reached DirCreated
+// or FileWritten resolves; cleanup is terminal once it succeeds or fails.
+
+pred cleanupOwed [b : PhysicalBatch] {
+  b.attached = Attached
+  b.resolution != Unresolved
+  b.tempState in DirCreated + FileWritten
+}
+
+pred cleanupTerminal [b : PhysicalBatch] {
+  b.tempState in CleanupSucceeded + CleanupFailed
+}
+
+// Safety: a failed cleanup after a successful attempt never discards the
+// candidates that attempt produced [FLA-TEMP-CLEANUP-WARN].
+assert cleanup_failure_preserves_candidates {
+  always (all b : PhysicalBatch, c : b.claims |
+    (b.resolution = BatchSuccess and b.outcomes[c] = CandidateOutcome)
+    implies b.outcomes'[c] = CandidateOutcome)
+}
+
+// Liveness: under fairness on the cleanup events, every cleanup-owed batch
+// eventually reaches a terminal cleanup state, so no temp directory owed
+// cleanup is abandoned on a handled path [FLA-TEMP-SUCCESS, FLA-TEMP-ORDER].
+pred cleanupFairness {
+  all b : PhysicalBatch |
+    (eventually always cleanupOwed[b])
+    implies
+    (always eventually (cleanup_succeeds[b] or cleanup_fails[b]))
+}
+
+assert cleanup_attempted_after_terminal {
+  cleanupFairness implies
+    always (all b : PhysicalBatch |
+      cleanupOwed[b] implies eventually cleanupTerminal[b])
+}
+```
+
 ### Requirement: Graceful Degradation By Adapter Error Kind [FLA-DEGRADE-KIND]
 WHEN a multi-claim attached batch attempt fails with a terminal adapter error (an `OpencodeError.kind` returned after the adapter's internal retry budget is exhausted), THE spec-check tool SHALL select per-claim handling from the existing taxonomy without introducing new public error categories: `timeout`, `invalid_json`, and `schema_validation_error` SHALL degrade to bounded per-claim inline retry; `spawn_error`, `invalid_files`, and `invalid_timeout` SHALL produce claim-level `FormalizationError` values for the affected physical batch with no per-claim fallback; and `prompt_too_large` SHALL degrade only when every per-claim inline prompt (inline template plus claim text, measured in UTF-8 bytes) fits the adapter prompt-size limit, and SHALL otherwise produce claim-level errors immediately.
 
@@ -2458,38 +2458,6 @@ WHEN a multi-claim attached batch attempt fails with a terminal adapter error (a
 - `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Scope`
 - `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Interface Contracts`
 - `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Failure Mode Analysis`
-
-#### Requirement model
-
-```alloy
-// --- Graceful degradation by adapter error kind ---
-// A terminal attached-batch attempt resolves to one of the shared Resolution
-// values, and the transition system realizes each kind:
-//   * BatchSuccess    -> resolve_batch_success (all claims become candidates);
-//   * ModelFailure    -> degrade_to_per_claim when the inline fallback fits,
-//                        else resolve_batch_errors (claim errors);
-//   * InfraFailure    -> resolve_batch_errors, never degraded (no per-claim
-//                        fallback for spawn/invalid-files/invalid-timeout);
-//   * TransportFailure -> resolve_batch_errors after any owed cleanup.
-// The properties this requirement guarantees about that decision are below.
-
-// Safety: degradation to per-claim retry happens only for a model failure whose
-// inline fallback fits; infrastructure failures never degrade
-// [FLA-DEGRADE-TOOLARGE, FLA-DEGRADE-SPAWN, FLA-DEGRADE-FILES, FLA-DEGRADE-INVTIMEOUT].
-assert degrade_only_when_model_failure_fits {
-  always (all b : PhysicalBatch |
-    degrade_to_per_claim[b] implies
-      (b.resolution = ModelFailure and b.fallbackFits = FallbackFits))
-}
-
-// Safety: an infrastructure failure is always resolved as claim errors without
-// per-claim fallback, so no infra failure is ever marked Degraded.
-assert infra_failure_never_degrades {
-  always (all b : PhysicalBatch |
-    (b.resolution = InfraFailure and some c : b.claims | b.outcomes[c] = NoOutcome)
-    implies not degrade_to_per_claim[b])
-}
-```
 
 #### Scenario: Batch Timeout Degrades Per Claim [FLA-DEGRADE-TIMEOUT]
 IF an attached batch attempt fails with `timeout`, THEN THE spec-check tool SHALL retry each claim of that physical batch individually through the inline path.
@@ -2561,12 +2529,81 @@ IF an attached batch attempt fails with `prompt_too_large`, THEN THE spec-check 
 - Test: [semantic-batching-failures.test.ts:277 falls back from prompt_too_large when every inline prompt fits](/test/contract/semantic-batching-failures.test.ts#L277), [semantic-batching-failures.test.ts:297 does not fallback from prompt_too_large when one complete inline prompt cannot fit](/test/contract/semantic-batching-failures.test.ts#L297)
 - Test (property): [degradation.property.test.ts:90 fit check is bounded by the adapter byte limit and respects the boundary](/test/property/degradation.property.test.ts#L90)
 
+#### Requirement model
+
+```alloy
+// --- Graceful degradation by adapter error kind ---
+// A terminal attached-batch attempt resolves to one of the shared Resolution
+// values, and the transition system realizes each kind:
+//   * BatchSuccess    -> resolve_batch_success (all claims become candidates);
+//   * ModelFailure    -> degrade_to_per_claim when the inline fallback fits,
+//                        else resolve_batch_errors (claim errors);
+//   * InfraFailure    -> resolve_batch_errors, never degraded (no per-claim
+//                        fallback for spawn/invalid-files/invalid-timeout);
+//   * TransportFailure -> resolve_batch_errors after any owed cleanup.
+// The properties this requirement guarantees about that decision are below.
+
+// Safety: degradation to per-claim retry happens only for a model failure whose
+// inline fallback fits; infrastructure failures never degrade
+// [FLA-DEGRADE-TOOLARGE, FLA-DEGRADE-SPAWN, FLA-DEGRADE-FILES, FLA-DEGRADE-INVTIMEOUT].
+assert degrade_only_when_model_failure_fits {
+  always (all b : PhysicalBatch |
+    degrade_to_per_claim[b] implies
+      (b.resolution = ModelFailure and b.fallbackFits = FallbackFits))
+}
+
+// Safety: an infrastructure failure is always resolved as claim errors without
+// per-claim fallback, so no infra failure is ever marked Degraded.
+assert infra_failure_never_degrades {
+  always (all b : PhysicalBatch |
+    (b.resolution = InfraFailure and some c : b.claims | b.outcomes[c] = NoOutcome)
+    implies not degrade_to_per_claim[b])
+}
+```
+
 ### Requirement: Claim Partition And Terminal Outcomes [FLA-CLAIM-PARTITION]
 UNDER all handled failure modes, THE spec-check tool SHALL deliver every eligible claim (claims with `kind` equal to `requirement` or `scenario`) to exactly one terminal formalization outcome. Let `E` be the set of eligible claim indexes, `C` the set of candidate indexes, and `R` the set of explicit claim-level `FormalizationError` indexes. THE spec-check tool SHALL maintain `C ⊆ E`, `R ⊆ E`, `C ∩ R = ∅`, and `C ∪ R = E`. No eligible claim SHALL be lost or assigned both outcomes because of grouping, sub-batching, temp-file failure, invalid attachments, model-response failure, graceful degradation, additional-sample failure, or worker-thrown failures.
 
 **References:**
 - `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Failure Mode Analysis`
+
+#### Scenario: Worker Failure Drops No Claims [FLA-PARTITION-WORKER]
+IF a `mapBounded` worker throws while processing a physical batch, THEN THE spec-check tool SHALL convert the failure into claim-level errors for every claim of the affected physical batch, and sibling physical batches SHALL continue processing.
+
+**Postcondition:** Every eligible claim in the failed batch reaches a terminal outcome, and one batch's failure never abandons unstarted claims in other batches.
+
+##### Evidence
+- Implementation: [formalize.ts:129 formalizeClaims()](/src/domain/formal/formalize.ts#L129), [formalization-findings.ts:412 workerFailureResult()](/src/domain/formal/formalization-findings.ts#L412)
+- Test: [semantic-batching-failures.test.ts:527 keeps sibling outcomes and loses no claims when one fallback worker throws](/test/contract/semantic-batching-failures.test.ts#L527)
+- Test (property): [semantic-batching.property.test.ts:370 yields identical terminal outcome sets under shuffled completion order](/test/property/semantic-batching.property.test.ts#L370)
+
+#### Scenario: Single-Claim Thrown Adapter Failure Normalized [FLA-PARTITION-THROW]
+IF the adapter throws during a single-claim inline attempt, THEN THE spec-check tool SHALL catch the thrown value as `unknown` and SHALL normalize it to a claim-level `FormalizationError`.
+
+**Postcondition:** Thrown infrastructure failures become ordinary claim outcomes.
+
+##### Evidence
+- Implementation: [formalize.ts:842 sampleFormalizationsForClaim()](/src/domain/formal/formalize.ts#L842)
+- Test: [semantic-batching-failures.test.ts:511 normalizes a single-claim inline adapter throw without creating temporary state](/test/contract/semantic-batching-failures.test.ts#L511)
+
+#### Scenario: All-Error Output Aborts Pipeline [FLA-PARTITION-ABORT]
+IF formalization returns zero candidates and one or more errors, THEN THE spec-check tool SHALL abort the run with `PipelineAbortError("FormalizationError", ...)` at the CLI boundary.
+
+**Postcondition:** Existing abort behavior for total formalization failure is preserved.
+
+##### Evidence
+- Implementation: [run-cli.ts:398 runFormalizationPhase()](/src/cli/run-cli.ts#L398)
+- Test (integration): [merge-liveness.integration.test.ts:409 rejects with FormalizationError when formalization produces only errors](/test/integration/merge-liveness.integration.test.ts#L409)
+
+#### Scenario: Additional-Sample Failure Preserves Candidate [FLA-PARTITION-ADDITIONAL-WARN]
+IF a claim already has a valid candidate and a later additional-sample attempt fails or exhausts its bounded retry budget, THEN THE spec-check tool SHALL preserve the candidate and all samples already collected, SHALL emit a warning finding describing the sample shortfall, and SHALL NOT emit a claim-level `FormalizationError` for that additional-sample failure.
+
+**Postcondition:** The claim remains in `C` and not in `R`; additional sampling can reduce confidence but cannot revoke a valid candidate or violate the disjoint partition.
+
+##### Evidence
+- Implementation: [formalize.ts:762 addAdditionalSamples()](/src/domain/formal/formalize.ts#L762), [formalization-findings.ts:344 buildAdditionalSampleFailureFinding()](/src/domain/formal/formalization-findings.ts#L344)
+- Test: [semantic-batching-failures.test.ts:317 retains an attached candidate when its requested additional sample terminally fails](/test/contract/semantic-batching-failures.test.ts#L317)
 
 #### Requirement model
 
@@ -2625,43 +2662,6 @@ assert all_claims_reach_terminal_outcome {
 }
 ```
 
-#### Scenario: Worker Failure Drops No Claims [FLA-PARTITION-WORKER]
-IF a `mapBounded` worker throws while processing a physical batch, THEN THE spec-check tool SHALL convert the failure into claim-level errors for every claim of the affected physical batch, and sibling physical batches SHALL continue processing.
-
-**Postcondition:** Every eligible claim in the failed batch reaches a terminal outcome, and one batch's failure never abandons unstarted claims in other batches.
-
-##### Evidence
-- Implementation: [formalize.ts:129 formalizeClaims()](/src/domain/formal/formalize.ts#L129), [formalization-findings.ts:412 workerFailureResult()](/src/domain/formal/formalization-findings.ts#L412)
-- Test: [semantic-batching-failures.test.ts:527 keeps sibling outcomes and loses no claims when one fallback worker throws](/test/contract/semantic-batching-failures.test.ts#L527)
-- Test (property): [semantic-batching.property.test.ts:370 yields identical terminal outcome sets under shuffled completion order](/test/property/semantic-batching.property.test.ts#L370)
-
-#### Scenario: Single-Claim Thrown Adapter Failure Normalized [FLA-PARTITION-THROW]
-IF the adapter throws during a single-claim inline attempt, THEN THE spec-check tool SHALL catch the thrown value as `unknown` and SHALL normalize it to a claim-level `FormalizationError`.
-
-**Postcondition:** Thrown infrastructure failures become ordinary claim outcomes.
-
-##### Evidence
-- Implementation: [formalize.ts:842 sampleFormalizationsForClaim()](/src/domain/formal/formalize.ts#L842)
-- Test: [semantic-batching-failures.test.ts:511 normalizes a single-claim inline adapter throw without creating temporary state](/test/contract/semantic-batching-failures.test.ts#L511)
-
-#### Scenario: All-Error Output Aborts Pipeline [FLA-PARTITION-ABORT]
-IF formalization returns zero candidates and one or more errors, THEN THE spec-check tool SHALL abort the run with `PipelineAbortError("FormalizationError", ...)` at the CLI boundary.
-
-**Postcondition:** Existing abort behavior for total formalization failure is preserved.
-
-##### Evidence
-- Implementation: [run-cli.ts:398 runFormalizationPhase()](/src/cli/run-cli.ts#L398)
-- Test (integration): [merge-liveness.integration.test.ts:409 rejects with FormalizationError when formalization produces only errors](/test/integration/merge-liveness.integration.test.ts#L409)
-
-#### Scenario: Additional-Sample Failure Preserves Candidate [FLA-PARTITION-ADDITIONAL-WARN]
-IF a claim already has a valid candidate and a later additional-sample attempt fails or exhausts its bounded retry budget, THEN THE spec-check tool SHALL preserve the candidate and all samples already collected, SHALL emit a warning finding describing the sample shortfall, and SHALL NOT emit a claim-level `FormalizationError` for that additional-sample failure.
-
-**Postcondition:** The claim remains in `C` and not in `R`; additional sampling can reduce confidence but cannot revoke a valid candidate or violate the disjoint partition.
-
-##### Evidence
-- Implementation: [formalize.ts:762 addAdditionalSamples()](/src/domain/formal/formalize.ts#L762), [formalization-findings.ts:344 buildAdditionalSampleFailureFinding()](/src/domain/formal/formalization-findings.ts#L344)
-- Test: [semantic-batching-failures.test.ts:317 retains an attached candidate when its requested additional sample terminally fails](/test/contract/semantic-batching-failures.test.ts#L317)
-
 ### Requirement: Original Eligible Index Is Authoritative Identity [FLA-IDENTITY-INDEX]
 THE spec-check tool SHALL use the original eligible index (the stable zero-based index of a formalizable claim in eligible-claim order) or claim object identity as the authoritative internal identity for grouping, sub-batching, response matching, and additional-sample merging, and SHALL NOT use `claim.id` alone as internal identity because IDs can be missing or duplicated.
 
@@ -2707,26 +2707,6 @@ WHEN the spec-check tool performs a formalization invocation, THE spec-check too
 - `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Failure Modes`
 - `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Data Design`
 
-#### Requirement model
-
-```alloy
-// --- Batch attempt evidence preservation ---
-// Every attached batch attempt that reaches a terminal resolution is recorded
-// in Pipeline.attemptEvidence. The shared events that resolve an attached batch
-// (create_dir_fail, write_file_fail, attempt_success, attempt_model_failure,
-// attempt_infra_failure, attempt_prompt_too_large) each add the batch to
-// attemptEvidence, so the model guarantees no terminal attached attempt goes
-// unrecorded. Envelope shape, hashes, atomic persistence, and manifest
-// semantics are evidence-contract obligations outside the model.
-
-// Safety: any attached batch with a terminal resolution has recorded evidence.
-assert evidence_recorded_for_every_attached_attempt {
-  always (all b : PhysicalBatch |
-    (b.attached = Attached and b.resolution != Unresolved)
-    implies b in Pipeline.attemptEvidence)
-}
-```
-
 #### Scenario: Attempt Metadata Is Complete [FLA-EVIDENCE-METADATA]
 WHEN an attached batch attempt terminates in any handled state, THE preserved evidence SHALL include the enclosing envelope's schema version and `claimSet`, plus the attempt's batch key, ordered claim-set-local indexes, claim IDs when present, provenance files, context SHA-256, prompt variant/version, model, sub-batch ordinal, response/failure classification, and cleanup outcome.
 
@@ -2761,6 +2741,26 @@ IF a run fails or the process terminates after one or more `FormalizationAttempt
 
 ##### Evidence
 - Implementation: [formalization-evidence.ts:205 writeFormalizationAttemptSet()](/src/domain/reporting/formalization-evidence.ts#L205)
+
+#### Requirement model
+
+```alloy
+// --- Batch attempt evidence preservation ---
+// Every attached batch attempt that reaches a terminal resolution is recorded
+// in Pipeline.attemptEvidence. The shared events that resolve an attached batch
+// (create_dir_fail, write_file_fail, attempt_success, attempt_model_failure,
+// attempt_infra_failure, attempt_prompt_too_large) each add the batch to
+// attemptEvidence, so the model guarantees no terminal attached attempt goes
+// unrecorded. Envelope shape, hashes, atomic persistence, and manifest
+// semantics are evidence-contract obligations outside the model.
+
+// Safety: any attached batch with a terminal resolution has recorded evidence.
+assert evidence_recorded_for_every_attached_attempt {
+  always (all b : PhysicalBatch |
+    (b.attached = Attached and b.resolution != Unresolved)
+    implies b in Pipeline.attemptEvidence)
+}
+```
 
 ### State machine and invariant checks
 

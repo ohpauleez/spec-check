@@ -1061,6 +1061,41 @@ assert supersede_preserves_original {
 }
 ```
 
+### Requirement: Persist Opt-In Run Metrics [RAE-RUN-METRICS]
+
+WHEN the `SPEC_CHECK_TELEMETRY` environment variable equals `1`, THE spec-check
+tool SHALL atomically write `metrics.json` under the output directory before
+the successful manifest, SHALL include it as a checksummed manifest entry, and
+SHALL record named pipeline phase durations plus every OpenCode subprocess
+attempt including retries, model variant, outcome, token usage, cost, and
+analysis-scope attribution.
+
+#### Scenario: Metrics Reconcile Attempt And Phase Totals [RAE-METRICS-RECONCILE]
+
+WHEN an instrumented run completes successfully, THE `metrics.json` totals
+SHALL equal the sum of its recorded attempts, and each analysis-scope total
+SHALL equal the sum of attempts attributed to that scope.
+
+**Postcondition:** Consumers can compare model quality and efficiency without
+inferring tokens from report size or double-counting concurrent phase time.
+
+- Implementation: [metrics.ts: writeRunMetrics()](/src/domain/reporting/metrics.ts)
+- Implementation: [telemetry.ts: recordOpencodeAttempt()](/src/adapters/telemetry.ts)
+- Test: [metrics.test.ts: reconciles phase and run totals and returns its checksum](/test/contract/metrics.test.ts)
+
+#### Scenario: Metrics Preserve Manifest Completion Semantics [RAE-METRICS-MANIFEST]
+
+WHEN metrics are enabled and a run completes successfully, THE spec-check tool
+SHALL finalize `metrics.json` before `manifest.json` and SHALL list the exact
+metrics checksum in the manifest. IF the pipeline fails before successful
+reporting, THEN metrics SHALL NOT create a completion marker.
+
+**Postcondition:** `manifest.json` remains the sole successful-run completion
+marker.
+
+- Implementation: [run-cli.ts: runReportingPhase()](/src/cli/run-cli.ts)
+- Test: [metrics.test.ts: reconciles phase and run totals and returns its checksum](/test/contract/metrics.test.ts)
+
 ### Requirement: Complete Runs With Atomic Manifest Semantics [RAE-ATOMIC-MANIFEST]
 WHEN the spec-check tool writes output artifacts, THE spec-check tool SHALL atomically finalize each artifact, SHALL permit separate formalization attempt-evidence files to exist before successful completion, and SHALL write `manifest.json` last as the sole success marker for the run. The successful manifest SHALL list every produced attempt-evidence file and its SHA-256 checksum together with the other produced output files.
 

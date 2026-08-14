@@ -2,7 +2,7 @@ import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
 
-import { beforeEach, describe, expect, it, vi } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { traceSpec } from "../support/spec-trace.js";
 import { runCli } from "../../src/cli/run-cli.js";
@@ -58,6 +58,11 @@ function makeConfig(inputRoot: string, output: string): RunConfig {
 describe("merge pipeline integration", () => {
   beforeEach(() => {
     vi.clearAllMocks();
+    delete process.env.SPEC_CHECK_TELEMETRY;
+  });
+
+  afterEach(() => {
+    delete process.env.SPEC_CHECK_TELEMETRY;
   });
 
   it("keeps merge findings visible and ordered before downstream findings", async () => {
@@ -107,5 +112,31 @@ describe("merge pipeline integration", () => {
 
     const summary = await readFile(join(outputDir, "report_summary.md"), "utf8");
     expect(summary).toContain("spec_merge.pre_section_content");
+  });
+
+  it("writes and manifests opt-in run metrics", async () => {
+    traceSpec("RAE-RUN-METRICS", "RAE-METRICS-MANIFEST");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-int-metrics-"));
+    const outputDir = join(root, "output");
+    const specDir = join(root, "specs", "metrics");
+    await mkdir(outputDir, { recursive: true });
+    await mkdir(specDir, { recursive: true });
+    await writeFile(
+      join(specDir, "spec.md"),
+      "## ADDED Requirements\n\n### Requirement: Metrics [METRICS-REQ]\nTHE system SHALL record metrics.\n",
+      "utf8",
+    );
+    process.env.SPEC_CHECK_TELEMETRY = "1";
+
+    await runCli(makeConfig(root, outputDir));
+
+    const metrics = JSON.parse(await readFile(join(outputDir, "metrics.json"), "utf8")) as {
+      readonly phases: readonly { readonly phase: string }[];
+    };
+    const manifest = JSON.parse(await readFile(join(outputDir, "manifest.json"), "utf8")) as {
+      readonly files: readonly { readonly path: string; readonly phase: string }[];
+    };
+    expect(metrics.phases.some((phase) => phase.phase === "reporting")).toBe(true);
+    expect(manifest.files).toContainEqual(expect.objectContaining({ path: "metrics.json", phase: "metrics" }));
   });
 });

@@ -36,6 +36,11 @@ Runtime requirements:
 Notes:
 - `spec-check` does not manage `opencode` or `z3` configuration for you.
 - All output writes are confined to the configured output directory (default `./build/spec-check`).
+- Luna and Terra models use fixed OpenCode reasoning variants:
+  `github-copilot/gpt-5.6-luna` uses `max`, and
+  `github-copilot/gpt-5.6-terra` uses `high`.
+- Set `SPEC_CHECK_TELEMETRY=1` to write a checksummed `metrics.json` containing
+  phase durations and per-attempt OpenCode token usage for evaluation runs.
 
 Build and packaging:
 - compiled CLI entrypoint: `dist/src/index.js`
@@ -53,6 +58,7 @@ spec-check [OPTIONS] [INPUT FILES...]
 ### Example
 
 Using `spec-check` to analyze an entire project can take ~10-15 minutes (most of this time is spent on LLM calls/workflows).
+The tool is designed to be run once before implementation begins as a final check.
 
 ```sh
 node dist/spec-check.js \
@@ -65,6 +71,8 @@ node dist/spec-check.js \
   docs/design.md \
   --src src
 ```
+
+That analysis will use 1M-2M tokens and cost ~$3.50 with the default model.
 
 Use your coding agent in Plan mode to explain the results with a prompt like:
 
@@ -79,7 +87,7 @@ Produce a dedicated section in the findings for results from logical analysis pa
 |---|---|
 | `--output <dir>` | Output directory for reports and artifacts (default `./build/spec-check`) |
 | `--src <dir>` | Source directory; enables code-backwards analysis |
-| `--model <name>` | LLM model to use (default `github-copilot/gpt-5.4`) |
+| `--model <name>` | LLM model to use (default `github-copilot/gpt-5.6-terra` at `high`) |
 | `--caps <file>` | Capability listing file; inferred from inputs by default |
 | `--z3 <path>` | Path to the Z3 binary (default: `z3` on PATH) |
 | `--config <file>` | JSON configuration file for model and prompt settings |

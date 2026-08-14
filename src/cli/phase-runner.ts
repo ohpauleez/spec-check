@@ -9,6 +9,7 @@ import type { RunState } from "../domain/run-state.js";
 import { markPhaseCompleted } from "../domain/run-state.js";
 import { createProgressEvent, emitProgressEvent } from "../domain/progress.js";
 import { PipelineAbortError } from "./pipeline-types.js";
+import { recordPipelinePhase, runWithTelemetryPhase } from "../adapters/telemetry.js";
 
 // ---------------------------------------------------------------------------
 // Phase execution infrastructure — progress events and state tracking
@@ -40,15 +41,19 @@ import { PipelineAbortError } from "./pipeline-types.js";
  */
 export async function runPhase(name: string, state: RunState, operation: () => Promise<void>): Promise<RunState> {
   const timestamp = new Date().toISOString();
-  const startedAt = Date.now();
+  const startedAt = process.hrtime.bigint();
   emitProgressEvent(createProgressEvent(name, "started", undefined, timestamp));
   try {
-    await operation();
+    await runWithTelemetryPhase(name, operation);
     const nextState = markPhaseCompleted(state, name);
-    emitProgressEvent(createProgressEvent(name, "completed", Date.now() - startedAt));
+    const durationMs = Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
+    recordPipelinePhase(name, timestamp, durationMs, "completed");
+    emitProgressEvent(createProgressEvent(name, "completed", durationMs));
     return nextState;
   } catch (error: unknown) {
-    emitProgressEvent(createProgressEvent(name, "failed", Date.now() - startedAt));
+    const durationMs = Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
+    recordPipelinePhase(name, timestamp, durationMs, "failed");
+    emitProgressEvent(createProgressEvent(name, "failed", durationMs));
     if (error instanceof Error) {
       throw error;
     }
@@ -87,15 +92,19 @@ export async function runPhaseWithResult<T>(
   operation: () => Promise<T>,
 ): Promise<{ readonly state: RunState; readonly value: T }> {
   const timestamp = new Date().toISOString();
-  const startedAt = Date.now();
+  const startedAt = process.hrtime.bigint();
   emitProgressEvent(createProgressEvent(name, "started", undefined, timestamp));
   try {
-    const value = await operation();
+    const value = await runWithTelemetryPhase(name, operation);
     const nextState = markPhaseCompleted(state, name);
-    emitProgressEvent(createProgressEvent(name, "completed", Date.now() - startedAt));
+    const durationMs = Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
+    recordPipelinePhase(name, timestamp, durationMs, "completed");
+    emitProgressEvent(createProgressEvent(name, "completed", durationMs));
     return { state: nextState, value };
   } catch (error: unknown) {
-    emitProgressEvent(createProgressEvent(name, "failed", Date.now() - startedAt));
+    const durationMs = Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
+    recordPipelinePhase(name, timestamp, durationMs, "failed");
+    emitProgressEvent(createProgressEvent(name, "failed", durationMs));
     if (error instanceof Error) {
       throw error;
     }

@@ -43,6 +43,13 @@ import {
   writeFormalizationAttemptSet,
   type FormalizationEvidenceFile,
 } from "../domain/reporting/formalization-evidence.js";
+import {
+  createTelemetryCollector,
+  isTelemetryEnabled,
+  runWithTelemetryCollector,
+  snapshotCurrentTelemetry,
+} from "../adapters/telemetry.js";
+import { writeRunMetrics } from "../domain/reporting/metrics.js";
 
 export { PipelineAbortError } from "./pipeline-types.js";
 
@@ -145,6 +152,12 @@ function formalizationErrorsToFindings(
  * Invariant: findings are append-only across all phases.
  */
 export async function runCli(config: RunConfig): Promise<RunState> {
+  const collector = createTelemetryCollector();
+  return await runWithTelemetryCollector(collector, async () => await runCliWithTelemetry(config));
+}
+
+/** Execute one pipeline run inside its already-bound telemetry context. */
+async function runCliWithTelemetry(config: RunConfig): Promise<RunState> {
   // Invalidate all prior-run completion and formalization evidence before work
   // begins. The two operations touch disjoint paths (the manifest file versus
   // the evidence subtree) and are both idempotent, so they commute and can run
@@ -499,7 +512,7 @@ async function runReportingPhase(
 ): Promise<RunState> {
   const skippedPhases = computeSkippedPhases(config);
 
-  return await runPhase("reporting", state, async () => {
+  const reporting = await runPhaseWithResult("reporting", state, async () => {
     const phaseFiles = await writePhaseReports({
       outputDir: config.output,
       report11: analysis.qualResult.pass1Findings,
@@ -515,12 +528,28 @@ async function runReportingPhase(
       allFindings: state.findings,
       skippedPhases,
     });
-    await writeManifest(config.output, [
-      ...buildManifestEntries([...phaseFiles, summaryFile]),
-      analysis.formalization.evidenceFile,
-      ...(codeEvidenceFiles ?? []),
-    ]);
+    return buildManifestEntries([...phaseFiles, summaryFile]);
   });
+
+  const metricsFile = isTelemetryEnabled()
+    ? await writeCurrentRunMetrics(config)
+    : undefined;
+  await writeManifest(config.output, [
+    ...reporting.value,
+    analysis.formalization.evidenceFile,
+    ...(codeEvidenceFiles ?? []),
+    ...(metricsFile === undefined ? [] : [metricsFile]),
+  ]);
+  return reporting.state;
+}
+
+/** Persist the current telemetry snapshot before the completion manifest. */
+async function writeCurrentRunMetrics(config: RunConfig) {
+  const snapshot = snapshotCurrentTelemetry();
+  if (snapshot === undefined) {
+    throw new PipelineAbortError("PipelineError", "telemetry context unavailable during reporting");
+  }
+  return await writeRunMetrics(config.output, snapshot);
 }
 
 // ---------------------------------------------------------------------------

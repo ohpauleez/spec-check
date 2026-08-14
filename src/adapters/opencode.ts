@@ -9,6 +9,7 @@ import { lstat, stat } from "node:fs/promises";
 
 import { PROMPT_ARG_MAX_BYTES } from "./opencode-limits.js";
 import { runProcess, type ProcessResult } from "./process.js";
+import { allocateOpencodeCallId, recordOpencodeAttempt } from "./telemetry.js";
 import { postcondition } from "../domain/assert.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { DEFAULT_TIMEOUT_MS, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS } from "../domain/timeout.js";
@@ -74,6 +75,19 @@ export interface OpencodeCallOptions {
    * out real backoff delays. Production callers should leave this unset.
    */
   readonly backoffDelay?: (delayMs: number) => Promise<void>;
+}
+
+/** Token and cost usage aggregated from OpenCode `step_finish` events. */
+export interface OpencodeUsage {
+  readonly events: number;
+  readonly completeEvents: number;
+  readonly inputTokens: number;
+  readonly outputTokens: number;
+  readonly reasoningTokens: number;
+  readonly cacheReadTokens: number;
+  readonly cacheWriteTokens: number;
+  readonly totalTokens: number;
+  readonly cost: number;
 }
 
 /**
@@ -256,10 +270,25 @@ async function validateCallOptions(
  */
 function buildOpencodeArgs(options: OpencodeCallOptions): string[] {
   const args: string[] = ["run", options.prompt, "--model", options.model, "--format", "json"];
+  const variant = variantForModel(options.model);
+  if (variant !== undefined) {
+    args.push("--variant", variant);
+  }
   for (const filePath of options.files ?? []) {
     args.push("--file", filePath);
   }
   return args;
+}
+
+/** Resolve provider reasoning variants for the preregistered comparison models. */
+export function variantForModel(model: string): string | undefined {
+  if (model === "github-copilot/gpt-5.6-luna") {
+    return "max";
+  }
+  if (model === "github-copilot/gpt-5.6-terra") {
+    return "high";
+  }
+  return undefined;
 }
 
 /**
@@ -290,17 +319,20 @@ function classifyProcessResult(
     });
   }
 
-  // Surface non-zero exit codes and stderr content when stdout is unusable.
-  // This prevents opaque "empty stdout" errors when the subprocess reports
-  // a clear failure via stderr (e.g., argument parsing errors, missing files).
-  if (processResult.exitCode !== null && processResult.exitCode !== 0 && processResult.stdout.trim().length === 0) {
+  // Process failure is authoritative even when a partial payload was emitted.
+  if (processResult.signal !== null || processResult.exitCode !== 0) {
     const stderrPreview = processResult.stderr.trim().slice(0, 300);
+    const exitDescription = processResult.signal === null
+      ? `code ${String(processResult.exitCode)}`
+      : `signal ${processResult.signal}`;
     return err({
       kind: "spawn_error",
       phase: options.phase,
       message: stderrPreview.length > 0
-        ? `opencode exited with code ${String(processResult.exitCode)}: ${stderrPreview}`
-        : `opencode exited with code ${String(processResult.exitCode)} (empty stdout, no stderr)`,
+        ? `opencode exited with ${exitDescription}: ${stderrPreview}`
+        : processResult.stdout.trim().length === 0
+          ? `opencode exited with ${exitDescription} (empty stdout, no stderr)`
+          : `opencode exited with ${exitDescription} (no stderr)`,
       stderr: processResult.stderr,
     });
   }
@@ -348,18 +380,20 @@ async function attemptOpencodeOnce(
   args: readonly string[],
   options: OpencodeCallOptions,
   timeoutMs: number,
-): Promise<Result<unknown, OpencodeError>> {
+): Promise<{ readonly result: Result<unknown, OpencodeError>; readonly processResult?: ProcessResult }> {
   let processResult: ProcessResult;
   try {
     processResult = await runProcess(command, [...args], { timeoutMs });
   } catch (error) {
-    return err({
-      kind: "spawn_error",
-      phase: options.phase,
-      message: error instanceof Error ? error.message : "opencode spawn failed",
-    });
+    return {
+      result: err({
+        kind: "spawn_error",
+        phase: options.phase,
+        message: error instanceof Error ? error.message : "opencode spawn failed",
+      }),
+    };
   }
-  return classifyProcessResult(processResult, options, timeoutMs);
+  return { result: classifyProcessResult(processResult, options, timeoutMs), processResult };
 }
 
 /**
@@ -400,6 +434,7 @@ export async function callOpencode(
   }
   const { command, retries, timeoutMs, backoffDelay } = validated.value;
   const args = buildOpencodeArgs(options);
+  const logicalCallId = allocateOpencodeCallId();
 
   let lastError: OpencodeError | undefined;
   for (let attempt = 1; attempt <= retries; attempt += 1) {
@@ -409,15 +444,37 @@ export async function callOpencode(
       await backoffDelay(retryBackoffMs(attempt - 1));
     }
 
+    const startedAt = new Date().toISOString();
+    const startedNs = process.hrtime.bigint();
     const attempted = await attemptOpencodeOnce(command, args, options, timeoutMs);
-    if (attempted.ok) {
-      return attempted;
+    const durationMs = Number((process.hrtime.bigint() - startedNs) / 1_000_000n);
+    if (logicalCallId !== undefined) {
+      const usage = extractOpencodeUsage(attempted.processResult?.stdout ?? "");
+      recordOpencodeAttempt({
+        logicalCallId,
+        attempt,
+        opencodePhase: options.phase,
+        model: options.model,
+        variant: variantForModel(options.model) ?? null,
+        startedAt,
+        durationMs,
+        promptBytes: Buffer.byteLength(options.prompt, "utf8"),
+        attachmentCount: options.files?.length ?? 0,
+        exitCode: attempted.processResult?.exitCode ?? null,
+        timedOut: attempted.processResult?.timedOut ?? false,
+        outcome: attempted.result.ok ? "success" : attempted.result.error.kind,
+        usageComplete: usage.events > 0 && usage.completeEvents === usage.events,
+        usage,
+      });
     }
-    lastError = attempted.error;
+    if (attempted.result.ok) {
+      return attempted.result;
+    }
+    lastError = attempted.result.error;
     // A deterministic failure cannot heal by respawning an identical call;
     // stop here regardless of the remaining retry budget so a schema
     // mismatch costs one spawn instead of the full budget.
-    if (!isTransientFailureKind(attempted.error.kind)) {
+    if (!isTransientFailureKind(attempted.result.error.kind)) {
       break;
     }
   }
@@ -429,6 +486,76 @@ export async function callOpencode(
       message: "opencode failed without diagnostic",
     },
   );
+}
+
+/** Aggregate usage from all valid OpenCode `step_finish` NDJSON events. */
+export function extractOpencodeUsage(stdout: string): OpencodeUsage {
+  const mutable = {
+    events: 0,
+    completeEvents: 0,
+    inputTokens: 0,
+    outputTokens: 0,
+    reasoningTokens: 0,
+    cacheReadTokens: 0,
+    cacheWriteTokens: 0,
+    totalTokens: 0,
+    cost: 0,
+  };
+  for (const line of stdout.split(/\r?\n/u)) {
+    if (line.trim().length === 0) {
+      continue;
+    }
+    let event: unknown;
+    try {
+      event = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    const record = asRecord(event);
+    const part = asRecord(record?.part);
+    const tokens = asRecord(part?.tokens);
+    if (record?.type !== "step_finish" || part === undefined || tokens === undefined) {
+      continue;
+    }
+    mutable.events += 1;
+    if (isCompleteUsageEvent(tokens)) {
+      mutable.completeEvents += 1;
+    }
+    const inputTokens = finiteNumber(tokens.input);
+    const outputTokens = finiteNumber(tokens.output);
+    const reasoningTokens = finiteNumber(tokens.reasoning);
+    const cache = asRecord(tokens.cache);
+    const cacheReadTokens = finiteNumber(cache?.read ?? tokens.cache_read);
+    const cacheWriteTokens = finiteNumber(cache?.write ?? tokens.cache_write);
+    mutable.inputTokens += inputTokens;
+    mutable.outputTokens += outputTokens;
+    mutable.reasoningTokens += reasoningTokens;
+    mutable.cacheReadTokens += cacheReadTokens;
+    mutable.cacheWriteTokens += cacheWriteTokens;
+    mutable.totalTokens += typeof tokens.total === "number" && Number.isFinite(tokens.total)
+      ? tokens.total
+      : inputTokens + outputTokens + reasoningTokens + cacheReadTokens + cacheWriteTokens;
+    mutable.cost += finiteNumber(part.cost);
+  }
+  return Object.freeze(mutable);
+}
+
+function isCompleteUsageEvent(tokens: Record<string, unknown>): boolean {
+  const cache = asRecord(tokens.cache);
+  return finiteToken(tokens.total)
+    && finiteToken(tokens.input)
+    && finiteToken(tokens.output)
+    && finiteToken(tokens.reasoning)
+    && finiteToken(cache?.read ?? tokens.cache_read)
+    && finiteToken(cache?.write ?? tokens.cache_write);
+}
+
+function finiteToken(value: unknown): boolean {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function finiteNumber(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
 }
 
 /**

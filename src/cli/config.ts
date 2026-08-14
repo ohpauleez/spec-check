@@ -125,7 +125,7 @@ const DEFAULT_PAIR_BUDGET = 200;
 const DEFAULT_MAX_BATCH_SIZE = 32;
 
 /** Default LLM model used when no --model flag or config is provided. */
-const DEFAULT_MODEL = "github-copilot/gpt-5.4";
+const DEFAULT_MODEL = "github-copilot/gpt-5.6-terra";
 
 /**
  * Resolve a complete {@link RunConfig} by merging CLI flags, an optional JSON
@@ -163,7 +163,7 @@ const DEFAULT_MODEL = "github-copilot/gpt-5.4";
  * Postcondition — merge priority (highest wins):
  *   1. CLI flags (`args.*`)
  *   2. Config file values (`args.config` JSON contents)
- *   3. Built-in defaults (`"spec-check-output"`, `"github-copilot/gpt-5.4"`,
+ *   3. Built-in defaults (`"spec-check-output"`, `"github-copilot/gpt-5.6-terra"`,
  *      pair budget of 200)
  *
  * For every field in the returned {@link RunConfig}, the value is taken from

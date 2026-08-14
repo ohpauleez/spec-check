@@ -2,7 +2,13 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import fc from "fast-check";
 
 import { traceSpec } from "../support/spec-trace.js";
-import { callOpencode, extractJsonPayload } from "../../src/adapters/opencode.js";
+import { callOpencode, extractJsonPayload, extractOpencodeUsage, variantForModel } from "../../src/adapters/opencode.js";
+import {
+  createTelemetryCollector,
+  runWithTelemetryCollector,
+  runWithTelemetryPhase,
+  snapshotCurrentTelemetry,
+} from "../../src/adapters/telemetry.js";
 
 vi.mock("../../src/adapters/process.js", () => ({
   runProcess: vi.fn(),
@@ -36,6 +42,127 @@ describe("opencode adapter contract", () => {
     const [command, args] = mocked.mock.calls[0] as [string, readonly string[], unknown];
     expect(command).toBe("opencode");
     expect(args).toEqual(["run", "hello world", "--model", "test-model", "--format", "json"]);
+  });
+
+  it("selects only the preregistered model reasoning variants", async () => {
+    expect(variantForModel("github-copilot/gpt-5.6-luna")).toBe("max");
+    expect(variantForModel("github-copilot/gpt-5.6-terra")).toBe("high");
+    expect(variantForModel("github-copilot/gpt-5.4")).toBeUndefined();
+  });
+
+  it("passes the Luna max and Terra high variants to OpenCode", async () => {
+    const { runProcess } = await import("../../src/adapters/process.js");
+    const mocked = vi.mocked(runProcess);
+    mocked.mockResolvedValue({
+      exitCode: 0,
+      signal: null,
+      stdout: JSON.stringify({ type: "text", part: { text: "{}" } }),
+      stderr: "",
+      timedOut: false,
+    });
+
+    await callOpencode({ model: "github-copilot/gpt-5.6-luna", phase: "formalization", prompt: "luna", retries: 1 });
+    await callOpencode({ model: "github-copilot/gpt-5.6-terra", phase: "formalization", prompt: "terra", retries: 1 });
+
+    expect(mocked.mock.calls[0]?.[1]).toEqual([
+      "run", "luna", "--model", "github-copilot/gpt-5.6-luna", "--format", "json", "--variant", "max",
+    ]);
+    expect(mocked.mock.calls[1]?.[1]).toEqual([
+      "run", "terra", "--model", "github-copilot/gpt-5.6-terra", "--format", "json", "--variant", "high",
+    ]);
+  });
+
+  it("aggregates all step-finish usage fields and ignores malformed events", async () => {
+    const usage = extractOpencodeUsage([
+      "not json",
+      JSON.stringify({ type: "step_finish", part: { tokens: { total: 20, input: 10, output: 3, reasoning: 2, cache: { read: 5, write: 1 } }, cost: 0.25 } }),
+      JSON.stringify({ type: "step_finish", part: { tokens: { total: 7, input: 4, output: 2, reasoning: 1, cache_read: 3, cache_write: 2 }, cost: 0.1 } }),
+    ].join("\n"));
+
+    expect(usage).toEqual({
+      events: 2,
+      completeEvents: 2,
+      inputTokens: 14,
+      outputTokens: 5,
+      reasoningTokens: 3,
+      cacheReadTokens: 8,
+      cacheWriteTokens: 3,
+      totalTokens: 27,
+      cost: 0.35,
+    });
+  });
+
+  it("marks usage events incomplete when required provider token fields are absent", async () => {
+    expect(extractOpencodeUsage(JSON.stringify({
+      type: "step_finish",
+      part: { tokens: { input: 4, output: 2 }, cost: 0.1 },
+    }))).toMatchObject({ events: 1, completeEvents: 0 });
+  });
+
+  it("rejects non-zero process exits even when stdout contains a valid payload", async () => {
+    const { runProcess } = await import("../../src/adapters/process.js");
+    vi.mocked(runProcess).mockResolvedValueOnce({
+      exitCode: 1,
+      signal: null,
+      stdout: JSON.stringify({ type: "text", part: { text: "{}" } }),
+      stderr: "backend failed",
+      timedOut: false,
+    });
+
+    const result = await callOpencode({ model: "m", phase: "formalization", prompt: "test", retries: 1 });
+    expect(result).toMatchObject({ ok: false, error: { kind: "spawn_error" } });
+  });
+
+  it("records every retry attempt with phase attribution and usage", async () => {
+    const { runProcess } = await import("../../src/adapters/process.js");
+    const mocked = vi.mocked(runProcess);
+    mocked
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        signal: null,
+        stdout: [
+          JSON.stringify({ type: "step_finish", part: { tokens: { total: 5, input: 3, output: 1, reasoning: 1, cache: { read: 0, write: 0 } }, cost: 0.01 } }),
+          JSON.stringify({ type: "text", part: { text: "not-json" } }),
+        ].join("\n"),
+        stderr: "",
+        timedOut: false,
+      })
+      .mockResolvedValueOnce({
+        exitCode: 0,
+        signal: null,
+        stdout: [
+          JSON.stringify({ type: "text", part: { text: "{}" } }),
+          JSON.stringify({ type: "step_finish", part: { tokens: { total: 9, input: 5, output: 2, reasoning: 2, cache: { read: 0, write: 0 } }, cost: 0.02 } }),
+        ].join("\n"),
+        stderr: "",
+        timedOut: false,
+      });
+    const collector = createTelemetryCollector();
+
+    const snapshot = await runWithTelemetryCollector(collector, async () => {
+      await runWithTelemetryPhase("formalization", async () => {
+        const result = await callOpencode({
+          model: "github-copilot/gpt-5.4",
+          phase: "formalization",
+          prompt: "retry",
+          retries: 2,
+          backoffDelay: async () => {},
+        });
+        expect(result.ok).toBe(true);
+      });
+      return snapshotCurrentTelemetry();
+    });
+
+    expect(snapshot?.attempts).toHaveLength(2);
+    expect(snapshot?.attempts.map((attempt) => ({
+      attempt: attempt.attempt,
+      phase: attempt.pipelinePhase,
+      outcome: attempt.outcome,
+      totalTokens: attempt.usage.totalTokens,
+    }))).toEqual([
+      { attempt: 1, phase: "formalization", outcome: "invalid_json", totalTokens: 5 },
+      { attempt: 2, phase: "formalization", outcome: "success", totalTokens: 9 },
+    ]);
   });
 
   it("emits repeated --file flags after prompt", async () => {

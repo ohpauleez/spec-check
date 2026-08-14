@@ -8,6 +8,20 @@ import { traceSpec } from "../support/spec-trace.js";
 import { resolveRunConfig } from "../../src/cli/config.js";
 
 describe("config loading and precedence", () => {
+  it("defaults to Terra at its fixed high variant", async () => {
+    traceSpec("CAT-CLI-CONFIG", "CAT-CONFIG-MERGE");
+    const resolved = await resolveRunConfig({
+      inputs: ["in"],
+      help: false,
+      version: false,
+      allowArchive: false,
+    });
+
+    expect(resolved.ok).toBe(true);
+    if (!resolved.ok) return;
+    expect(resolved.value.model).toBe("github-copilot/gpt-5.6-terra");
+  });
+
   it("uses CLI flags over config values", async () => {
     traceSpec("CAT-CLI-CONFIG", "CAT-CONFIG-MERGE");
     const root = await mkdtemp(join(tmpdir(), "spec-check-config-"));

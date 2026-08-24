@@ -6,6 +6,7 @@
  * Exports: `runCli`, `PipelineAbortError`.
  */
 import type { RunConfig } from "./config.js";
+import { resolve } from "node:path";
 import type { Finding } from "../domain/findings.js";
 import type { LogicIrClaim } from "../domain/logic-ir.js";
 import type { Claim, ClaimGraph } from "../domain/claim-graph.js";
@@ -18,12 +19,12 @@ import { assertNever, precondition } from "../domain/assert.js";
 import { runQualitativePasses } from "../domain/spec-forward/qualitative.js";
 import { formalizeClaims, type FormalizationError, type FormalizationOutput } from "../domain/formal/formalize.js";
 import { runLogicAnalysis } from "../domain/formal/logic-analysis.js";
-import { writeManifest, buildManifestEntries, invalidateStaleManifest } from "../domain/reporting/manifest.js";
-import { writePhaseReports, writeSummaryReport } from "../domain/reporting/render.js";
+import { writeManifest, buildManifestEntries, invalidateStaleManifest, validateCoreManifestEntries } from "../domain/reporting/manifest.js";
+import { writePhaseReports, writeSummaryReport, type RenderedReportFile } from "../domain/reporting/render.js";
 import { traceClaimsToSource } from "../domain/code-backwards/trace.js";
 import { analyzeTaskSourceConsistency } from "../domain/tasks-analysis.js";
 import { PipelineAbortError } from "./pipeline-types.js";
-import { runPhase, runPhaseWithResult } from "./phase-runner.js";
+import { runOptionalPhaseWithResult, runPhase, runPhaseWithResult } from "./phase-runner.js";
 import {
   checkDependencies,
   computeSkippedPhases,
@@ -50,6 +51,16 @@ import {
   snapshotCurrentTelemetry,
 } from "../adapters/telemetry.js";
 import { writeRunMetrics } from "../domain/reporting/metrics.js";
+import {
+  generateFinalReport,
+  assertFinalReportTerminalCorrespondence,
+  INITIAL_FINAL_REPORT_LIFECYCLE,
+  reduceFinalReportLifecycle,
+  type FinalReportLifecycleEvent,
+  type FinalReportLifecycleState,
+  removeFinalReport,
+  type FinalReportError,
+} from "../domain/reporting/final-report.js";
 
 export { PipelineAbortError } from "./pipeline-types.js";
 
@@ -162,10 +173,15 @@ async function runCliWithTelemetry(config: RunConfig): Promise<RunState> {
   // begins. The two operations touch disjoint paths (the manifest file versus
   // the evidence subtree) and are both idempotent, so they commute and can run
   // concurrently without ordering constraints.
-  await Promise.all([
-    invalidateStaleManifest(config.output),
-    removeOutputTree(config.output, FORMALIZATION_EVIDENCE_DIRECTORY),
-  ]);
+  try {
+    await Promise.all([
+      invalidateStaleManifest(config.output),
+      removeOutputTree(config.output, FORMALIZATION_EVIDENCE_DIRECTORY),
+      removeFinalReport(config.output),
+    ]);
+  } catch (error: unknown) {
+    throw new PipelineAbortError("OutputError", outputFailureMessage("run-start output cleanup", error));
+  }
 
   // Phases 1-3: dependency check, catalog build, document parsing.
   const ingestion = await runIngestionPhases(config);
@@ -492,8 +508,9 @@ async function runMergeAndGroupingMap(ingestion: IngestionResult): Promise<{
  *
  * @remarks
  * Precondition: all prior phases have completed and their findings are in `state`.
- * Postcondition: all report files and manifest are written to the output directory.
- * Invariant: manifest is written last (atomic completion marker).
+ * Postcondition: all core report files and the core manifest are written, then
+ * the optional final report reaches a validated success or persisted-warning outcome.
+ * Invariant: manifest is the final core-evidence write and core completion marker.
  *
  * Failure modes: filesystem write errors propagate as uncaught exceptions (rare
  * in practice — output directory was already written to by earlier phases).
@@ -528,19 +545,121 @@ async function runReportingPhase(
       allFindings: state.findings,
       skippedPhases,
     });
-    return buildManifestEntries([...phaseFiles, summaryFile]);
+    return { phaseFiles, summaryFile };
   });
 
   const metricsFile = isTelemetryEnabled()
     ? await writeCurrentRunMetrics(config)
     : undefined;
-  await writeManifest(config.output, [
-    ...reporting.value,
+  const nonReportEntries = [
     analysis.formalization.evidenceFile,
     ...(codeEvidenceFiles ?? []),
     ...(metricsFile === undefined ? [] : [metricsFile]),
-  ]);
-  return reporting.state;
+  ];
+  await writeCoreManifest(config, reporting.value.phaseFiles, reporting.value.summaryFile, nonReportEntries);
+  let lifecycle = INITIAL_FINAL_REPORT_LIFECYCLE;
+  lifecycle = advanceFinalReportLifecycle(lifecycle, "begin_core_reporting");
+  lifecycle = advanceFinalReportLifecycle(lifecycle, "complete_core");
+  lifecycle = advanceFinalReportLifecycle(lifecycle, "start_report");
+
+  const finalReport = await runOptionalPhaseWithResult("final-report", reporting.state, async () => await generateFinalReport({
+    model: config.model,
+    timeoutMs: config.timeoutMs,
+    outputDir: config.output,
+    workspaceRoot: process.cwd(),
+    additionalReadPaths: [
+      ...config.inputs.map((path) => resolve(path)),
+      ...(config.src === undefined ? [] : [resolve(config.src)]),
+    ],
+  }), (result) => result.ok);
+  if (finalReport.value.ok) {
+    lifecycle = advanceFinalReportLifecycle(lifecycle, "generation_returns");
+    lifecycle = advanceFinalReportLifecycle(lifecycle, "validation_succeeds");
+    assertFinalReportTerminalCorrespondence(lifecycle, {
+      reportPresent: true, warningPresent: false, summaryCurrent: true,
+      manifestCurrent: true, reportManifested: false,
+    });
+    return finalReport.state;
+  }
+  lifecycle = advanceFinalReportLifecycle(lifecycle, "generation_fails");
+
+  try {
+    await removeFinalReport(config.output);
+    lifecycle = advanceFinalReportLifecycle(lifecycle, "cleanup_succeeds");
+  } catch (error: unknown) {
+    throw new PipelineAbortError("OutputError", outputFailureMessage("final-report cleanup", error));
+  }
+  const warnedState = addFindings(finalReport.state, [finalReportFailureFinding(finalReport.value.error)]);
+  try {
+    await invalidateStaleManifest(config.output);
+    lifecycle = advanceFinalReportLifecycle(lifecycle, "marker_invalidation_succeeds");
+    const warningSummary = await writeSummaryReport({
+      outputDir: config.output,
+      allFindings: warnedState.findings,
+      skippedPhases,
+    });
+    lifecycle = advanceFinalReportLifecycle(lifecycle, "summary_rewrite_succeeds");
+    lifecycle = advanceFinalReportLifecycle(lifecycle, "begin_manifest_refresh");
+    await writeCoreManifest(config, reporting.value.phaseFiles, warningSummary, nonReportEntries);
+    lifecycle = advanceFinalReportLifecycle(lifecycle, "manifest_refresh_succeeds");
+  } catch (error: unknown) {
+    lifecycle = advanceFinalReportLifecycle(lifecycle, "output_fails");
+    assertFinalReportTerminalCorrespondence(lifecycle, {
+      reportPresent: false, warningPresent: true, summaryCurrent: lifecycle.summaryCurrent,
+      manifestCurrent: lifecycle.manifestCurrent, reportManifested: false,
+    });
+    throw new PipelineAbortError("OutputError", outputFailureMessage("final-report warning persistence", error));
+  }
+  assertFinalReportTerminalCorrespondence(lifecycle, {
+    reportPresent: false, warningPresent: true, summaryCurrent: true,
+    manifestCurrent: true, reportManifested: false,
+  });
+  return warnedState;
+}
+
+/** Advance the executable reference model alongside one completed real side effect. */
+function advanceFinalReportLifecycle(
+  state: FinalReportLifecycleState,
+  event: FinalReportLifecycleEvent,
+): FinalReportLifecycleState {
+  const next = reduceFinalReportLifecycle(state, event);
+  precondition(next.ok, `final-report lifecycle rejects ${event} from ${state.stage}`);
+  return next.value;
+}
+
+/** Write the manifest from final core-report bytes, deliberately excluding `report.md`. */
+async function writeCoreManifest(
+  config: RunConfig,
+  phaseFiles: readonly RenderedReportFile[],
+  summaryFile: RenderedReportFile,
+  nonReportEntries: Parameters<typeof writeManifest>[1],
+): Promise<void> {
+  precondition(
+    phaseFiles.every((file) => file.path !== "report.md") && summaryFile.path !== "report.md",
+    "core manifest descriptors must exclude report.md",
+  );
+  await writeManifest(config.output, validateCoreManifestEntries([
+    ...buildManifestEntries([...phaseFiles, summaryFile]),
+    ...nonReportEntries,
+  ]));
+}
+
+/** Build the one append-only warning that explains optional report degradation. */
+function finalReportFailureFinding(error: FinalReportError): Finding {
+  return {
+    severity: "warning",
+    category: "reporting.final_report_failed",
+    provenance: { file: "<reporting>" },
+    description: `Final report was not produced: ${error.message}`,
+    rationale: "The optional post-completion report failed validation or generation; the completed core evidence remains available",
+    evidence: [{ kind: "failure_kind", value: error.kind }],
+  };
+}
+
+/** Normalize exceptional output failures into a bounded CLI diagnostic. */
+function outputFailureMessage(operation: string, error: unknown): string {
+  const detail = error instanceof Error ? error.message : "unknown output failure";
+  return `${operation} failed: ${detail}`;
 }
 
 /** Persist the current telemetry snapshot before the completion manifest. */

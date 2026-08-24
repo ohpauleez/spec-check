@@ -1,5 +1,5 @@
-import { mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { access, mkdir, mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
@@ -7,6 +7,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { traceSpec } from "../support/spec-trace.js";
 import { runCli } from "../../src/cli/run-cli.js";
 import { toModelName, toOutputDirPath } from "../../src/domain/branded.js";
+import { toRelativePath } from "../../src/domain/branded.js";
 import type { RunConfig } from "../../src/cli/config.js";
 
 vi.mock("../../src/cli/pipeline-helpers.js", async (importOriginal) => {
@@ -39,6 +40,37 @@ vi.mock("../../src/domain/formal/formalize.js", () => ({
     },
   })),
 }));
+
+vi.mock("../../src/domain/reporting/final-report.js", async (importOriginal) => {
+  const original = await (importOriginal() as Promise<Record<string, unknown>>);
+  const removeFinalReport = original.removeFinalReport as (output: unknown) => Promise<void>;
+  return {
+    ...original,
+    removeFinalReport: vi.fn(async (output: unknown) => await removeFinalReport(output)),
+    generateFinalReport: vi.fn(async () => ({
+      ok: true,
+      value: { path: "report.md", content: "# Final\n" },
+    })),
+  };
+});
+
+vi.mock("../../src/domain/reporting/render.js", async (importOriginal) => {
+  const original = await (importOriginal() as Promise<Record<string, unknown>>);
+  const writeSummaryReport = original.writeSummaryReport as (...args: readonly unknown[]) => Promise<unknown>;
+  return {
+    ...original,
+    writeSummaryReport: vi.fn(async (...args: readonly unknown[]) => await writeSummaryReport(...args)),
+  };
+});
+
+vi.mock("../../src/domain/reporting/manifest.js", async (importOriginal) => {
+  const original = await (importOriginal() as Promise<Record<string, unknown>>);
+  const writeManifest = original.writeManifest as (...args: readonly unknown[]) => Promise<void>;
+  return {
+    ...original,
+    writeManifest: vi.fn(async (...args: readonly unknown[]) => await writeManifest(...args)),
+  };
+});
 
 function makeConfig(inputRoot: string, output: string): RunConfig {
   return {
@@ -112,6 +144,10 @@ describe("merge pipeline integration", () => {
 
     const summary = await readFile(join(outputDir, "report_summary.md"), "utf8");
     expect(summary).toContain("spec_merge.pre_section_content");
+    const { generateFinalReport } = await import("../../src/domain/reporting/final-report.js");
+    expect(generateFinalReport).toHaveBeenCalledWith(expect.objectContaining({
+      additionalReadPaths: expect.arrayContaining([resolve(root)]),
+    }));
   });
 
   it("writes and manifests opt-in run metrics", async () => {
@@ -139,4 +175,165 @@ describe("merge pipeline integration", () => {
     expect(metrics.phases.some((phase) => phase.phase === "reporting")).toBe(true);
     expect(manifest.files).toContainEqual(expect.objectContaining({ path: "metrics.json", phase: "metrics" }));
   });
+
+  it("persists a nonfatal final-report warning and refreshes the summary checksum", async () => {
+    traceSpec(
+      "RAE-FINAL-REPORT", "RAE-FINAL-AFTER-CORE", "RAE-FINAL-OPTIONAL",
+      "RAE-FINAL-WARNING", "RAE-FINAL-WARN-KIND", "RAE-FINAL-WARN-HASH",
+      "RAE-FINAL-WARN-COMPLETE", "RAE-MANIFEST-NO-FINAL",
+    );
+    const { generateFinalReport } = await import("../../src/domain/reporting/final-report.js");
+    vi.mocked(generateFinalReport).mockResolvedValueOnce({
+      ok: false,
+      error: { kind: "report_missing", message: "final report was not created" },
+    });
+    const root = await mkdtemp(join(tmpdir(), "spec-check-int-final-warning-"));
+    const outputDir = join(root, "output");
+    const specDir = join(root, "specs", "warning");
+    await mkdir(outputDir, { recursive: true });
+    await mkdir(specDir, { recursive: true });
+    await writeFile(
+      join(specDir, "spec.md"),
+      "## ADDED Requirements\n\n### Requirement: Warning [WARNING-REQ]\nTHE system SHALL continue.\n",
+      "utf8",
+    );
+
+    const state = await runCli(makeConfig(root, outputDir));
+    expect(state.findings).toContainEqual(expect.objectContaining({
+      severity: "warning",
+      category: "reporting.final_report_failed",
+      evidence: [{ kind: "failure_kind", value: "report_missing" }],
+    }));
+    const summary = await readFile(join(outputDir, "report_summary.md"), "utf8");
+    expect(summary).toContain("reporting.final\\_report\\_failed");
+    expect(summary).toContain("failure\\_kind=report\\_missing");
+    const manifest = JSON.parse(await readFile(join(outputDir, "manifest.json"), "utf8")) as {
+      readonly files: readonly { readonly path: string; readonly checksum: string }[];
+    };
+    expect(manifest.files.some((entry) => entry.path === "report.md")).toBe(false);
+    const summaryEntry = manifest.files.find((entry) => entry.path === "report_summary.md");
+    const { sha256Hex } = await import("../../src/adapters/fs.js");
+    expect(summaryEntry?.checksum).toBe(sha256Hex(summary));
+  });
+
+  it.each([
+    "agent_failed", "acknowledgment_invalid", "path_unsupported", "path_mismatch",
+    "report_missing", "report_symlink", "report_not_regular", "report_empty",
+    "report_too_large", "report_unreadable",
+  ] as const)("persists warning for final-report %s degradation", async (kind) => {
+    traceSpec("RAE-FINAL-OPTIONAL", "RAE-FINAL-WARN-KIND");
+    const { generateFinalReport } = await import("../../src/domain/reporting/final-report.js");
+    vi.mocked(generateFinalReport).mockResolvedValueOnce({ ok: false, error: { kind, message: kind } });
+    const { root, outputDir } = await minimalPipelineFixture(`degrade-${kind.replaceAll("_", "-")}`);
+    const state = await runCli(makeConfig(root, outputDir));
+    expect(state.findings).toContainEqual(expect.objectContaining({
+      category: "reporting.final_report_failed",
+      evidence: [{ kind: "failure_kind", value: kind }],
+    }));
+  });
+
+  it("removes stale report output before the current final-report attempt", async () => {
+    traceSpec("RAE-FINAL-CLEAN-STALE", "RAE-FINAL-SAVE", "RAE-MANIFEST-NO-FINAL");
+    const { generateFinalReport } = await import("../../src/domain/reporting/final-report.js");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-int-final-stale-"));
+    const outputDir = join(root, "output");
+    const specDir = join(root, "specs", "stale");
+    await mkdir(outputDir, { recursive: true });
+    await mkdir(specDir, { recursive: true });
+    await writeFile(join(outputDir, "report.md"), "stale", "utf8");
+    await writeFile(
+      join(specDir, "spec.md"),
+      "## ADDED Requirements\n\n### Requirement: Stale [STALE-REQ]\nTHE system SHALL continue.\n",
+      "utf8",
+    );
+    vi.mocked(generateFinalReport).mockImplementationOnce(async () => {
+      await expect(readFile(join(outputDir, "report.md"), "utf8")).rejects.toThrow();
+      await writeFile(join(outputDir, "report.md"), "# Current\n", "utf8");
+      return { ok: true, value: { path: toRelativePath("report.md"), content: "# Current\n" } };
+    });
+    await runCli(makeConfig(root, outputDir));
+    expect(await readFile(join(outputDir, "report.md"), "utf8")).toBe("# Current\n");
+    const manifest = JSON.parse(await readFile(join(outputDir, "manifest.json"), "utf8")) as {
+      readonly files: readonly { readonly path: string }[];
+    };
+    expect(manifest.files.some((entry) => entry.path === "report.md")).toBe(false);
+  });
+
+  it("surfaces cleanup failure instead of claiming warning-without-report", async () => {
+    traceSpec("RAE-FINAL-CLEAN-ERROR");
+    const { generateFinalReport, removeFinalReport } = await import("../../src/domain/reporting/final-report.js");
+    vi.mocked(generateFinalReport).mockResolvedValueOnce({
+      ok: false,
+      error: { kind: "report_empty", message: "invalid partial report" },
+    });
+    vi.mocked(removeFinalReport)
+      .mockResolvedValueOnce(undefined)
+      .mockRejectedValueOnce(new Error("cleanup denied"));
+    const root = await mkdtemp(join(tmpdir(), "spec-check-int-final-cleanup-"));
+    const outputDir = join(root, "output");
+    const specDir = join(root, "specs", "cleanup");
+    await mkdir(outputDir, { recursive: true });
+    await mkdir(specDir, { recursive: true });
+    await writeFile(
+      join(specDir, "spec.md"),
+      "## ADDED Requirements\n\n### Requirement: Cleanup [CLEANUP-REQ]\nTHE system SHALL continue.\n",
+      "utf8",
+    );
+    await expect(runCli(makeConfig(root, outputDir))).rejects.toMatchObject({
+      category: "OutputError",
+      message: expect.stringContaining("cleanup denied"),
+    });
+  });
+
+  it("surfaces warning-summary persistence failure as OutputError", async () => {
+    traceSpec("RAE-FINAL-CLEAN-ERROR", "RAE-FINAL-WARN-HASH");
+    const { generateFinalReport } = await import("../../src/domain/reporting/final-report.js");
+    const { writeSummaryReport } = await import("../../src/domain/reporting/render.js");
+    vi.mocked(generateFinalReport).mockResolvedValueOnce({
+      ok: false, error: { kind: "report_missing", message: "missing" },
+    });
+    const defaultSummary = vi.mocked(writeSummaryReport).getMockImplementation();
+    expect(defaultSummary).toBeDefined();
+    vi.mocked(writeSummaryReport)
+      .mockImplementationOnce(defaultSummary!)
+      .mockRejectedValueOnce(new Error("summary denied"));
+    const { root, outputDir } = await minimalPipelineFixture("summary-failure");
+    await expect(runCli(makeConfig(root, outputDir))).rejects.toMatchObject({
+      category: "OutputError", message: expect.stringContaining("summary denied"),
+    });
+    await expect(access(join(outputDir, "manifest.json"))).rejects.toThrow();
+  });
+
+  it("surfaces refreshed-manifest failure as OutputError", async () => {
+    traceSpec("RAE-FINAL-WARN-HASH");
+    const { generateFinalReport } = await import("../../src/domain/reporting/final-report.js");
+    const { writeManifest } = await import("../../src/domain/reporting/manifest.js");
+    vi.mocked(generateFinalReport).mockResolvedValueOnce({
+      ok: false, error: { kind: "report_missing", message: "missing" },
+    });
+    const defaultManifest = vi.mocked(writeManifest).getMockImplementation();
+    expect(defaultManifest).toBeDefined();
+    vi.mocked(writeManifest)
+      .mockImplementationOnce(defaultManifest!)
+      .mockRejectedValueOnce(new Error("manifest denied"));
+    const { root, outputDir } = await minimalPipelineFixture("manifest-failure");
+    await expect(runCli(makeConfig(root, outputDir))).rejects.toMatchObject({
+      category: "OutputError", message: expect.stringContaining("manifest denied"),
+    });
+    await expect(access(join(outputDir, "manifest.json"))).rejects.toThrow();
+  });
 });
+
+async function minimalPipelineFixture(name: string): Promise<{ readonly root: string; readonly outputDir: string }> {
+  const root = await mkdtemp(join(tmpdir(), `spec-check-int-${name}-`));
+  const outputDir = join(root, "output");
+  const specDir = join(root, "specs", name);
+  await mkdir(outputDir, { recursive: true });
+  await mkdir(specDir, { recursive: true });
+  await writeFile(
+    join(specDir, "spec.md"),
+    `## ADDED Requirements\n\n### Requirement: Fixture [FIXTURE-${name.toUpperCase()}]\nTHE system SHALL continue.\n`,
+    "utf8",
+  );
+  return { root, outputDir };
+}

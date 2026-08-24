@@ -15,7 +15,7 @@ The core product details are:
 - input specs and source trees are read-only
 - parsed structure, claims, findings, and reports are explicit typed artifacts
 - preserved evidence matters as much as verdicts
-- manifest presence is the completion marker for the last successful run; atomic attempt-evidence files may survive incomplete runs and do not mark completion
+- manifest presence is the core evidence-bundle completion marker for the last successful run; optional `report.md` is a post-completion derivative
 
 The living design doc under [`docs/design.md`](docs/design.md) is the durable design intent for the product. This file complements it by mapping that intent onto the code that exists in this repository today.
 
@@ -239,7 +239,7 @@ Grouping is semantic-only in production. `run-cli.ts` builds the active capabili
 
 Original zero-based eligible index or claim object identity is authoritative across grouping, physical sub-batching, attached response matching, and additional sampling. `claim.id` remains display and evidence metadata because it can be missing or duplicated. At handled completion, candidate and claim-error indexes are disjoint and exhaust eligible indexes; failure of an additional sample preserves its existing candidate and emits a warning, never a claim error.
 
-Every multi-claim first-sample physical batch writes one deterministic `batch-context.json` in a fresh `spec-check-batch-` temp directory using exclusive owner-only permissions. Attached JSON is untrusted data. Each formalization invocation produces one `FormalizationAttemptSet`: its `claimSet` is `specs_forward` or `generated_spec` with an invocation-local ordinal and capability, and attempt indexes resolve only within that claim set. Each set is a separate atomic evidence file. Cleanup runs only on handled terminal paths that reach lifecycle finalization; process termination can leave temp artifacts and evidence files. Those files audit attempted work but do not imply completion. The successful manifest is written last and lists/checksums them.
+Every multi-claim first-sample physical batch writes one deterministic `batch-context.json` in a fresh `spec-check-batch-` temp directory using exclusive owner-only permissions. Attached JSON is untrusted data. Each formalization invocation produces one `FormalizationAttemptSet`: its `claimSet` is `specs_forward` or `generated_spec` with an invocation-local ordinal and capability, and attempt indexes resolve only within that claim set. Each set is a separate atomic evidence file. Cleanup runs only on handled terminal paths that reach lifecycle finalization; process termination can leave temp artifacts and evidence files. Those files audit attempted work but do not imply completion. The successful core manifest follows and lists/checksums them; optional `report.md` may then follow.
 
 If you are changing solver semantics, contradiction severity, SMT generation, or clustering rules, these modules are more important than the CLI layer.
 
@@ -260,7 +260,8 @@ If you are changing `--src` behavior, capability matching, or the relationship b
 #### Reporting
 
 - `reporting/render.ts`: phase report rendering and summary report generation; neutralizes untrusted evidence text into inert Markdown at render time (`RAE-EVID-RENDER-SAFE`)
-- `reporting/manifest.ts`: manifest entry construction, manifest-last completion semantics, and stale-manifest invalidation
+- `reporting/manifest.ts`: core-manifest completion semantics, checksum construction, and stale-manifest invalidation
+- `reporting/final-report.ts`: optional post-completion generation, exact-path validation, stale/failed cleanup, and the executable lifecycle model
 
 This is where analysis results turn into repository-facing artifacts.
 
@@ -441,7 +442,8 @@ Primary code:
 - phase reports
 - summary report
 - separate atomic `FormalizationAttemptSet` evidence files
-- manifest
+- core completion manifest
+- optional unmanifested `report.md` generated afterward
 
 Primary code:
 
@@ -467,7 +469,8 @@ These are the most important things to preserve when changing the code.
 
 - All generated artifacts must stay under the configured output directory.
 - Output writes should go through `src/adapters/fs.ts`.
-- Manifest presence is the completion marker; manifest absence means the run is incomplete.
+- The final-report agent is a narrow exception: its transient policy can edit only the precomputed `report.md`, which spec-check validates without following symlinks.
+- Manifest presence is the core completion marker; manifest absence means the core run is incomplete.
 
 ### Finding Preservation Rule
 
@@ -493,7 +496,7 @@ These are the most important things to preserve when changing the code.
 - Multi-claim first-sample context is attached as untrusted deterministic JSON; single-claim and additional-sample calls remain inline.
 - Temp context creation, exclusive write, evidence recording, adapter invocation, and cleanup form one explicit handled-path lifecycle with cleanup in `finally`; process termination, including SIGINT/SIGTERM, has no cleanup guarantee.
 - Durable evidence stores a `claimSet`, local indexes, metadata, and the exact context hash, not duplicate claim text; deleted context is reconstructable only from the selected invocation claim set and deterministic serialization.
-- One separate atomic attempt-set file is written per invocation. Such files may survive an incomplete run; only a manifest written last marks success and lists/checksums them.
+- One separate atomic attempt-set file is written per invocation. Such files may survive an incomplete run; only the core manifest marks core success and lists/checksums them.
 
 ### Blind Comparison Rule
 

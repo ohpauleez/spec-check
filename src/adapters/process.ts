@@ -22,6 +22,7 @@ export interface ProcessResult {
   readonly stdout: string;
   readonly stderr: string;
   readonly timedOut: boolean;
+  readonly outputLimitExceeded?: boolean;
 }
 
 /**
@@ -87,11 +88,14 @@ export async function runProcess(
     readonly timeoutMs?: number;
     readonly cwd?: string;
     readonly stdinText?: string;
+    readonly envOverrides?: Readonly<NodeJS.ProcessEnv>;
+    readonly maxOutputBytes?: number;
   },
 ): Promise<ProcessResult> {
   return await new Promise<ProcessResult>((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options?.cwd,
+      env: buildProcessEnvironment(options?.envOverrides),
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
     });
@@ -100,15 +104,28 @@ export async function runProcess(
     const stdoutChunks: string[] = [];
     const stderrChunks: string[] = [];
     let timedOut = false;
+    let outputLimitExceeded = false;
+    let outputBytes = 0;
 
     child.stdout.setEncoding("utf8");
     child.stderr.setEncoding("utf8");
     child.stdout.on("data", (chunk: string) => {
-      stdoutChunks.push(chunk);
+      captureChunk(chunk, stdoutChunks);
     });
     child.stderr.on("data", (chunk: string) => {
-      stderrChunks.push(chunk);
+      captureChunk(chunk, stderrChunks);
     });
+
+    function captureChunk(chunk: string, target: string[]): void {
+      if (outputLimitExceeded) return;
+      outputBytes += Buffer.byteLength(chunk, "utf8");
+      if (options?.maxOutputBytes !== undefined && outputBytes > options.maxOutputBytes) {
+        outputLimitExceeded = true;
+        child.kill("SIGKILL");
+        return;
+      }
+      target.push(chunk);
+    }
 
     if (options?.stdinText !== undefined) {
       child.stdin.write(options.stdinText);
@@ -141,7 +158,25 @@ export async function runProcess(
         stdout: stdoutChunks.join(""),
         stderr: stderrChunks.join(""),
         timedOut,
+        outputLimitExceeded,
       });
     });
   });
+}
+
+/**
+ * Merge child-specific environment values over the inherited process environment.
+ *
+ * @param overrides - optional variables that take precedence for one child
+ * @returns a fresh environment object preserving all inherited variables
+ *
+ * @remarks
+ * Postcondition: every parent variable not named by `overrides` is preserved.
+ * The function is pure with respect to the returned object and never mutates
+ * `process.env` or `overrides`.
+ */
+export function buildProcessEnvironment(
+  overrides: Readonly<NodeJS.ProcessEnv> | undefined,
+): NodeJS.ProcessEnv {
+  return { ...process.env, ...overrides };
 }

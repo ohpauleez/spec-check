@@ -44,6 +44,140 @@ describe("opencode adapter contract", () => {
     expect(args).toEqual(["run", "hello world", "--model", "test-model", "--format", "json"]);
   });
 
+  it("constructs restricted final-report argv and inline environment", async () => {
+    traceSpec("RAE-FINAL-PROTO-DIR", "RAE-FINAL-AGENT", "RAE-FINAL-AGENT-TOOLS");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    const mocked = vi.mocked(runProcess);
+    mocked.mockResolvedValueOnce({
+      exitCode: 0,
+      signal: null,
+      stdout: JSON.stringify({ type: "text", part: { text: '{"report_path":"/tmp/out/report.md"}' } }),
+      stderr: "",
+      timedOut: false,
+    });
+    const result = await callOpencode({
+      model: "test-model",
+      phase: "final-report",
+      prompt: "write report",
+      workspaceRoot: "/tmp/work space",
+      opencodeConfigContent: "{\"agent\":{}}",
+      retries: 1,
+    });
+    expect(result.ok).toBe(true);
+    const [, args, options] = mocked.mock.calls[0] as [string, readonly string[], { readonly envOverrides?: NodeJS.ProcessEnv }];
+    expect(args).toEqual([
+      "run", "--pure", "write report", "--model", "test-model", "--format", "json",
+      "--agent", "spec-check-final-report", "--dir", "/tmp/work space",
+    ]);
+    expect(args).not.toContain("--auto");
+    expect(options.envOverrides).toEqual({ OPENCODE_CONFIG_CONTENT: "{\"agent\":{}}" });
+    expect(options).toMatchObject({ maxOutputBytes: 1_048_576 });
+  });
+
+  it("isolates final-report config roots when provided", async () => {
+    traceSpec("RAE-FINAL-AGENT", "RAE-FINAL-PROTO-DIR");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    vi.mocked(runProcess).mockResolvedValueOnce({
+      exitCode: 0, signal: null,
+      stdout: JSON.stringify({ type: "text", part: { text: '{"report_path":"/tmp/report.md"}' } }),
+      stderr: "", timedOut: false,
+    });
+    await callOpencode({
+      model: "m", phase: "final-report", prompt: "p", workspaceRoot: "/tmp/isolation",
+      opencodeConfigContent: "{}", opencodeConfigDir: "/tmp/isolation",
+      opencodeConfigPath: "/tmp/isolation/opencode.json", retries: 1,
+    });
+    const options = vi.mocked(runProcess).mock.calls[0]?.[2];
+    expect(options?.envOverrides).toMatchObject({
+      OPENCODE_CONFIG_CONTENT: "{}",
+      OPENCODE_CONFIG_DIR: "/tmp/isolation",
+      XDG_CONFIG_HOME: "/tmp/isolation",
+      OPENCODE_CONFIG: "/tmp/isolation/opencode.json",
+    });
+  });
+
+  it("attributes final-report attempts without recording prompt content", async () => {
+    traceSpec("RAE-FINAL-PROTO-DIR");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    vi.mocked(runProcess).mockResolvedValueOnce({
+      exitCode: 0, signal: null,
+      stdout: JSON.stringify({ type: "text", part: { text: '{"report_path":"/tmp/report.md"}' } }),
+      stderr: "", timedOut: false,
+    });
+    const collector = createTelemetryCollector();
+    const snapshot = await runWithTelemetryCollector(collector, async () => {
+      await runWithTelemetryPhase("final-report", async () => {
+        await callOpencode({
+          model: "m", phase: "final-report", prompt: "SECRET REPORT PROMPT",
+          workspaceRoot: "/tmp", opencodeConfigContent: "{}", retries: 1,
+        });
+      });
+      return snapshotCurrentTelemetry();
+    });
+    expect(snapshot?.attempts[0]).toMatchObject({
+      pipelinePhase: "final-report", opencodePhase: "final-report",
+    });
+    expect(JSON.stringify(snapshot)).not.toContain("SECRET REPORT PROMPT");
+  });
+
+  it.each([
+    ["missing", {}],
+    ["empty", { report_path: " " }],
+    ["non-string", { report_path: 4 }],
+    ["array", [{ report_path: "/tmp/report.md" }]],
+    ["extra", { report_path: "/tmp/report.md", bytes: 1 }],
+  ])("rejects %s final-report acknowledgment", async (_name, payload) => {
+    traceSpec("RAE-FINAL-PROTO-ACK");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    vi.mocked(runProcess).mockResolvedValueOnce({
+      exitCode: 0, signal: null,
+      stdout: JSON.stringify({ type: "text", part: { text: JSON.stringify(payload) } }),
+      stderr: "", timedOut: false,
+    });
+    const result = await callOpencode({
+      model: "m", phase: "final-report", prompt: "p", workspaceRoot: "/tmp",
+      opencodeConfigContent: "{}", retries: 1,
+    });
+    expect(result).toMatchObject({ ok: false, error: { kind: "schema_validation_error" } });
+  });
+
+  it("rejects final-report calls without restricted controls before spawn", async () => {
+    traceSpec("RAE-FINAL-AGENT", "RAE-FINAL-PROTO-DIR");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    const result = await callOpencode({ model: "m", phase: "final-report", prompt: "p", retries: 1 });
+    expect(result).toMatchObject({ ok: false, error: { kind: "invalid_files" } });
+    expect(runProcess).not.toHaveBeenCalled();
+  });
+
+  it("rejects fenced or prose-wrapped final-report acknowledgments", async () => {
+    traceSpec("RAE-FINAL-PROTO-ACK");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    vi.mocked(runProcess).mockResolvedValueOnce({
+      exitCode: 0, signal: null,
+      stdout: JSON.stringify({ type: "text", part: { text: '```json\n{"report_path":"/tmp/report.md"}\n```' } }),
+      stderr: "", timedOut: false,
+    });
+    const result = await callOpencode({
+      model: "m", phase: "final-report", prompt: "p", workspaceRoot: "/tmp",
+      opencodeConfigContent: "{}", retries: 1,
+    });
+    expect(result).toMatchObject({ ok: false, error: { kind: "invalid_json" } });
+  });
+
+  it("rejects final-report event streams that exceed the capture bound", async () => {
+    traceSpec("RAE-FINAL-PROTO-ACK");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    vi.mocked(runProcess).mockResolvedValueOnce({
+      exitCode: null, signal: "SIGKILL", stdout: "", stderr: "",
+      timedOut: false, outputLimitExceeded: true,
+    });
+    const result = await callOpencode({
+      model: "m", phase: "final-report", prompt: "p", workspaceRoot: "/tmp",
+      opencodeConfigContent: "{}", retries: 1,
+    });
+    expect(result).toMatchObject({ ok: false, error: { kind: "spawn_error", message: expect.stringContaining("capture bound") } });
+  });
+
   it("selects only the preregistered model reasoning variants", async () => {
     expect(variantForModel("github-copilot/gpt-5.6-luna")).toBe("max");
     expect(variantForModel("github-copilot/gpt-5.6-terra")).toBe("high");

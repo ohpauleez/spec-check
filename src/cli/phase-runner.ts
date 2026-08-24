@@ -111,3 +111,46 @@ export async function runPhaseWithResult<T>(
     throw new PipelineAbortError("PipelineError", `phase failed: ${name}`);
   }
 }
+
+/**
+ * Execute an optional phase whose expected failure is returned as data.
+ *
+ * @param name - phase name for progress and telemetry
+ * @param state - immutable run state before the attempt
+ * @param operation - bounded operation returning a value
+ * @param succeeded - pure classifier for whether the value is a successful outcome
+ * @returns the value and state; the phase is marked complete only on success
+ *
+ * @throws {Error} for exceptional thrown failures after recording a failed phase
+ *
+ * @remarks
+ * Expected failure emits a failed terminal observation but does not throw. This
+ * lets the orchestrator persist degradation evidence without converting the
+ * already-complete core run into a fatal pipeline result.
+ */
+export async function runOptionalPhaseWithResult<T>(
+  name: string,
+  state: RunState,
+  operation: () => Promise<T>,
+  succeeded: (value: T) => boolean,
+): Promise<{ readonly state: RunState; readonly value: T }> {
+  const timestamp = new Date().toISOString();
+  const startedAt = process.hrtime.bigint();
+  emitProgressEvent(createProgressEvent(name, "started", undefined, timestamp));
+  try {
+    const value = await runWithTelemetryPhase(name, operation);
+    const durationMs = Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
+    const success = succeeded(value);
+    recordPipelinePhase(name, timestamp, durationMs, success ? "completed" : "failed");
+    emitProgressEvent(createProgressEvent(name, success ? "completed" : "failed", durationMs));
+    return { state: success ? markPhaseCompleted(state, name) : state, value };
+  } catch (error: unknown) {
+    const durationMs = Number((process.hrtime.bigint() - startedAt) / 1_000_000n);
+    recordPipelinePhase(name, timestamp, durationMs, "failed");
+    emitProgressEvent(createProgressEvent(name, "failed", durationMs));
+    if (error instanceof Error) {
+      throw error;
+    }
+    throw new PipelineAbortError("PipelineError", `phase failed: ${name}`);
+  }
+}

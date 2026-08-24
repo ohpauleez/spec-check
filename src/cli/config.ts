@@ -137,7 +137,7 @@ const DEFAULT_MODEL = "github-copilot/gpt-5.6-terra";
  *
  * @returns On success, an `Ok<RunConfig>` satisfying:
  *   - `inputs` is non-empty (at least one input path).
- *   - `output` is a branded {@link OutputDirPath} resolved from CLI, config
+ *   - `output` is an absolute branded {@link OutputDirPath} resolved from CLI, config
  *     file, or the default `"spec-check-output"`.
  *   - `model` is a branded {@link ModelName}.
  *   - `pairBudget` is a positive integer.
@@ -205,13 +205,13 @@ export async function resolveRunConfig(args: CliArgs): Promise<Result<RunConfig,
   }
 
   const rawOutput = args.output ?? fromFile.value.output ?? "spec-check-output";
+  const resolvedOutput = resolve(rawOutput);
   const resolvedSrc = args.src ?? fromFile.value.src;
 
   // [CAT-CLI-OUTSRC] Reject output directory inside source directory.
   if (resolvedSrc !== undefined) {
-    const resolvedOutputAbs = resolve(rawOutput);
     const resolvedSrcAbs = resolve(resolvedSrc);
-    const rel = relative(resolvedSrcAbs, resolvedOutputAbs);
+    const rel = relative(resolvedSrcAbs, resolvedOutput);
     if (rel === "" || (!rel.startsWith("..") && !rel.startsWith("/"))) {
       return err({ kind: "output_inside_src" });
     }
@@ -234,7 +234,7 @@ export async function resolveRunConfig(args: CliArgs): Promise<Result<RunConfig,
 
   return ok({
     inputs: mergedInputs,
-    output: toOutputDirPath(rawOutput),
+    output: toOutputDirPath(resolvedOutput),
     src: resolvedSrc,
     caps: args.caps ?? fromFile.value.caps,
     z3: args.z3 ?? fromFile.value.z3,

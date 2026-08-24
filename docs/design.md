@@ -128,7 +128,7 @@ The goal is not a proof of the whole system. The goal is justified confidence: t
 | capability behavior | active `openspec/specs/**/spec.md` plus at most one in-dev delta per capability; when both exist, per-capability merge produces a single merged active view by applying delta operations (ADDED/MODIFIED/REMOVED) against the finalized base | archived specs are excluded by default; explicitly provided archived inputs can be admitted with `--allow-archive` |
 | code-derived guarantees | source directory and its tests/contracts | code-derived analysis is bounded to the declared `--src` scope |
 | analysis conclusions | preserved evidence under the output directory | no final verdict rests on an unpreserved opaque LLM response |
-| run completion | manifest file written last in output directory | manifest absence means incomplete run |
+| core run completion | manifest written after all core evidence | manifest absence means incomplete core analysis; optional `report.md` may follow |
 | traceability identifiers | canonical bracketed identifiers in OpenSpec specs | tests and source must align to those identifiers |
 
 ### 2.5 Nondeterministic Boundaries
@@ -313,7 +313,8 @@ This split matters for assurance. The more the decision logic is isolated from t
 | **Cross-side implication** ([`src/domain/code-backwards/cross-implication.ts`](src/domain/code-backwards/cross-implication.ts)) | Bidirectional solver-backed implication between original and code-derived formalizations | Primary strength classifier; greedy matching is deterministic; all queries persisted |
 | **Blind comparison** ([`src/domain/code-backwards/blind-compare.ts`](src/domain/code-backwards/blind-compare.ts)) | Explanatory LLM rationale for formal classification | Code-derived side never receives original requirement text |
 | **Report rendering** ([`src/domain/reporting/render.ts`](src/domain/reporting/render.ts)) | Render Markdown reports; replace malformed findings with `reporting.unsupported_verdict` defects | Reports never contain findings without provenance; untrusted evidence text neutralized into inert Markdown via `neutralizeMarkdownInline()` (`RAE-EVID-RENDER-SAFE`) |
-| **Manifest** ([`src/domain/reporting/manifest.ts`](src/domain/reporting/manifest.ts)) | Build entries with SHA-256 checksums, including separate formalization attempt-set evidence files; write atomically; invalidate stale manifests as the first run-start cleanup step | Manifest is the final file written and the sole success marker; attempt evidence alone does not mark completion |
+| **Manifest** ([`src/domain/reporting/manifest.ts`](src/domain/reporting/manifest.ts)) | Build entries with SHA-256 checksums, including separate formalization attempt-set evidence files; write atomically; invalidate stale manifests at run start | Manifest is the final core-evidence write and sole core success marker; optional unmanifested `report.md` may physically follow |
+| **Final report** ([`src/domain/reporting/final-report.ts`](src/domain/reporting/final-report.ts)) | Build the evaluated prompt and one-path transient agent policy; validate and clean `report.md`; model legal lifecycle transitions | Report is optional, <=1 MiB, non-symlink, non-empty, and excluded from the core manifest; handled failure persists a checksummed warning |
 | **Filesystem adapter** ([`src/adapters/fs.ts`](src/adapters/fs.ts)) | Path confinement, atomic writes (temp + rename), SHA-256 checksums | All writes confined to configured output directory; `precondition` throws on traversal |
 | **Process adapter** ([`src/adapters/process.ts`](src/adapters/process.ts)) | Generic `execFile` wrapper with argv arrays, timeout handling, stdin piping | No shell interpolation; `shell: false`; ENOENT on spawn rejects the promise |
 | **`opencode` adapter** ([`src/adapters/opencode.ts`](src/adapters/opencode.ts)) | `opencode` subprocess with NDJSON event stream parsing, optional `--file` attachments, bounded retries | Bounded retries (default 3); invalid responses consume a retry; universal timeout comes from run config (default 300s) |
@@ -374,7 +375,7 @@ erDiagram
 | Code-Derived Specification | EARS-preferring behavioral spec generated from source evidence, blind to original text | code-derived generation | persisted as Markdown in `gen_specs/` |
 | Cross-Side Implication Result | Solver-backed classification (same, stronger, weaker, different, uncertain) | cross-side analysis | primary strength classifier; queries persisted verbatim |
 | Report | Human-readable Markdown artifact summarizing one analysis pass | reporting phase | never contains findings without provenance; malformed findings replaced with defect markers |
-| Manifest | Completion record listing all produced output files, including attempt-set evidence files, with SHA-256 checksums | reporting phase | written last; stale manifest removed before the prior formalization-evidence tree at run start; presence marks completed run; surviving evidence files alone do not |
+| Manifest | Completion record listing all produced core output files, including attempt-set evidence files, with SHA-256 checksums | reporting phase | written after core evidence; optional `report.md` may follow; presence marks core completion |
 | Traceability Identifier | Canonical bracketed identifier linking claims to tests and source evidence | spec files and test harness | `[A-Z][A-Z0-9]*(-[A-Z0-9]+)+` format |
 
 ### 4.3 Conceptual Relationships
@@ -524,7 +525,7 @@ Relevant code: [`src/domain/findings.ts`](src/domain/findings.ts)
 | **D-5** | Findings are never silently removed by later phases | `addFindings()` postcondition in `RunState` | Monotonic accumulation; length postcondition check |
 | **D-6** | SMT-LIB identifiers use injective fixed-width-6 sanitization and satisfy `^[A-Za-z_][A-Za-z0-9_]*$` | `sanitizeIdentifier()` in `identifiers.ts` | Distinct raw identifiers cannot alias to one solver symbol |
 | **D-7** | Parser output is deterministic given the same input content | Module-level invariant; no I/O-dependent state | Property tests |
-| **D-8** | The manifest is the last file written; at the next run start the stale manifest is invalidated before the prior `formalization_evidence/` tree is removed and before any new pipeline work | `runCli()` output preparation; `invalidateStaleManifest()`; `removeOutputTree()`; `writeManifest()` at run end | Manifest absence signals incomplete run; cleanup failure aborts before new analysis evidence is produced |
+| **D-8** | The manifest is written after all core evidence; optional `report.md` may follow. On warning persistence the old marker is invalidated before summary mutation | `runCli()` output preparation; `invalidateStaleManifest()`; `writeCoreManifest()` | Manifest absence signals incomplete or inconsistent core output; no stale checksum marker survives refresh failure |
 | **D-9** | Compiled SMT-LIB never includes `(check-sat)` | `compileSmtlib()` and `compileSpecSmtlib()` | Caller appends solver commands at query time |
 | **D-10** | Claim extraction order is deterministic: proposal → design → specs → tasks | `buildClaimGraph()` iteration order | Property tests |
 | **D-11** | Per-capability merge output is deterministic given the same parsed inputs | `mergeSpecsByCapability()` module-level invariant | Property and determinism tests |
@@ -537,7 +538,7 @@ Relevant code: [`src/domain/findings.ts`](src/domain/findings.ts)
 | **D-18** | Physical sub-batches preserve semantic key and eligible order; context JSON serialization is byte-deterministic and does not mutate claim provenance | Pure stable slicing; schema-v1 serializer with fixed field order, UTF-8, LF, and one trailing newline | Context SHA-256 and claim-set-scoped pointer evidence can reconstruct deleted attached context bytes |
 | **D-19** | At handled formalization completion, candidate indexes `C` and claim-error indexes `R` exactly and disjointly partition eligible indexes `E`: `C ∩ R = ∅` and `C ∪ R = E` | Indexed outcome assembly and postcondition checks | Additional-sample failure preserves an existing candidate, emits a warning, and never creates a claim error for that failure |
 | **D-20** | Each formalization invocation owns one `FormalizationAttemptSet`; its indexes resolve only within its `claimSet` (`specs_forward` or generated-spec ordinal/capability) | Invocation envelope construction and claim-set-scoped reconstruction | Index collisions between invocations cannot reconstruct the wrong context |
-| **D-21** | Separate atomically finalized attempt-set files may survive a failed or terminated current run and do not imply completion; they survive only until the next run removes the entire prior `formalization_evidence/` tree; the successful manifest is written last and lists/checksums all current-run files | Run-start output preparation, reporting persistence, and manifest construction | Partial evidence remains auditable between runs without impersonating a successful run or contaminating the next run |
+| **D-21** | Separate atomically finalized attempt-set files may survive a failed or terminated current run and do not imply completion; the successful core manifest follows and lists/checksums all current-run core files | Run-start output preparation, reporting persistence, and manifest construction | Partial evidence remains auditable without impersonating core completion |
 
 **Spec references:** [`catalog-and-parse`](openspec/specs/catalog-and-parse/spec.md) -- `[CAT-PARSE-DETERMINISM]`, `[CAT-PRESERVE-LOSS]`; [`claim-graph-and-coverage`](openspec/specs/claim-graph-and-coverage/spec.md); [`reporting-and-evidence`](openspec/specs/reporting-and-evidence/spec.md) -- `[RAE-FINDING-SHAPE]`, `[RAE-FINDINGS-IMMUTABLE]`, `[RAE-ATOMIC-MANIFEST]`.
 
@@ -581,7 +582,7 @@ Relevant code: [`src/domain/findings.ts`](src/domain/findings.ts)
 | Code-derived logic analysis | Code-derived formalizations available; `z3` available | Internal consistency check of code-derived formalizations | `AdapterError` on solver failure |
 | Cross-side implication | Both original and code-derived formalizations available; `z3` available | Bidirectional solver-backed classification per matched pair; greedy matching with deterministic tiebreaking | `AdapterError` on solver failure |
 | Blind comparison | Cross-side results available; `opencode` available | Explanatory rationale for each classification; blind boundary preserved | `AdapterError` on LLM failure |
-| Reporting | At least one phase completed | Phase reports and separate attempt-set evidence files atomically finalized; successful manifest written last with their paths/checksums | `OutputError` on write failure; finalized evidence may remain without a manifest and does not imply completion |
+| Reporting | At least one phase completed | Phase reports and attempt evidence finalized; core manifest written; optional final assessment attempted | `OutputError` on core write/cleanup failure; handled report failure persists a warning |
 
 ### 5.3 Global Preconditions
 
@@ -594,7 +595,8 @@ Relevant code: [`src/domain/findings.ts`](src/domain/findings.ts)
 
 - The tool produces a bounded, evidence-preserving set of reports and intermediate artifacts under the output directory.
 - Every surfaced finding includes provenance and enough supporting evidence for a reviewer to inspect the basis of the conclusion.
-- When analysis completes successfully, a manifest is written last and identifies the produced artifacts with SHA-256 checksums.
+- When core analysis completes successfully, a manifest is written after all core evidence and identifies those artifacts with SHA-256 checksums.
+- A restricted post-completion agent then attempts optional `report.md`; handled failure refreshes the summary and manifest with warning evidence.
 - When source-backed analysis is requested, the output includes traceability or comparison results that explain the relationship between spec intent and code-derived guarantees.
 - Successful runs exit with code `0` (no findings) or `1` (findings present).
 - Skipped optional phases are explained in reporting.
@@ -772,7 +774,7 @@ stateDiagram-v2
 - Safety: attached claim text remains untrusted data, and explicit eligible indexes prevent missing or duplicate claim IDs from misattributing responses or additional samples.
 - Safety: temp context cleanup is attempted for handled terminal paths that reach lifecycle finalization; cleanup failure after success is reported without discarding candidates. Process termination has no cleanup guarantee and may leave artifacts with no manifest.
 - Safety: candidate and claim-error indexes are disjoint and exhaustive; additional-sample failure cannot turn an existing candidate into a claim error.
-- Safety: attempt-set evidence files can survive failure but cannot signal completion without the last-written manifest.
+- Safety: attempt-set evidence files can survive failure but cannot signal core completion without the manifest.
 - Safety: inconclusive solver results are preserved as findings, not treated as success.
 - Safety: structurally invalid or oversized compile groups perform zero solver work; they degrade to a `logic.invalid_group` finding instead of aborting the run.
 - Safety: spec-combine merge conflicts surface `logic.merge_conflict` findings while surviving claims continue to analysis; no conflicting declaration silently overwrites another (first-wins).
@@ -849,7 +851,7 @@ stateDiagram-v2
     RenderSummary --> WriteArtifacts: summary rendered
     WriteArtifacts --> ComputeChecksums
     ComputeChecksums --> WriteManifest
-    WriteManifest --> Complete: manifest written last
+    WriteManifest --> Complete: core manifest written
     WriteManifest --> FatalExit: manifest write failure
     Complete --> [*]
     FatalExit --> [*]
@@ -874,7 +876,7 @@ stateDiagram-v2
 | ID | Invariant |
 |---|---|
 | RP-1 | Run start first removes stale `manifest.json`, then removes the entire prior `formalization_evidence/` tree, before any other pipeline work or new output |
-| RP-2 | Manifest is the final file written in the output directory |
+| RP-2 | Manifest is written after all core evidence; optional `report.md` may follow and is excluded |
 | RP-3 | Report writes are atomic (temp + rename) |
 | RP-4 | Manifest checksums match the content written to disk |
 | RP-5 | Malformed findings are never silently dropped; they are replaced with defect markers |
@@ -995,7 +997,7 @@ sequenceDiagram
         S-->>C: source-backed findings
     end
     C->>R: render reports and write artifacts
-    R->>M: write manifest last
+    R->>M: write core manifest after core evidence
     C-->>I: RunState
     alt no findings
         I-->>U: exit 0
@@ -1095,7 +1097,7 @@ Protocol rules:
 - attached responses are matched by required original eligible `index`, never by array position or `claim.id`; unknown, duplicate, or missing indexes are schema failures
 - attached temp directories use the `spec-check-batch-` prefix and fixed `batch-context.json`; evidence is recorded and cleanup is attempted in `finally` before claim outcomes are assigned on handled paths; process termination may bypass cleanup
 - every invocation's attempt envelope declares `claimSet` as `specs_forward` or `generated_spec` with local ordinal/capability; attempt indexes resolve only within that claim set
-- each attempt set is persisted as a separate atomic evidence file; such files may survive failure, while the last-written manifest alone marks success and lists/checksums them
+- each attempt set is persisted as a separate atomic evidence file; such files may survive failure, while the core manifest alone marks core success and lists/checksums them
 - terminal `timeout`, `invalid_json`, and `schema_validation_error` failures degrade to bounded per-claim inline calls; infrastructure failures become claim errors without redundant fallback
 - once a candidate exists, additional-sample failure preserves it and emits a warning finding only; at handled completion candidate and claim-error indexes are disjoint and exhaust eligible indexes
 - compiled SMT-LIB excludes solver commands until query execution time
@@ -1257,7 +1259,7 @@ Phase completion events include `duration_ms` and summary counts where applicabl
 | **SMT-LIB syntax collision** | User-derived identifiers with reserved chars | Malformed solver inputs | `sanitizeIdentifier()` with hex escaping; reversible mapping comments |
 | **Report Markdown injection** | Untrusted evidence text contains Markdown control syntax | Findings spoof report structure, links, or emphasis | `neutralizeMarkdownInline()` neutralizes links, emphasis, code spans, table pipes, headings, block quotes, list items, and table-cell breakout (`RAE-EVID-RENDER-SAFE`) |
 | **Blind boundary violation** | Original text exposed to code-derived side | Undermines comparison methodology | Structural enforcement; violations surfaced as analysis defects |
-| **Manifest written prematurely** | Manifest before all outputs finalized | Partial output trusted as complete | Invalidate stale `manifest.json` as the first run-start cleanup operation; write the current manifest last |
+| **Manifest written prematurely** | Manifest before core outputs finalize | Partial core output trusted as complete | Invalidate stale `manifest.json` at run start; write the current manifest after core evidence |
 | **Prior attempt evidence contaminates a rerun** | A previous successful, failed, or terminated run left `formalization_evidence/` files | Current evidence is attributed to the wrong run | After stale-manifest invalidation, recursively remove the entire prior evidence tree before any pipeline work; abort on cleanup failure |
 | **Attempt evidence mistaken for completion** | Atomic attempt-set files survive a failed or terminated current run until the next run starts | Partial run trusted as successful | Evidence files are not completion markers; only manifest presence marks success, and the manifest lists/checksums every current-run attempt-set file |
 | **Output write failure** | Filesystem error during atomic write | Incomplete evidence set | Exit with `OutputError`; no manifest written; temp file cleaned up |
@@ -1283,7 +1285,7 @@ Phase completion events include `duration_ms` and summary counts where applicabl
 - Retry bounded external calls with explicit timeouts and fail hard when required evidence-producing phases remain unavailable.
 - Preserve inconclusive states (timeouts, unknown solver responses) as findings rather than treating them as success.
 - Treat parser loss, unsupported references, and provenance gaps as surfaced defects rather than invisible degradation.
-- Use atomic writes plus manifest-last semantics so interrupted runs cannot impersonate complete output.
+- Use atomic core writes plus manifest completion semantics so interrupted core runs cannot impersonate complete output.
 - No automatic retry policy at the pipeline level: individual phases control their own retry behavior.
 
 ### 8.6 Result Type and Assertion Utilities
@@ -1315,7 +1317,7 @@ Relevant code: [`src/domain/result.ts`](src/domain/result.ts), [`src/domain/erro
 
 - Cleanup is guaranteed only for handled execution paths that reach their lifecycle `finally` blocks.
 - No SIGINT or SIGTERM temp-cleanup guarantee is part of the contract. Process termination can leave temp context artifacts and atomically finalized attempt-set evidence files.
-- If termination occurs before `manifest.json` is written last, the manifest is absent and the run is incomplete. Surviving current-run evidence audits attempted work but does not imply completion and may remain only until the next run removes the prior `formalization_evidence/` tree.
+- If termination occurs before the core manifest, core analysis is incomplete. Termination during optional report generation does not revoke the existing core completion marker.
 
 ---
 
@@ -1338,8 +1340,8 @@ Relevant code: [`src/domain/result.ts`](src/domain/result.ts), [`src/domain/erro
 | **No solver conclusion from unvalidated formalization** | Pipeline ordering enforced by domain types; clustering only accepts validated `LogicIrClaim` | Integration tests |
 | **No blind comparison exposes original requirement text** | Structural boundary enforcement in `derive.ts` and `blind-compare.ts` | Property tests; boundary violation detection |
 | **No code-derived generation exposes original requirement text** | Generation receives only source evidence and capability name suggestions | Property tests |
-| **No manifest written before all outputs finalized** | `invalidateStaleManifest()` at start; `writeManifest()` as final I/O | Integration tests |
-| **No attempt-evidence file implies completion** | Separate atomic files are partial evidence; successful manifest lists/checksums them and is written last | Failure/termination and manifest contract tests |
+| **No manifest written before core outputs finalize** | `invalidateStaleManifest()` at start; `writeCoreManifest()` after core evidence | Integration tests |
+| **No attempt-evidence file implies completion** | Separate atomic files are partial evidence; successful core manifest lists/checksums them | Failure/termination and manifest contract tests |
 | **No prior formalization evidence enters a new run** | Ordered run-start cleanup invalidates the stale manifest, then removes the prior `formalization_evidence/` tree before pipeline work | Run-start ordering and recursive-removal integration tests |
 | **No unsupported verdict reaches final report** | Report rendering replaces malformed findings with `reporting.unsupported_verdict` defects | Contract tests |
 | **No shell injection** | Argv-based `execFile` only with `shell: false`; no `exec` in codebase | Codebase invariant |
@@ -1408,7 +1410,7 @@ graph BT
 
 | Layer | Coverage Focus |
 |---|---|
-| **External formal models** | Merge-structure safety invariants (`openspec/changes/variable-claim-conflict/specs/formalization-and-logic-analysis/alloy/merge.als`) and semantic grouping, batch lifecycle, and claim-partition invariants (`openspec/changes/semantic-batching/specs/formalization-and-logic-analysis/alloy/semantic-batching.als`) checked in Alloy via Analyzer runs |
+| **External formal models** | Merge-structure safety, semantic batching and claim partition, plus post-completion final-report lifecycle invariants checked in Alloy via Analyzer runs under the corresponding OpenSpec changes |
 | **Property-based tests** | Parser invariants, claim extraction invariants, clustering determinism, implication classification symmetry, blind boundary enforcement, manifest integrity, run-state monotonicity, temp-lifecycle histories, attached-response matching, degradation decision machine, outcome determinism under shuffled completion, evidence isolation across concurrent invocations |
 | **Contract tests** | CLI argument handling, config merge precedence, parser structural checks, EARS classification, LLM schema validation, SMT-LIB sanitization, manifest semantics, boundary violation detection, obligation-aware severity |
 | **Integration tests** | End-to-end analyses with fixture specs plus fake `opencode` and fake `z3` adapters |
@@ -1438,7 +1440,7 @@ graph BT
 - Code-derived generation blind boundary enforcement
 - Cross-side implication classification (same/stronger/weaker/different/uncertain)
 - Blind comparison boundary enforcement
-- Report rendering, manifest checksums, manifest-last ordering
+- Report rendering, core-manifest checksums, post-completion report ordering
 
 **Property-based tests** exercise invariants over generated inputs:
 - Parser: every input line is classified or preserved as unparsed evidence
@@ -1498,7 +1500,7 @@ The tool has no end-user authentication or authorization model because it is a l
 | subprocess invocation | argv-based execution via `execFile`; no shell interpolation | `shell: false` in [`src/adapters/process.ts`](src/adapters/process.ts) |
 | prompt injection | inline document content is fenced; attached batch JSON and claim text are explicitly untrusted data, never instructions; multi-claim prompt bodies contain no claim text | `sanitizeForCodeFence()` in [`src/domain/fence.ts`](src/domain/fence.ts); dedicated attached-context prompt and transport in formalization modules |
 | attached formalization context | full claim text exists temporarily outside `--output`; it must be owner-only and auditable after deletion, but process termination can prevent cleanup | fresh `spec-check-batch-` temp directory; exclusive `0600` `batch-context.json`; cleanup in `finally` on handled paths; invocation `claimSet` plus local pointers and SHA-256 persisted |
-| formalization attempt evidence | atomic evidence may survive a failed or terminated current run until the next run, and local indexes can collide across invocations | one `FormalizationAttemptSet` file per invocation; `claimSet` scopes reconstruction; only the last-written manifest marks success and lists/checksums current-run evidence; ordered next-run cleanup removes the prior evidence tree |
+| formalization attempt evidence | atomic evidence may survive a failed or terminated current run until the next run, and local indexes can collide across invocations | one `FormalizationAttemptSet` file per invocation; `claimSet` scopes reconstruction; only the core manifest marks success and lists/checksums current-run evidence |
 | filesystem overreach | all writes confined to `--output` directory; output paths resolved and validated up front | `resolveConfinedOutputPath()` with `precondition` in [`src/adapters/fs.ts`](src/adapters/fs.ts) |
 | SMT-LIB identifier injection | user-derived identifiers sanitized before writing SMT-LIB artifacts with injective fixed-width-6 escapes | `sanitizeIdentifier()` in [`src/domain/formal/identifiers.ts`](src/domain/formal/identifiers.ts) |
 | report rendering injection | untrusted spec-derived finding text (descriptions, provenance, evidence values, related claim IDs) rendered as inert Markdown data; cannot break out of list/table context or inject links, emphasis, code spans, or block structure | `neutralizeMarkdownInline()` in [`src/domain/reporting/render.ts`](src/domain/reporting/render.ts) (`RAE-EVID-RENDER-SAFE`) |
@@ -1703,7 +1705,7 @@ openspec/
 | Artifact | Description |
 |---|---|
 | `report_summary.md` | Synthesized summary across all phases with category counts and skipped-phase reporting |
-| `manifest.json` | Completion record listing all produced files with SHA-256 checksums; written last |
+| `manifest.json` | Core completion record listing core files with SHA-256 checksums; optional `report.md` is excluded and may follow |
 
 ### 16.4 CLI Interface
 

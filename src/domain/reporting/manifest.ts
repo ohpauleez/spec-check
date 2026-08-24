@@ -32,7 +32,8 @@ export interface ManifestEntry {
  *
  * @remarks
  * Invariant: `files` contains an entry for every artifact produced during the run.
- * The manifest itself is written atomically after all other artifacts are finalized.
+ * The manifest itself is written atomically after all core artifacts are finalized.
+ * Optional post-completion derivatives such as `report.md` are excluded.
  */
 export interface ManifestFile {
   readonly files: readonly ManifestEntry[];
@@ -73,7 +74,27 @@ export function buildManifestEntries(
 }
 
 /**
- * Write the output manifest atomically after all other artifacts are finalized.
+ * Validate entries selected for the core completion manifest.
+ *
+ * @param entries - complete candidate core entry list
+ * @returns the same immutable list after checking final-report exclusion
+ * @throws {Error} when the optional post-completion `report.md` is present
+ *
+ * @remarks
+ * This is the production selection guard used immediately before every core
+ * manifest write. It prevents any descriptor source, including metrics or
+ * future evidence types, from accidentally manifesting the derivative report.
+ */
+export function validateCoreManifestEntries(entries: readonly ManifestEntry[]): readonly ManifestEntry[] {
+  const finalReportEntry = entries.find((entry) => entry.path === "report.md");
+  if (finalReportEntry !== undefined) {
+    throw new Error("core manifest must exclude report.md");
+  }
+  return entries;
+}
+
+/**
+ * Write the output manifest atomically after all core artifacts are finalized.
  *
  * @param outputDir - branded absolute directory path where the manifest is written
  * @param entries - manifest entries for all rendered artifacts
@@ -91,7 +112,8 @@ export function buildManifestEntries(
  * Failure modes:
  * - Throws if `writeOutputAtomic` fails (e.g., permission denied, disk full, directory missing).
  *
- * Safety: must be called after all other artifact writes are complete to ensure manifest consistency.
+ * Safety: must be called after core artifact writes are complete. Optional
+ * post-completion derivatives are outside this completion record.
  *
  * @example
  * ```typescript

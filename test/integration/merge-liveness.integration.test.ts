@@ -80,6 +80,17 @@ vi.mock("../../src/domain/formal/logic-analysis.js", () => ({
   })),
 }));
 
+vi.mock("../../src/domain/reporting/final-report.js", async (importOriginal) => {
+  const original = await (importOriginal() as Promise<Record<string, unknown>>);
+  return {
+    ...original,
+    generateFinalReport: vi.fn(async () => ({
+      ok: true,
+      value: { path: "report.md", content: "# Final\n" },
+    })),
+  };
+});
+
 function makeConfig(inputRoot: string, output: string): RunConfig {
   return {
     inputs: [inputRoot],

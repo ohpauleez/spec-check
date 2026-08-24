@@ -22,7 +22,7 @@ At a high level it supports:
 - **formalization pipeline**: translates requirement and scenario claims into typed logic IR, clusters alternate interpretations, and generates SMT-LIB artifacts for Z3 analysis
 - **optional source-backed analysis**: traces requirements to source evidence, generates EARS-preferring code-derived specifications, formalizes them through the same pipeline, and uses solver-backed cross-side implication (ie: how strongly aligned are the specs and code?)
 - **evidence-preserving reports**: bounded Markdown reports with provenance, intermediate artifacts, and manifest-based completion semantics
-- **final assessment**: after core completion, a restricted agent synthesizes optional `report.md`; report failure preserves the core run and is recorded as a warning
+- **final assessment**: after core completion, a read-only agent returns a synthesized assessment and `spec-check` atomically publishes optional `report.md`; failure preserves the core run and is recorded as a warning
 
 For the full design rationale, see [docs/design.md](docs/design.md).
 

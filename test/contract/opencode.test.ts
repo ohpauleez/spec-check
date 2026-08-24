@@ -51,7 +51,7 @@ describe("opencode adapter contract", () => {
     mocked.mockResolvedValueOnce({
       exitCode: 0,
       signal: null,
-      stdout: JSON.stringify({ type: "text", part: { text: '{"report_path":"/tmp/out/report.md"}' } }),
+      stdout: JSON.stringify({ type: "text", part: { text: '{"report_path":"/tmp/out/report.md","report_markdown":"# Report"}' } }),
       stderr: "",
       timedOut: false,
     });
@@ -71,7 +71,7 @@ describe("opencode adapter contract", () => {
     ]);
     expect(args).not.toContain("--auto");
     expect(options.envOverrides).toEqual({ OPENCODE_CONFIG_CONTENT: "{\"agent\":{}}" });
-    expect(options).toMatchObject({ maxOutputBytes: 1_048_576 });
+    expect(options).toMatchObject({ maxOutputBytes: 8_388_608 });
   });
 
   it("isolates final-report config roots when provided", async () => {
@@ -79,7 +79,7 @@ describe("opencode adapter contract", () => {
     const { runProcess } = await import("../../src/adapters/process.js");
     vi.mocked(runProcess).mockResolvedValueOnce({
       exitCode: 0, signal: null,
-      stdout: JSON.stringify({ type: "text", part: { text: '{"report_path":"/tmp/report.md"}' } }),
+      stdout: JSON.stringify({ type: "text", part: { text: '{"report_path":"/tmp/report.md","report_markdown":"# Report"}' } }),
       stderr: "", timedOut: false,
     });
     await callOpencode({
@@ -101,7 +101,7 @@ describe("opencode adapter contract", () => {
     const { runProcess } = await import("../../src/adapters/process.js");
     vi.mocked(runProcess).mockResolvedValueOnce({
       exitCode: 0, signal: null,
-      stdout: JSON.stringify({ type: "text", part: { text: '{"report_path":"/tmp/report.md"}' } }),
+      stdout: JSON.stringify({ type: "text", part: { text: '{"report_path":"/tmp/report.md","report_markdown":"# Report"}' } }),
       stderr: "", timedOut: false,
     });
     const collector = createTelemetryCollector();
@@ -122,10 +122,11 @@ describe("opencode adapter contract", () => {
 
   it.each([
     ["missing", {}],
-    ["empty", { report_path: " " }],
-    ["non-string", { report_path: 4 }],
-    ["array", [{ report_path: "/tmp/report.md" }]],
-    ["extra", { report_path: "/tmp/report.md", bytes: 1 }],
+    ["empty", { report_path: " ", report_markdown: "# Report" }],
+    ["non-string", { report_path: 4, report_markdown: "# Report" }],
+    ["missing-body", { report_path: "/tmp/report.md" }],
+    ["array", [{ report_path: "/tmp/report.md", report_markdown: "# Report" }]],
+    ["extra", { report_path: "/tmp/report.md", report_markdown: "# Report", bytes: 1 }],
   ])("rejects %s final-report acknowledgment", async (_name, payload) => {
     traceSpec("RAE-FINAL-PROTO-ACK");
     const { runProcess } = await import("../../src/adapters/process.js");
@@ -154,7 +155,7 @@ describe("opencode adapter contract", () => {
     const { runProcess } = await import("../../src/adapters/process.js");
     vi.mocked(runProcess).mockResolvedValueOnce({
       exitCode: 0, signal: null,
-      stdout: JSON.stringify({ type: "text", part: { text: '```json\n{"report_path":"/tmp/report.md"}\n```' } }),
+      stdout: JSON.stringify({ type: "text", part: { text: '```json\n{"report_path":"/tmp/report.md","report_markdown":"# Report"}\n```' } }),
       stderr: "", timedOut: false,
     });
     const result = await callOpencode({

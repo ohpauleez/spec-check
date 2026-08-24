@@ -90,17 +90,17 @@ export async function writeOutputAtomic(outputDir: OutputDirPath, relativePath: 
     ensuredDirectories.add(parentDir);
   }
   const tempPath = `${finalPath}.tmp-${process.pid}-${Date.now().toString(16)}`;
-  await writeFile(tempPath, content, "utf8");
   try {
+    await writeFile(tempPath, content, "utf8");
     await rename(tempPath, finalPath);
-  } catch (renameError: unknown) {
-    // Clean up orphan temp file before propagating the failure.
+  } catch (writeError: unknown) {
+    // Clean up partial temp output after either write or rename failure.
     try {
       await unlink(tempPath);
     } catch {
-      // Swallow cleanup errors — the rename failure is the primary error.
+      // Swallow cleanup errors — the write/rename failure is primary.
     }
-    throw renameError;
+    throw writeError;
   }
 }
 

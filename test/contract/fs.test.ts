@@ -6,6 +6,7 @@ import { describe, expect, it, vi } from "vitest";
 import { traceSpec } from "../support/spec-trace.js";
 import { removeOutputTree, resolveConfinedOutputPath, writeOutputAtomic, sha256Hex } from "../../src/adapters/fs.js";
 import { toOutputDirPath, toRelativePath } from "../../src/domain/branded.js";
+import type * as FsPromises from "node:fs/promises";
 
 describe("filesystem adapter contracts", () => {
   it("allows path within output directory", () => {
@@ -91,6 +92,31 @@ describe("filesystem adapter contracts", () => {
       // The temp orphan must be cleaned up: no `.tmp-` file may remain.
       const leftover = (await readdir(dir)).filter((name) => name.includes(".tmp-"));
       expect(leftover).toEqual([]);
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  });
+
+  it("removes partial temp output when the temp write fails", async () => {
+    traceSpec("RAE-OUTPUT-ATOMIC", "RAE-ATOMIC-INTERRUPT");
+    const dir = await mkdtemp(join(tmpdir(), "spec-check-fs-write-"));
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => {
+      const actual = await vi.importActual<typeof FsPromises>("node:fs/promises");
+      return {
+        ...actual,
+        writeFile: vi.fn(async (path: Parameters<typeof actual.writeFile>[0]) => {
+          await actual.writeFile(path, "partial", "utf8");
+          throw new Error("ENOSPC: partial write");
+        }),
+      };
+    });
+    try {
+      const { writeOutputAtomic: mockedWrite } = await import("../../src/adapters/fs.js");
+      await expect(mockedWrite(toOutputDirPath(dir), toRelativePath("atomic.md"), "payload\n"))
+        .rejects.toThrow("ENOSPC");
+      expect((await readdir(dir)).filter((name) => name.includes(".tmp-"))).toEqual([]);
     } finally {
       vi.doUnmock("node:fs/promises");
       vi.resetModules();

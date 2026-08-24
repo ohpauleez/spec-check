@@ -10,9 +10,9 @@ This change adds a bounded final-report step that reads a completed evidence bun
 
 - Generate `report.md` after the phase reports, `report_summary.md`, and the core `manifest.json` establish that analysis completed.
 - Use the evaluated prompt F with runtime-bound absolute paths for the configured evidence directory and exact report destination.
-- Give the final-report agent read access to the workspace and evidence bundle, and write access only to the designated `report.md` path.
-- Require the agent to save the Markdown report to disk and return only a small JSON acknowledgment naming that path.
-- Validate the acknowledgment and independently validate the file as a non-symlink regular file with non-whitespace Markdown content and a maximum size of 1 MiB.
+- Give the final-report agent read-only access to the workspace and evidence bundle and deny all file mutation tools.
+- Require the agent to return the destination and complete Markdown in one strict JSON payload.
+- Validate the payload path and Markdown, then atomically publish `report.md` through the trusted filesystem adapter and independently validate the resulting file.
 - Keep `report.md` outside `manifest.json` because the report is produced after core completion and derives from the manifested evidence.
 - Remove a stale `report.md` before a new run starts.
 - Treat every final-report failure as nonfatal: remove any partial or invalid report, append a `reporting.final_report_failed` warning, rewrite `report_summary.md`, and refresh `manifest.json` so its checksum remains valid.
@@ -25,7 +25,7 @@ This change adds a bounded final-report step that reads a completed evidence bun
 
 - Making `report.md` mandatory for a successful analysis run.
 - Adding `report.md` to `manifest.json` or using it as evidence for its own generation.
-- Changing the content strategy selected by the prompt evaluation, beyond the instructions needed for runtime paths, restricted file writing, and acknowledgment.
+- Changing the content strategy selected by the prompt evaluation, beyond runtime paths and structured report transport.
 - Changing existing analysis phases, phase reports, solver behavior, or source-backed analysis behavior.
 - Adding a CLI flag to disable final-report generation or select a separate report model.
 - Rerunning the report-prompt evaluation.
@@ -37,7 +37,7 @@ This change adds a bounded final-report step that reads a completed evidence bun
 
 The reporting phase currently writes phase reports and `report_summary.md`, then writes `manifest.json` last as the sole core-run completion marker. Prompt F requires the reviewer to read `manifest.json` first, inventory the evidence directory, and distinguish manifested evidence from integrity-unverified artifacts. It therefore cannot run correctly before the manifest exists.
 
-Evaluations in `pasture/report_prompts_eval*` selected prompt F as a strong decision-oriented report prompt. They also exposed runner variability: some models entered plan mode or wrote a report to disk instead of returning it on stdout. The final-report protocol addresses this by requiring a designated file write and using stdout only for a bounded acknowledgment.
+Evaluations in `pasture/report_prompts_eval*` selected prompt F as a strong decision-oriented report prompt. A production run then disproved the direct-write design: all retries used the custom final-report agent, but OpenCode denied `apply_patch` because path-granular edit rules do not match the patch envelope resource. One retry falsely acknowledged success after failed writes. The corrected protocol returns the report body as structured data and leaves atomic publication to `spec-check`, matching existing report generation.
 
 ### Affected Systems and Stakeholders
 
@@ -55,7 +55,7 @@ Evaluations in `pasture/report_prompts_eval*` selected prompt F as a strong deci
 - OpenCode `--pure` suppresses external plugins for this invocation; managed administrator policy may still deny required access but cannot be bypassed.
 - The workspace root supplied to OpenCode contains the analyzed specifications and, when configured, source files.
 - The configured evidence directory and report path can be represented as absolute filesystem paths, including paths containing spaces.
-- The selected model follows the prompt sufficiently to write a file and return an acknowledgment; the implementation does not trust this behavior without independent validation.
+- The selected model returns a strict payload with the requested report body; the implementation validates it before any write.
 - The operating system provides regular-file and symbolic-link metadata needed to validate the generated file.
 - The existing timeout remains the bound for the final-report invocation.
 
@@ -87,8 +87,8 @@ Evaluations in `pasture/report_prompts_eval*` selected prompt F as a strong deci
 - **Core Evidence Bundle**: The phase reports, summary, raw evidence, and manifest produced by a successful analysis. Manifest presence marks core completion.
 - **Completion Manifest**: The checksummed inventory of core output artifacts. It does not include the final report.
 - **Final Report Request**: The evaluated instructions plus the absolute evidence-directory path, absolute destination path, model, timeout, and workspace root.
-- **Restricted Report Agent**: A transient OpenCode agent that may read the workspace and evidence bundle but may create or replace only the designated final report.
-- **Report Acknowledgment**: A small JSON object whose `report_path` must equal the designated absolute destination. It is protocol evidence, not proof that the file is valid.
+- **Restricted Report Agent**: A transient read-only OpenCode agent that may inspect the workspace and evidence bundle but cannot modify files.
+- **Report Payload**: A strict JSON object whose `report_path` equals the designated destination and whose `report_markdown` contains the complete assessment.
 - **Final Report**: A post-completion Markdown derivative named `report.md`. A valid report is a non-symlink regular file, contains at least one non-whitespace character, and is at most 1 MiB.
 - **Report Failure Warning**: A warning finding with category `reporting.final_report_failed` that describes a terminal report-generation or validation failure and records its failure kind.
 - **Final Report Outcome**: Exactly one terminal outcome for an attempted report: `valid_report` or `warning_without_report`.
@@ -97,11 +97,10 @@ Evaluations in `pasture/report_prompts_eval*` selected prompt F as a strong deci
 flowchart LR
     E[Core evidence artifacts] --> M[Completion manifest]
     M --> A[Restricted report agent]
-    A --> K[JSON acknowledgment]
-    A --> F[report.md candidate]
-    K --> V[Independent validation]
-    F --> V
-    V -->|valid| R[Optional report.md]
+    A --> K[JSON report payload]
+    K --> V[Path and content validation]
+    V -->|valid| P[Atomic trusted publication]
+    P --> R[Optional report.md]
     V -->|failure| C[Remove candidate]
     C --> W[Persist warning in summary]
     W --> X[Refresh core manifest]
@@ -130,9 +129,9 @@ flowchart LR
 - **Manifest exclusion**: `report.md` is never a manifest entry.
 - **Terminal partition**: after an attempted report step, exactly one of `ValidReport` and `WarningWithoutReport` holds.
 - **No invalid residue**: a failed report step leaves no file, symlink, directory, empty file, whitespace-only file, or oversized file at the designated path.
-- **Single-writer confinement**: the restricted agent may modify only the exact report destination; specs, source, core evidence, and other workspace files remain unchanged by the report step.
+- **Single-writer confinement**: the agent cannot modify files; only the trusted filesystem adapter may atomically publish the exact report destination.
 - **Path agreement**: the requested path, acknowledgment path, and validated path are equal absolute paths inside the configured output directory.
-- **Validation authority**: filesystem validation, not the acknowledgment, determines report success.
+- **Validation authority**: payload and post-write filesystem validation together determine report success.
 - **Bounded work**: one final-report invocation uses the configured timeout, bounded adapter retries, a bounded acknowledgment, and a 1 MiB report limit.
 - **Warning integrity**: if a warning changes `report_summary.md`, the manifest is refreshed after the summary write so its checksum matches the final summary bytes.
 - **Prompt parity**: the editable canonical prompt and embedded distribution prompt differ only by declared runtime substitutions.
@@ -141,8 +140,8 @@ flowchart LR
 
 - **Agent or model failure**: OpenCode cannot start, times out, exits unsuccessfully, or returns invalid protocol output.
   - **Rationale**: Report synthesis is nondeterministic and externally dependent; it must not erase a completed analysis or leave ambiguous output.
-- **Missing report**: The acknowledgment is returned but no report exists.
-  - **Rationale**: The acknowledgment is untrusted and cannot substitute for the requested artifact.
+- **Missing report body**: The payload names a path but omits valid Markdown.
+  - **Rationale**: A path assertion cannot substitute for the report body.
 - **Invalid report object**: The destination is a symlink, directory, special file, empty or whitespace-only file, or exceeds 1 MiB.
   - **Rationale**: Following links can escape confinement, and malformed or unbounded output is unsafe to publish as a report.
 - **Path disagreement**: The acknowledgment names a path other than the exact configured destination.
@@ -151,8 +150,8 @@ flowchart LR
   - **Rationale**: Broadening an edit rule would violate the single-writer invariant; safe degradation is preferable to ambiguous authority.
 - **Unauthorized mutation attempt**: The agent attempts to modify a core artifact, input, source file, or another workspace path.
   - **Rationale**: `spec-check` is read-only with respect to analyzed material, and the core bundle must remain trustworthy while it is reviewed.
-- **Partial report survives failure**: A failed generation leaves bytes or another filesystem object at `report.md`.
-  - **Rationale**: Consumers could mistake stale or partial content for the current run's result.
+- **Atomic publication failure**: Valid Markdown is returned but trusted atomic publication fails.
+  - **Rationale**: The run must surface degradation without exposing a partially published final path.
 - **Warning persistence failure**: Generation fails but the summary or refreshed manifest does not record the warning consistently.
   - **Rationale**: Silent degradation hides loss of the engineer-facing artifact. The old marker is invalidated before summary mutation, so persistence failure leaves no stale checksum manifest.
 - **Stale report contamination**: A prior run's report remains when a new run begins or when current generation fails.
@@ -166,7 +165,7 @@ flowchart LR
   - **Target/Threshold**: 100% of handled report attempts satisfy the terminal partition and no-invalid-residue invariants; 100% of report paths agree across request, acknowledgment, and validation.
   - **Influence**: Makes report presence unambiguous and keeps failure separate from analysis completion.
 - **Security**:
-  - **Target/Threshold**: The agent has write permission for exactly one path; symlinks and non-regular files are rejected; no invocation uses `--auto`.
+  - **Target/Threshold**: The agent has no mutation permission; only the confined atomic adapter writes `report.md`; no invocation uses `--auto`.
   - **Influence**: Preserves the read-only product boundary and limits agent effects.
 - **Reliability**:
   - **Target/Threshold**: Every handled OpenCode, protocol, and filesystem validation failure degrades nonfatally and removes the report candidate.
@@ -175,7 +174,7 @@ flowchart LR
   - **Target/Threshold**: `report.md` appears in zero manifest entries; after warning persistence, 100% of manifest checksums match core artifact bytes.
   - **Influence**: Keeps the completion record mechanically truthful despite post-completion work.
 - **Boundedness**:
-  - **Target/Threshold**: At most one logical report call with adapter-bounded retries; configured timeout per attempt; report size at most 1 MiB; acknowledgment contains only the required path field.
+  - **Target/Threshold**: At most one logical report call with adapter-bounded retries; configured timeout per attempt; accepted Markdown at most 1 MiB; payload contains only path and report body.
   - **Influence**: Limits latency, token use, memory use, and output amplification.
 - **Portability**:
   - **Target/Threshold**: Absolute paths, relative CLI output paths, and paths containing spaces produce the same runtime path binding without shell interpolation.

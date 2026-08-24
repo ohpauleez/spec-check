@@ -1,7 +1,7 @@
 ## 1. Establish Paths And Prompt Contract
 
 - [x] 1.1 Resolve `RunConfig.output` with `path.resolve` before branding it, update TSDoc, and add config contract tests for default, CLI, config-file, parent-segment, absolute, and spaced output paths (RAE-FINAL-PATH-ABS, RAE-FINAL-PATH-SPACE)
-- [x] 1.2 Update `report_prompts/prompt_f.md` with explicit evidence-directory and report-path placeholders, exact single-file mutation instructions, disk-output requirements, and the `{ "report_path": "..." }` acknowledgment contract while preserving the evaluated evidence and report content strategy (RAE-FINAL-PROTOCOL)
+- [x] 1.2 Update `report_prompts/prompt_f.md` with runtime path placeholders and a strict `{ "report_path", "report_markdown" }` transport while preserving the evaluated content strategy (RAE-FINAL-PROTOCOL)
 - [x] 1.3 Add `src/domain/prompts/final-report.ts` with the embedded prompt, `buildFinalReportPrompt`, absolute/confined-path preconditions, unresolved-placeholder postconditions, and complete TSDoc (RAE-FINAL-PATHS, RAE-FINAL-PROTOCOL)
 - [x] 1.4 Add source prompt parity tests and bundle/distribution parity tests that permit only declared runtime and transport substitutions (RAE-FINAL-PROMPT-PARITY)
 - [x] 1.5 Add generated/property tests for relative, absolute, spaced, Unicode, and non-pattern shell-metacharacter path spellings to confirm exact substitution without shell interpretation; add regressions that reject OpenCode wildcard characters `*` and `?` before invocation (RAE-FINAL-PATH-SPACE, RAE-FINAL-PATH-WILDCARD)
@@ -12,28 +12,28 @@ Resolved output once at configuration entry and embedded prompt F for distributi
 
 ## 2. Implement Restricted OpenCode Protocol
 
-- [x] 2.1 Add a pure transient-agent policy builder that defines `spec-check-final-report` as a primary agent, allows required workspace/evidence reads, denies all edits before allowing only the exact report destination, denies shell/delegation/web/interactive tools, and grants narrowly scoped external-directory access when required (RAE-FINAL-AGENT, RAE-FINAL-AGENT-WRITE, RAE-FINAL-AGENT-DENY, RAE-FINAL-AGENT-TOOLS)
+- [x] 2.1 Add a pure transient-agent policy builder that defines `spec-check-final-report` as a read-only primary agent, allows required reads, denies edits/shell/delegation/web/interactive tools, and grants narrowly scoped external-directory reads (RAE-FINAL-AGENT, RAE-FINAL-AGENT-WRITE, RAE-FINAL-AGENT-DENY, RAE-FINAL-AGENT-TOOLS)
 - [x] 2.2 Extend `runProcess` with an optional inherited child-environment override so the OpenCode adapter can supply `OPENCODE_CONFIG_CONTENT` without dropping provider credentials or other parent environment values; add process contract tests
 - [x] 2.3 Add `final-report` to `OpencodePhase` and extend final-report argv construction with `--agent spec-check-final-report` and `--dir <workspace-root>`, retaining model variant, timeout, retries, telemetry, JSON event parsing, and explicitly omitting `--auto` (RAE-FINAL-PROTO-DIR)
-- [x] 2.4 Validate the final-report acknowledgment as a minimal object with a non-empty string `report_path`; reject malformed, missing, empty, non-string, and non-object payloads through the existing adapter error taxonomy (RAE-FINAL-PROTO-ACK)
-- [x] 2.5 Add adapter contract tests for argv ordering, environment policy serialization, exact edit permission, external output paths, no `--auto`, unchanged argv for all existing phases, and acknowledgment validation (RAE-FINAL-AGENT-*, RAE-FINAL-PROTO-*)
-- [x] 2.6 Add a guarded OpenCode permission integration test that permits the target write and denies mutation of a sibling sentinel without using `--auto`; document the test's provider/version assumptions (RAE-FINAL-AGENT-WRITE, RAE-FINAL-AGENT-DENY)
+- [x] 2.4 Validate the final-report payload as exactly non-empty `report_path` and `report_markdown` strings; reject malformed or extra fields through the adapter taxonomy (RAE-FINAL-PROTO-ACK)
+- [x] 2.5 Add adapter contract tests for argv ordering, isolated environment policy, read-only permissions, output bounds, no `--auto`, unchanged existing phases, and payload validation (RAE-FINAL-AGENT-*, RAE-FINAL-PROTO-*)
+- [x] 2.6 Add a guarded OpenCode integration test that attempts mutation under the read-only policy and verifies a sibling sentinel remains unchanged (RAE-FINAL-AGENT-WRITE, RAE-FINAL-AGENT-DENY)
 
 ### Implement Restricted OpenCode Protocol change summary
 
-Added deny-first inline policy with one writable path, explicit read/search tools, `.env` denial, and narrow external-directory access. Process environment overrides inherit provider credentials. Final-report adapter calls require absolute workspace and inline policy controls, use no `--auto`, parse strict unwrapped JSON, and reject extra acknowledgment fields. The live permission test is gated by `SPEC_CHECK_LIVE_TESTS=1` and was not run in offline verification.
+Added an isolated read-only agent policy with explicit read/search tools, `.env` denial, and narrow external-directory access. Final-report calls use no `--auto`, parse strict path/body JSON, bound double-escaped event transport, and reject extra fields. The provider-gated live test attempts a denied mutation.
 
 ## 3. Implement Final Report Domain And Filesystem Boundary
 
 - [x] 3.1 Add `src/domain/reporting/final-report.ts` with `FINAL_REPORT_PATH`, the 1 MiB bound, closed error kinds, typed `Result` interfaces, and complete precondition/postcondition/invariant TSDoc (RAE-FINAL-REPORT, RAE-FINAL-VALIDATE)
-- [x] 3.2 Implement `generateFinalReport` to derive one confined destination, build the prompt and policy, invoke the final-report adapter, compare the acknowledgment against the exact absolute destination, and validate only the precomputed path (RAE-FINAL-PATH-MISMATCH, RAE-FINAL-SAVE)
+- [x] 3.2 Implement `generateFinalReport` to derive one confined destination, invoke the read-only agent, validate exact path/body, atomically publish through `writeOutputAtomic`, and validate read-back output (RAE-FINAL-PATH-MISMATCH, RAE-FINAL-SAVE)
 - [x] 3.3 Implement independent `lstat`-first validation that accepts only a non-symlink regular file, rejects files over 1,048,576 bytes before read, and requires non-whitespace UTF-8 content (RAE-FINAL-VALID-FILE, RAE-FINAL-MISSING, RAE-FINAL-SYMLINK, RAE-FINAL-NOT-REGULAR, RAE-FINAL-EMPTY, RAE-FINAL-OVERSIZED)
 - [x] 3.4 Implement idempotent confined removal for stale, partial, symlink, directory, and invalid report destinations, and ensure inability to establish absence surfaces as an output failure (RAE-FINAL-CLEANUP, RAE-FINAL-CLEAN-ERROR)
-- [x] 3.5 Add contract tests for successful generation and each error kind, including wrong acknowledgment path proving no alternate path is read; add filesystem cases for missing, empty, whitespace-only, exact-limit, over-limit, symlink, directory, partial, unreadable, and cleanup-failure output (RAE-FINAL-VALIDATE, RAE-FINAL-CLEANUP)
+- [x] 3.5 Add contract tests for atomic publication and each error kind, including wrong path, missing/empty/oversized body, symlink, directory, unreadable, and cleanup-failure output (RAE-FINAL-VALIDATE, RAE-FINAL-CLEANUP)
 
 ### Implement Final Report Domain And Filesystem Boundary change summary
 
-Added a closed Result boundary and injectable effects. Validation uses the precomputed destination only, `lstat` before read, symlink/non-file rejection, metadata and post-read byte bounds, fatal UTF-8 decoding, and non-whitespace content. Cleanup recursively and idempotently removes every filesystem object at the confined destination; failure to establish absence becomes `OutputError`.
+Added a closed Result boundary and injectable effects. The body is bounded before `writeOutputAtomic`, then read back with `lstat`, symlink/non-file rejection, byte bounds, fatal UTF-8 decoding, and non-whitespace validation. Atomic write cleanup now covers both write and rename failures.
 
 ## 4. Wire Post-Completion Lifecycle
 
@@ -82,4 +82,4 @@ Contract and integration faults cover the complete adapter union, strict acknowl
 
 ### Documentation And Release Verification change summary
 
-README, architecture, and durable design distinguish core completion from optional report availability. Verification passed with 736 tests and complete spec-trace coverage; two provider-gated live tests remain skipped unless `SPEC_CHECK_LIVE_TESTS=1`. Strict OpenSpec validation and Alloy's four SAT witnesses plus twelve UNSAT checks passed. The evidence remains bounded to four atoms/twelve steps and the documented single-writer/local-filesystem assumptions.
+Production debugging found that all retries used `spec-check-final-report`, not the default Plan agent. OpenCode denied `apply_patch` because exact path edit rules do not match patch-envelope permission resources; one retry then falsely acknowledged success. The final protocol now keeps the agent read-only, requires the complete Markdown in strict JSON, and uses trusted atomic publication like every other report. Verification evidence and counts are refreshed after this correction.

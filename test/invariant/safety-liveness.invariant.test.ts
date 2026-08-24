@@ -255,7 +255,7 @@ describe("safety properties", () => {
       readonly agent: Record<string, { readonly permission: { readonly edit: Record<string, string>; readonly bash: string } }>;
     };
     const policy = config.agent["spec-check-final-report"]?.permission;
-    expect(policy?.edit).toEqual({ "*": "deny", [reportPath]: "allow" });
+    expect(policy?.edit).toBe("deny");
     expect(policy?.bash).toBe("deny");
   });
 

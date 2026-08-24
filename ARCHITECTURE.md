@@ -443,7 +443,7 @@ Primary code:
 - summary report
 - separate atomic `FormalizationAttemptSet` evidence files
 - core completion manifest
-- optional unmanifested `report.md` generated afterward
+- optional unmanifested `report.md` synthesized afterward by a read-only agent and atomically published by `spec-check`
 
 Primary code:
 
@@ -469,7 +469,7 @@ These are the most important things to preserve when changing the code.
 
 - All generated artifacts must stay under the configured output directory.
 - Output writes should go through `src/adapters/fs.ts`.
-- The final-report agent is a narrow exception: its transient policy can edit only the precomputed `report.md`, which spec-check validates without following symlinks.
+- The final-report agent remains read-only. It returns Markdown as validated JSON; `spec-check` atomically publishes the precomputed `report.md` and validates it without following symlinks.
 - Manifest presence is the core completion marker; manifest absence means the core run is incomplete.
 
 ### Finding Preservation Rule

@@ -37,7 +37,7 @@ describe("final-report prompt and policy", () => {
     expect(prompt).toContain(JSON.stringify(evidence));
     expect(prompt).toContain(JSON.stringify(report));
     expect(prompt).not.toContain("{{");
-    expect(prompt).toContain(`{ "report_path": ${JSON.stringify(report)} }`);
+    expect(prompt).toContain(`{ "report_path": ${JSON.stringify(report)}, "report_markdown":`);
   });
 
   it("rejects wildcard paths that cannot express exact edit authority", () => {
@@ -69,7 +69,7 @@ describe("final-report prompt and policy", () => {
     };
     const permission = config.agent[FINAL_REPORT_AGENT_NAME]?.permission;
     expect(permission).toBeDefined();
-    expect(permission?.edit).toEqual({ "*": "deny", [report]: "allow" });
+    expect(permission?.edit).toBe("deny");
     expect(permission?.bash).toBe("deny");
     expect(permission?.task).toBe("deny");
     expect(permission?.external_directory).toEqual({
@@ -91,20 +91,18 @@ describe("final-report prompt and policy", () => {
       "/external/src": "allow",
       "/external/src/**": "allow",
     });
-    expect(permission?.edit).toEqual({ "*": "deny", [report]: "allow" });
+    expect(permission?.edit).toBe("deny");
   });
 
   it("keeps hostile evidence instructions and traversal-shaped paths in read-only data", () => {
     traceSpec("RAE-FINAL-AGENT-DENY", "RAE-FINAL-PATH-MISMATCH");
     const report = "/workspace/output/report.md";
-    const sibling = "/workspace/output/sibling.md";
     const traversalShaped = "/external/spec/../spec.md";
     const config = JSON.parse(buildFinalReportAgentConfig(
       "/isolated", "/workspace/output", report, [traversalShaped],
     )) as { readonly agent: Record<string, { readonly permission: Record<string, unknown> }> };
     const permission = config.agent[FINAL_REPORT_AGENT_NAME]?.permission;
-    expect(permission?.edit).toEqual({ "*": "deny", [report]: "allow" });
-    expect((permission?.edit as Record<string, string>)[sibling]).toBeUndefined();
+    expect(permission?.edit).toBe("deny");
     expect(permission?.external_directory).toMatchObject({ [traversalShaped]: "allow" });
     const prompt = buildFinalReportPrompt(
       "/workspace/output", report,
@@ -186,20 +184,27 @@ describe("final-report generation and lifecycle", () => {
     const output = toOutputDirPath(join(root, "out"));
     await mkdir(output);
     const designated = join(output, "report.md");
-    await writeFile(designated, "# Valid\n");
-    const invoke = vi.fn(async () => ({ ok: true as const, value: { report_path: designated } }));
+    const invoke = vi.fn(async () => ({ ok: true as const, value: {
+      report_path: designated, report_markdown: "# Valid\n",
+    } }));
+    const fs = await import("node:fs/promises");
+    const write = vi.fn(async (outputDir, relativePath, content) => {
+      await writeFile(join(outputDir, relativePath), content, "utf8");
+    });
     const result = await generateFinalReport({
       model: toModelName("test-model"),
       timeoutMs: 30_000,
       outputDir: output,
       workspaceRoot: root,
-    }, { invoke, inspect: (await import("node:fs/promises")).lstat, read: (await import("node:fs/promises")).readFile });
+    }, { invoke, inspect: fs.lstat, read: fs.readFile, write });
     expect(result).toMatchObject({ ok: true, value: { path: "report.md" } });
     expect(invoke).toHaveBeenCalledWith(expect.objectContaining({
       phase: "final-report",
       workspaceRoot: expect.stringContaining("spec-check-final-report-"),
       opencodeConfigDir: expect.stringContaining("spec-check-final-report-"),
     }));
+    expect(write).toHaveBeenCalledWith(output, "report.md", "# Valid\n");
+    expect(await readFile(designated, "utf8")).toBe("# Valid\n");
   });
 
   it("does not inspect an acknowledged alternate path", async () => {
@@ -209,12 +214,64 @@ describe("final-report generation and lifecycle", () => {
       model: toModelName("test-model"), timeoutMs: 30_000,
       outputDir: toOutputDirPath("/tmp/designated"), workspaceRoot: "/tmp",
     }, {
-      invoke: vi.fn(async () => ({ ok: true as const, value: { report_path: "/tmp/alternate/report.md" } })),
+      invoke: vi.fn(async () => ({ ok: true as const, value: {
+        report_path: "/tmp/alternate/report.md", report_markdown: "# Wrong\n",
+      } })),
       inspect,
       read: vi.fn(),
+      write: vi.fn(),
     });
     expect(result).toMatchObject({ ok: false, error: { kind: "path_mismatch" } });
     expect(inspect).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ["empty", " \n", "acknowledgment_invalid"],
+    ["oversized", "x".repeat(FINAL_REPORT_MAX_BYTES + 1), "report_too_large"],
+  ])("rejects %s returned Markdown before publication", async (_name, reportMarkdown, kind) => {
+    traceSpec("RAE-FINAL-EMPTY", "RAE-FINAL-OVERSIZED");
+    const write = vi.fn();
+    const result = await generateFinalReport({
+      model: toModelName("test-model"), timeoutMs: 30_000,
+      outputDir: toOutputDirPath("/tmp/designated"), workspaceRoot: "/tmp",
+    }, {
+      invoke: vi.fn(async () => ({ ok: true as const, value: {
+        report_path: "/tmp/designated/report.md", report_markdown: reportMarkdown,
+      } })),
+      inspect: vi.fn(), read: vi.fn(), write,
+    });
+    expect(result).toMatchObject({ ok: false, error: { kind } });
+    expect(write).not.toHaveBeenCalled();
+  });
+
+  it("maps atomic publication failure to report_unreadable", async () => {
+    traceSpec("RAE-FINAL-OPTIONAL", "RAE-OUTPUT-ATOMIC");
+    const result = await generateFinalReport({
+      model: toModelName("test-model"), timeoutMs: 30_000,
+      outputDir: toOutputDirPath("/tmp/designated"), workspaceRoot: "/tmp",
+    }, {
+      invoke: vi.fn(async () => ({ ok: true as const, value: {
+        report_path: "/tmp/designated/report.md", report_markdown: "# Report\n",
+      } })),
+      inspect: vi.fn(), read: vi.fn(),
+      write: vi.fn(async () => { throw new Error("ENOSPC"); }),
+    });
+    expect(result).toMatchObject({ ok: false, error: { kind: "report_unreadable" } });
+  });
+
+  it("rejects missing read-back output after publication", async () => {
+    traceSpec("RAE-FINAL-MISSING");
+    const missing = Object.assign(new Error("missing"), { code: "ENOENT" });
+    const result = await generateFinalReport({
+      model: toModelName("test-model"), timeoutMs: 30_000,
+      outputDir: toOutputDirPath("/tmp/designated"), workspaceRoot: "/tmp",
+    }, {
+      invoke: vi.fn(async () => ({ ok: true as const, value: {
+        report_path: "/tmp/designated/report.md", report_markdown: "# Report\n",
+      } })),
+      inspect: vi.fn(async () => { throw missing; }), read: vi.fn(), write: vi.fn(),
+    });
+    expect(result).toMatchObject({ ok: false, error: { kind: "report_missing" } });
   });
 
   it.each([
@@ -229,6 +286,7 @@ describe("final-report generation and lifecycle", () => {
       invoke: vi.fn(async () => ({ ok: false as const, error: { kind, phase: "final-report" as const, message: kind } })),
       inspect: vi.fn(),
       read: vi.fn(),
+      write: vi.fn(),
     });
     expect(result).toMatchObject({ ok: false, error: { kind: "agent_failed" } });
   });
@@ -240,7 +298,7 @@ describe("final-report generation and lifecycle", () => {
       outputDir: toOutputDirPath("/tmp/designated"), workspaceRoot: "/tmp",
     }, {
       invoke: vi.fn(async () => { throw new Error("boundary throw"); }),
-      inspect: vi.fn(), read: vi.fn(),
+      inspect: vi.fn(), read: vi.fn(), write: vi.fn(),
     });
     expect(result).toMatchObject({ ok: false, error: { kind: "agent_failed", message: "boundary throw" } });
   });

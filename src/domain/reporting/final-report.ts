@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
 import { callOpencode, type OpencodeError } from "../../adapters/opencode.js";
-import { removeOutputTree, resolveConfinedOutputPath } from "../../adapters/fs.js";
+import { removeOutputTree, resolveConfinedOutputPath, writeOutputAtomic } from "../../adapters/fs.js";
 import { assertNever, postcondition, precondition } from "../assert.js";
 import { toRelativePath, type ModelName, type OutputDirPath, type RelativePath } from "../branded.js";
 import {
@@ -49,12 +49,14 @@ export interface FinalReportDependencies {
   readonly invoke: typeof callOpencode;
   readonly inspect: typeof lstat;
   readonly read: typeof readFile;
+  readonly write: typeof writeOutputAtomic;
 }
 
 const productionDependencies: FinalReportDependencies = {
   invoke: callOpencode,
   inspect: lstat,
   read: readFile,
+  write: writeOutputAtomic,
 };
 
 /** Lifecycle states mirrored by the Alloy model. */
@@ -305,6 +307,13 @@ export async function generateFinalReport(
   if (acknowledgment.value.reportPath !== reportPath) {
     return err({ kind: "path_mismatch", message: "final-report acknowledgment path does not match the designated destination" });
   }
+  const contentValidation = validateFinalReportContent(acknowledgment.value.reportMarkdown);
+  if (!contentValidation.ok) return contentValidation;
+  try {
+    await dependencies.write(input.outputDir, FINAL_REPORT_PATH, contentValidation.value);
+  } catch {
+    return err({ kind: "report_unreadable", message: "final report could not be atomically published" });
+  }
   return await validateFinalReport(reportPath, dependencies);
 }
 
@@ -386,15 +395,34 @@ export async function removeFinalReport(outputDir: OutputDirPath): Promise<void>
 }
 
 /** Validate the schema-refined adapter acknowledgment without trusting its path. */
-function parseAcknowledgment(value: unknown): Result<{ readonly reportPath: string }, FinalReportError> {
+function parseAcknowledgment(value: unknown): Result<{
+  readonly reportPath: string;
+  readonly reportMarkdown: string;
+}, FinalReportError> {
   if (typeof value !== "object" || value === null || Array.isArray(value)) {
     return err({ kind: "acknowledgment_invalid", message: "final-report acknowledgment is not an object" });
   }
   const reportPath = Reflect.get(value, "report_path");
+  const reportMarkdown = Reflect.get(value, "report_markdown");
   if (typeof reportPath !== "string" || reportPath.trim().length === 0) {
     return err({ kind: "acknowledgment_invalid", message: "final-report acknowledgment has no report_path" });
   }
-  return ok({ reportPath });
+  if (typeof reportMarkdown !== "string" || reportMarkdown.trim().length === 0) {
+    return err({ kind: "acknowledgment_invalid", message: "final-report payload has no report_markdown" });
+  }
+  return ok({ reportPath, reportMarkdown });
+}
+
+/** Validate the returned Markdown before trusted atomic publication. */
+function validateFinalReportContent(content: string): Result<string, FinalReportError> {
+  const sizeBytes = Buffer.byteLength(content, "utf8");
+  if (sizeBytes > FINAL_REPORT_MAX_BYTES) {
+    return err({ kind: "report_too_large", message: `final report exceeds ${String(FINAL_REPORT_MAX_BYTES)} bytes` });
+  }
+  if (content.trim().length === 0) {
+    return err({ kind: "report_empty", message: "final report contains no non-whitespace content" });
+  }
+  return ok(content);
 }
 
 /** Map the adapter taxonomy into the stable final-report boundary. */

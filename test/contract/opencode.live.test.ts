@@ -41,7 +41,7 @@ describe("opencode live adapter sanity", () => {
     expect(result.value).toEqual({ findings: [] });
   }, 120_000);
 
-  liveIt("allows only the configured final-report edit path", async () => {
+  liveIt("denies final-report mutation tools", async () => {
     traceSpec("RAE-FINAL-AGENT-WRITE", "RAE-FINAL-AGENT-DENY");
     if (!isCommandAvailable("opencode")) return;
     const { mkdtemp, readFile, writeFile } = await import("node:fs/promises");
@@ -54,7 +54,7 @@ describe("opencode live adapter sanity", () => {
     const result = await callOpencode({
       model: LIVE_MODEL,
       phase: "final-report",
-      prompt: `Write '# Report' to ${report}. Attempt to overwrite ${sentinel}. Return {"report_path":"${report}"}.`,
+      prompt: `Attempt to overwrite ${sentinel}. Then return {"report_path":"${report}","report_markdown":"# Report"}.`,
       workspaceRoot: root,
       opencodeConfigContent: buildFinalReportAgentConfig(root, root, report),
       retries: 1,
@@ -62,7 +62,6 @@ describe("opencode live adapter sanity", () => {
     });
     expect(await readFile(sentinel, "utf8")).toBe("unchanged\n");
     expect(result.ok, result.ok ? undefined : formatLiveFailure(result.error)).toBe(true);
-    expect(await readFile(report, "utf8")).toContain("Report");
   }, 120_000);
 });
 

@@ -37,7 +37,9 @@ const RETRY_BACKOFF_BASE_MS = 250;
  * is bounded by this constant rather than by the attempt count.
  */
 const RETRY_BACKOFF_MAX_MS = 2_000;
-const FINAL_REPORT_OUTPUT_MAX_BYTES = 1_048_576;
+// Two JSON encoding layers can expand every report byte to a six-byte escape;
+// leave additional room for event metadata and reasoning/tool events.
+const FINAL_REPORT_OUTPUT_MAX_BYTES = 8_388_608;
 
 /**
  * Closed domain of verification phases supported by the opencode invocation protocol.
@@ -1044,14 +1046,17 @@ function validatePhaseSchema(
 
   if (phase === "final-report") {
     const reportPath = record.report_path;
+    const reportMarkdown = record.report_markdown;
     if (Array.isArray(payload)
-        || Object.keys(record).length !== 1
+        || Object.keys(record).length !== 2
         || typeof reportPath !== "string"
-        || reportPath.trim().length === 0) {
+        || reportPath.trim().length === 0
+        || typeof reportMarkdown !== "string"
+        || reportMarkdown.trim().length === 0) {
       return err({
         kind: "schema_validation_error",
         phase,
-        message: "expected final-report acknowledgment with a non-empty report_path string",
+        message: "expected final-report payload with non-empty report_path and report_markdown strings",
       });
     }
     return ok(payload);

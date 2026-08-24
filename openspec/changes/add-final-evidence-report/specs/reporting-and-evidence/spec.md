@@ -17,7 +17,7 @@ WHEN final-report generation starts, THE spec-check tool SHALL have already fina
 **Postcondition:** The report agent can read a completion manifest that describes the complete core evidence bundle.
 
 #### Scenario: Save Valid Final Report [RAE-FINAL-SAVE]
-WHEN the report agent returns a valid acknowledgment and the designated file passes independent validation, THE spec-check tool SHALL preserve that file as `report.md`.
+WHEN the report agent returns a valid path and Markdown payload, THE spec-check tool SHALL atomically publish and independently validate `report.md`.
 
 **Postcondition:** Exactly one valid final report is available for the current run.
 
@@ -27,7 +27,7 @@ IF final-report generation or validation fails after core completion, THEN THE s
 **Postcondition:** Core completion remains true even though no final report is available; the warning may produce the existing findings-present exit code.
 
 ### Requirement: Bind Final Report Paths [RAE-FINAL-PATHS]
-THE spec-check tool SHALL resolve the configured output directory to an absolute path and SHALL use one confined absolute `report.md` path for the prompt, permission policy, acknowledgment comparison, and filesystem validation.
+THE spec-check tool SHALL resolve the configured output directory to an absolute path and SHALL use one confined absolute `report.md` path for the prompt, payload comparison, atomic publication, and filesystem validation.
 
 **References:**
 - `openspec/changes/add-final-evidence-report/proposal.md#Preconditions-Postconditions-and-Invariants`
@@ -51,32 +51,32 @@ IF the acknowledgment `report_path` does not equal the designated absolute desti
 #### Scenario: Reject Permission Wildcards [RAE-FINAL-PATH-WILDCARD]
 IF the absolute evidence or report path contains `*` or `?`, THEN THE spec-check tool SHALL NOT invoke the report agent and SHALL classify the optional report attempt as failed.
 
-**Postcondition:** OpenCode wildcard matching cannot broaden the exact-path edit permission.
+**Postcondition:** OpenCode wildcard matching cannot broaden read-only external-directory access.
 
 ### Requirement: Restrict Final Report Agent [RAE-FINAL-AGENT]
-WHEN the spec-check tool invokes the final-report agent, THE spec-check tool SHALL use OpenCode pure mode and a transient primary-agent policy that permits workspace, analyzed-input, source, and evidence reads, permits edits only to the exact designated `report.md`, denies shell execution and delegation, and does not enable OpenCode auto-approval.
+WHEN the spec-check tool invokes the final-report agent, THE spec-check tool SHALL use OpenCode pure mode and a transient primary-agent policy that permits required reads, denies all file mutation, shell execution, and delegation, and does not enable OpenCode auto-approval.
 
 **References:**
 - `openspec/changes/add-final-evidence-report/proposal.md#Constraints`
 - `openspec/changes/add-final-evidence-report/design.md#Security`
 
 #### Scenario: Allow Designated Write [RAE-FINAL-AGENT-WRITE]
-WHEN the report agent writes the exact designated `report.md`, THE transient policy SHALL permit that edit.
+WHEN a valid report payload is returned, THE spec-check tool SHALL atomically publish its Markdown through the confined filesystem adapter at the exact designated `report.md`.
 
-**Postcondition:** The agent can produce the requested artifact without broader build permissions.
+**Postcondition:** The agent remains read-only and trusted code produces the requested artifact.
 
 #### Scenario: Deny Other Mutation [RAE-FINAL-AGENT-DENY]
-IF the report agent attempts to modify any input, source file, core evidence artifact, sibling output, or other workspace path, THEN THE transient policy SHALL deny that action.
+IF the report agent attempts to modify any file, THEN THE transient policy SHALL deny that action.
 
-**Postcondition:** Final-report generation has one writable path.
+**Postcondition:** Final-report agent execution has no writable path.
 
 #### Scenario: Deny Shell And Delegation [RAE-FINAL-AGENT-TOOLS]
 IF the report agent attempts shell execution, task delegation, web access, or another denied capability, THEN THE transient policy SHALL deny that action.
 
-**Postcondition:** The report cannot bypass exact-path edit control through a more powerful tool.
+**Postcondition:** The report cannot bypass read-only policy through a more powerful tool.
 
 ### Requirement: Use File And Acknowledgment Protocol [RAE-FINAL-PROTOCOL]
-WHEN the final-report phase invokes OpenCode, THE spec-check tool SHALL instruct the agent to save Markdown at the exact destination and SHALL require stdout to contain only a JSON acknowledgment with a `report_path` string.
+WHEN the final-report phase invokes OpenCode, THE spec-check tool SHALL require stdout to contain only a JSON object with the exact `report_path` and complete `report_markdown` strings.
 
 **References:**
 - `openspec/changes/add-final-evidence-report/proposal.md#Scope`
@@ -88,9 +88,9 @@ WHEN OpenCode is started for the final-report phase, THE spec-check tool SHALL p
 **Postcondition:** The agent can inspect workspace evidence under the declared permission boundary.
 
 #### Scenario: Validate Acknowledgment Shape [RAE-FINAL-PROTO-ACK]
-IF final-report stdout does not decode to the required acknowledgment object with a non-empty string `report_path`, THEN THE spec-check tool SHALL classify the attempt as failed.
+IF final-report stdout does not decode to exactly the required non-empty `report_path` and `report_markdown` fields, THEN THE spec-check tool SHALL classify the attempt as failed.
 
-**Postcondition:** Markdown or malformed protocol text on stdout is not accepted as successful acknowledgment.
+**Postcondition:** Markdown or malformed protocol text outside the strict JSON payload is rejected.
 
 #### Scenario: Preserve Prompt Parity [RAE-FINAL-PROMPT-PARITY]
 WHEN source or bundled artifacts are built, THE spec-check verification harness SHALL confirm that the embedded final-report instructions match `report_prompts/prompt_f.md` except for declared runtime placeholders and transport instructions.
@@ -98,21 +98,21 @@ WHEN source or bundled artifacts are built, THE spec-check verification harness 
 **Postcondition:** Source and distributed CLIs use the evaluated content strategy.
 
 ### Requirement: Validate Final Report File [RAE-FINAL-VALIDATE]
-WHEN a final-report acknowledgment is accepted, THE spec-check tool SHALL independently validate the precomputed destination as a non-symlink regular UTF-8 file with non-whitespace content and size not greater than 1,048,576 bytes.
+WHEN a final-report payload is accepted, THE spec-check tool SHALL validate its path and Markdown, atomically publish the Markdown, and independently validate the precomputed destination as a non-symlink regular UTF-8 file with non-whitespace content and size not greater than 1,048,576 bytes.
 
 **References:**
 - `openspec/changes/add-final-evidence-report/proposal.md#Postconditions`
 - `openspec/changes/add-final-evidence-report/design.md#Data-Design`
 
 #### Scenario: Accept Bounded Regular File [RAE-FINAL-VALID-FILE]
-WHEN the destination is a regular non-symlink file with one or more non-whitespace characters and no more than 1,048,576 bytes, THE spec-check tool SHALL accept it as the final report.
+WHEN trusted atomic publication produces a regular non-symlink file with one or more non-whitespace characters and no more than 1,048,576 bytes, THE spec-check tool SHALL accept it as the final report.
 
-**Postcondition:** Filesystem evidence, rather than acknowledgment alone, establishes report success.
+**Postcondition:** Valid payload content plus filesystem read-back establishes report success.
 
 #### Scenario: Reject Missing Report [RAE-FINAL-MISSING]
-IF the designated report does not exist after the agent returns, THEN THE spec-check tool SHALL classify the report attempt as failed.
+IF the report payload omits valid Markdown or trusted atomic publication does not produce the designated report, THEN THE spec-check tool SHALL classify the report attempt as failed.
 
-**Postcondition:** An acknowledgment cannot substitute for a file.
+**Postcondition:** A path assertion cannot substitute for report content and successful publication.
 
 #### Scenario: Reject Symlink [RAE-FINAL-SYMLINK]
 IF the designated report is a symbolic link, THEN THE spec-check tool SHALL reject it without following the link target.
@@ -132,7 +132,7 @@ IF the designated report is empty or contains only whitespace, THEN THE spec-che
 #### Scenario: Reject Oversized Report [RAE-FINAL-OVERSIZED]
 IF the designated report is larger than 1,048,576 bytes, THEN THE spec-check tool SHALL reject it before an unbounded content read.
 
-**Postcondition:** Accepted and retained final-report content is bounded; a transient direct write may exceed the limit before handled validation rejects and removes it.
+**Postcondition:** Returned Markdown is bounded before atomic publication.
 
 ### Requirement: Clean Final Report Output [RAE-FINAL-CLEANUP]
 WHEN a new run starts or a handled final-report failure occurs, THE spec-check tool SHALL remove the confined `report.md` destination before that run can claim a final-report outcome.

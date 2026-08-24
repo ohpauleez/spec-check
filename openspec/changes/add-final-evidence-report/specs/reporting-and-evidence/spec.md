@@ -76,7 +76,7 @@ IF the report agent attempts shell execution, task delegation, web access, or an
 **Postcondition:** The report cannot bypass read-only policy through a more powerful tool.
 
 ### Requirement: Use File And Acknowledgment Protocol [RAE-FINAL-PROTOCOL]
-WHEN the final-report phase invokes OpenCode, THE spec-check tool SHALL require stdout to contain only a JSON object with the exact `report_path` and complete `report_markdown` strings.
+WHEN the final-report phase invokes OpenCode with `--format json`, THE spec-check tool SHALL decode stdout as strict UTF-8 newline-delimited OpenCode events, concatenate `part.text` only from top-level `type: "text"` events, and parse that text as one JSON object with the exact `report_path` and complete `report_markdown` strings.
 
 **References:**
 - `openspec/changes/add-final-evidence-report/proposal.md#Scope`
@@ -90,7 +90,7 @@ WHEN OpenCode is started for the final-report phase, THE spec-check tool SHALL p
 #### Scenario: Validate Acknowledgment Shape [RAE-FINAL-PROTO-ACK]
 IF final-report stdout does not decode to exactly the required non-empty `report_path` and `report_markdown` fields, THEN THE spec-check tool SHALL classify the attempt as failed.
 
-**Postcondition:** Markdown or malformed protocol text outside the strict JSON payload is rejected.
+**Postcondition:** Malformed UTF-8, malformed event lines, error events, raw payloads outside text events, missing text payloads, Markdown fences, prose wrappers, extra payload fields, and invalid field values are rejected. Non-text status and usage events are ignored.
 
 #### Scenario: Preserve Prompt Parity [RAE-FINAL-PROMPT-PARITY]
 WHEN source or bundled artifacts are built, THE spec-check verification harness SHALL confirm that the embedded final-report instructions match `report_prompts/prompt_f.md` except for declared runtime placeholders and transport instructions.
@@ -98,14 +98,14 @@ WHEN source or bundled artifacts are built, THE spec-check verification harness 
 **Postcondition:** Source and distributed CLIs use the evaluated content strategy.
 
 ### Requirement: Validate Final Report File [RAE-FINAL-VALIDATE]
-WHEN a final-report payload is accepted, THE spec-check tool SHALL validate its path and Markdown, atomically publish the Markdown, and independently validate the precomputed destination as a non-symlink regular UTF-8 file with non-whitespace content and size not greater than 1,048,576 bytes.
+WHEN a final-report payload is accepted, THE spec-check tool SHALL validate its path and Markdown, atomically publish the Markdown, and independently validate the precomputed destination as a non-symlink regular strict UTF-8 file with all required report headings, at least one repository-relative citation, one artifact citation for every numbered prioritized finding, non-whitespace content, and size not greater than 1,048,576 bytes.
 
 **References:**
 - `openspec/changes/add-final-evidence-report/proposal.md#Postconditions`
 - `openspec/changes/add-final-evidence-report/design.md#Data-Design`
 
 #### Scenario: Accept Bounded Regular File [RAE-FINAL-VALID-FILE]
-WHEN trusted atomic publication produces a regular non-symlink file with one or more non-whitespace characters and no more than 1,048,576 bytes, THE spec-check tool SHALL accept it as the final report.
+WHEN trusted atomic publication produces a regular non-symlink file that meets the strict UTF-8, required-heading, citation, non-whitespace, and 1,048,576-byte rules, THE spec-check tool SHALL accept it as the final report.
 
 **Postcondition:** Valid payload content plus filesystem read-back establishes report success.
 
@@ -134,6 +134,11 @@ IF the designated report is larger than 1,048,576 bytes, THEN THE spec-check too
 
 **Postcondition:** Returned Markdown is bounded before atomic publication.
 
+#### Scenario: Reject Unsupported Report Structure [RAE-FINAL-STRUCTURE]
+IF returned or read-back Markdown omits a required report heading, contains no repository-relative citation, or gives a numbered prioritized finding no artifact citation, THEN THE spec-check tool SHALL classify the report attempt as failed.
+
+**Postcondition:** A structurally incomplete or uncited prioritized finding cannot be published as a successful final report.
+
 ### Requirement: Clean Final Report Output [RAE-FINAL-CLEANUP]
 WHEN a new run starts or a handled final-report failure occurs, THE spec-check tool SHALL remove the confined `report.md` destination before that run can claim a final-report outcome.
 
@@ -146,6 +151,16 @@ WHEN a new run starts and `report.md` exists from a prior run, THE spec-check to
 
 **Postcondition:** A prior report cannot be attributed to the new evidence bundle.
 
+#### Scenario: Remove All Stale Managed Output [RAE-FINAL-CLEAN-MANAGED]
+WHEN a new run starts, THE spec-check tool SHALL first invalidate the prior `manifest.json` and SHALL then remove all tool-owned phase reports, summary, final report, metrics, formalization evidence, SMT evidence, generated specifications, and cross-implication evidence before analysis begins.
+
+**Postcondition:** Artifacts omitted by the current run cannot be mistaken for current unmanifested evidence.
+
+#### Scenario: Surface Startup Cleanup Failure [RAE-FINAL-CLEAN-START-ERROR]
+IF managed-output cleanup fails after prior-manifest invalidation, THEN THE spec-check tool SHALL return fatal `OutputError` before ingestion and SHALL NOT claim a current completed bundle.
+
+**Postcondition:** Residue can remain for operator inspection, but no stale manifest attests it as the new run.
+
 #### Scenario: Remove Invalid Candidate [RAE-FINAL-CLEAN-FAILED]
 IF report generation or validation fails on a handled path, THEN THE spec-check tool SHALL remove any file or filesystem object at the designated report path before persisting the failure warning.
 
@@ -155,6 +170,11 @@ IF report generation or validation fails on a handled path, THEN THE spec-check 
 IF the spec-check tool cannot establish that the designated report path is absent after a failed attempt, THEN THE spec-check tool SHALL surface an output failure and SHALL NOT claim the `warning_without_report` terminal outcome.
 
 **Postcondition:** The system never reports successful cleanup when invalid residue may remain.
+
+#### Scenario: Surface Post-Completion Output Failure [RAE-FINAL-OUTPUT-ERROR]
+IF report cleanup, marker invalidation, warning-summary rewrite, or manifest refresh fails, THEN THE spec-check tool SHALL enter `output_failed`, return fatal `OutputError`, and SHALL NOT claim `valid_report` or `warning_without_report`.
+
+**Postcondition:** Report, summary, and manifest presence reflect only side effects completed before the failed operation. After successful marker invalidation, no completion manifest remains.
 
 ### Requirement: Persist Final Report Failure [RAE-FINAL-WARNING]
 IF final-report generation or validation fails and cleanup succeeds, THEN THE spec-check tool SHALL append one well-formed warning with category `reporting.final_report_failed`, rewrite `report_summary.md`, and refresh `manifest.json` after the summary write.

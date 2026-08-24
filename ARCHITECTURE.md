@@ -149,6 +149,8 @@ It also owns:
 - append-only accumulation of findings into `RunState`
 - typed pipeline abort propagation with `PipelineAbortError`
 - wiring between specs-forward and code-backwards phases
+- ordered run-start cleanup: invalidate the prior manifest, then remove every tool-owned output path before ingestion
+- the post-manifest final-report lifecycle, including warning persistence and fatal output-failure handling
 
 If you need the end-to-end flow of the product, read this file before reading anything else.
 
@@ -469,8 +471,9 @@ These are the most important things to preserve when changing the code.
 
 - All generated artifacts must stay under the configured output directory.
 - Output writes should go through `src/adapters/fs.ts`.
-- The final-report agent remains read-only. It returns Markdown as validated JSON; `spec-check` atomically publishes the precomputed `report.md` and validates it without following symlinks.
+- The final-report agent remains read-only. OpenCode transports the strict path/body payload through `type: "text"` events. `spec-check` rejects malformed UTF-8 or wrappers, validates required headings and per-finding artifact citations, atomically publishes the precomputed `report.md`, and validates it again without following symlinks.
 - Manifest presence is the core completion marker; manifest absence means the core run is incomplete.
+- Run start invalidates the prior manifest before deleting all tool-owned reports and raw evidence. Failure aborts before ingestion without claiming a current completed bundle.
 
 ### Finding Preservation Rule
 

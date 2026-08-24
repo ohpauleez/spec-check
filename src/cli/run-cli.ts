@@ -10,7 +10,7 @@ import { resolve } from "node:path";
 import type { Finding } from "../domain/findings.js";
 import type { LogicIrClaim } from "../domain/logic-ir.js";
 import type { Claim, ClaimGraph } from "../domain/claim-graph.js";
-import type { CapabilityName } from "../domain/branded.js";
+import { toRelativePath, type CapabilityName, type RelativePath } from "../domain/branded.js";
 import type { CatalogDocument } from "../domain/model.js";
 import type { PipelineContext, IngestionResult, AnalysisResult } from "./pipeline-types.js";
 import { createInitialRunState, addFindings, type RunState } from "../domain/run-state.js";
@@ -37,7 +37,7 @@ import {
   runCodeBackwardsWork,
 } from "./pipeline-helpers.js";
 import { activeMergedSpecsForGrouping, buildLogicalFileByCapability, isFormalizableClaim } from "../domain/formal/grouping.js";
-import { removeOutputTree } from "../adapters/fs.js";
+import { removeOutputTemporaryFiles, removeOutputTree } from "../adapters/fs.js";
 import {
   FORMALIZATION_EVIDENCE_DIRECTORY,
   buildFormalizationAttemptSet,
@@ -169,15 +169,14 @@ export async function runCli(config: RunConfig): Promise<RunState> {
 
 /** Execute one pipeline run inside its already-bound telemetry context. */
 async function runCliWithTelemetry(config: RunConfig): Promise<RunState> {
-  // Invalidate all prior-run completion and formalization evidence before work
-  // begins. The two operations touch disjoint paths (the manifest file versus
-  // the evidence subtree) and are both idempotent, so they commute and can run
-  // concurrently without ordering constraints.
   try {
+    // Remove the completion marker first. If any later cleanup fails, no stale
+    // marker can misrepresent the new run as complete.
+    await invalidateStaleManifest(config.output);
     await Promise.all([
-      invalidateStaleManifest(config.output),
-      removeOutputTree(config.output, FORMALIZATION_EVIDENCE_DIRECTORY),
       removeFinalReport(config.output),
+      ...MANAGED_OUTPUT_PATHS.map(async (path) => await removeOutputTree(config.output, path)),
+      removeOutputTemporaryFiles(config.output, MANAGED_ROOT_FILES),
     ]);
   } catch (error: unknown) {
     throw new PipelineAbortError("OutputError", outputFailureMessage("run-start output cleanup", error));
@@ -226,6 +225,32 @@ async function runCliWithTelemetry(config: RunConfig): Promise<RunState> {
 
   return state;
 }
+
+/** Every path spec-check owns across base, source-backed, and telemetry modes. */
+const MANAGED_OUTPUT_PATHS: readonly RelativePath[] = [
+  FORMALIZATION_EVIDENCE_DIRECTORY,
+  toRelativePath("report_1.1.md"),
+  toRelativePath("report_1.2.md"),
+  toRelativePath("report_1.3.md"),
+  toRelativePath("report_1.logic.md"),
+  toRelativePath("report_2.trace.md"),
+  toRelativePath("report_2.logic.md"),
+  toRelativePath("report_2.compare.md"),
+  toRelativePath("report_summary.md"),
+  toRelativePath("metrics.json"),
+  toRelativePath("smt"),
+  toRelativePath("gen_specs"),
+  toRelativePath("gen_specs_smt"),
+  toRelativePath("cross_implication"),
+  toRelativePath("cross_implication_aggregate"),
+];
+
+/** Root files whose interrupted atomic-write siblings are also tool-owned. */
+const MANAGED_ROOT_FILES: readonly RelativePath[] = [
+  toRelativePath("manifest.json"),
+  toRelativePath("report.md"),
+  ...MANAGED_OUTPUT_PATHS.filter((path) => !path.includes("/")),
+];
 
 // ---------------------------------------------------------------------------
 // Phase group: Ingestion (Phases 1-3)

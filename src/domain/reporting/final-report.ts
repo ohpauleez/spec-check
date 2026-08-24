@@ -19,6 +19,22 @@ export const FINAL_REPORT_PATH: RelativePath = toRelativePath("report.md");
 /** Maximum accepted report size in bytes. */
 export const FINAL_REPORT_MAX_BYTES = 1_048_576;
 
+/** Required report headings selected by the evaluated prompt contract. */
+export const FINAL_REPORT_REQUIRED_HEADINGS = Object.freeze([
+  "# Final spec-check Assessment",
+  "## Executive Assessment",
+  "## Prioritized Findings",
+  "## Logical Analysis",
+  "## Qualitative And Coverage Findings",
+  "## Traceability And Code Alignment",
+  "## Recurring Defect Patterns",
+  "## Remediation Plan",
+  "## Evidence And Count Reconciliation",
+  "## Residual Uncertainty And Rerun Criteria",
+] as const);
+
+const REPOSITORY_CITATION_PATTERN = /(?:^|[\s`([])((?:openspec|docs|src|test|spec-check-output)\/[A-Za-z0-9_./#:-]+)(?=$|[\s`),.;])/gu;
+
 /** Closed expected failure domain for one final-report attempt. */
 export type FinalReportErrorKind =
   | "agent_failed"
@@ -29,6 +45,7 @@ export type FinalReportErrorKind =
   | "report_symlink"
   | "report_not_regular"
   | "report_empty"
+  | "report_structure_invalid"
   | "report_too_large"
   | "report_unreadable";
 
@@ -379,6 +396,8 @@ export async function validateFinalReport(
   if (content.trim().length === 0) {
     return err({ kind: "report_empty", message: "final report contains no non-whitespace content" });
   }
+  const contentValidation = validateFinalReportContent(content);
+  if (!contentValidation.ok) return contentValidation;
   postcondition(Buffer.byteLength(content, "utf8") <= FINAL_REPORT_MAX_BYTES, "validated report exceeds byte bound");
   return ok({ path: FINAL_REPORT_PATH, content });
 }
@@ -422,7 +441,76 @@ function validateFinalReportContent(content: string): Result<string, FinalReport
   if (content.trim().length === 0) {
     return err({ kind: "report_empty", message: "final report contains no non-whitespace content" });
   }
+  const lines = markdownLinesOutsideFences(content);
+  if (lines.some((line) => /^ {0,3}</u.test(line))) {
+    return err({ kind: "report_structure_invalid", message: "final report must not use raw HTML blocks" });
+  }
+  let previousHeading = -1;
+  for (const heading of FINAL_REPORT_REQUIRED_HEADINGS) {
+    const positions = lines.flatMap((line, index) => line === heading ? [index] : []);
+    if (positions.length !== 1 || positions[0]! <= previousHeading) {
+      return err({ kind: "report_structure_invalid", message: `final report is missing required heading: ${heading}` });
+    }
+    previousHeading = positions[0]!;
+  }
+  if (!hasRepositoryCitation(lines.join("\n"))) {
+    return err({ kind: "report_structure_invalid", message: "final report contains no repository-relative artifact citation" });
+  }
+  const findingsStart = lines.indexOf("## Prioritized Findings");
+  const findingsEnd = lines.indexOf("## Logical Analysis");
+  const findingHeadings = lines
+    .map((line, index) => ({ line, index }))
+    .filter(({ line, index }) => index > findingsStart && index < findingsEnd && /^### \d+\. \S/u.test(line));
+  const otherHeadings = lines
+    .slice(findingsStart + 1, findingsEnd)
+    .filter((line) => /#{1,6}\s/u.test(line));
+  if (otherHeadings.length !== findingHeadings.length) {
+    return err({ kind: "report_structure_invalid", message: "prioritized finding headings must use `### <number>. <title>`" });
+  }
+  for (let ordinal = 0; ordinal < findingHeadings.length; ordinal += 1) {
+    const start = findingHeadings[ordinal]!.index + 1;
+    const end = findingHeadings[ordinal + 1]?.index ?? findingsEnd;
+    const artifacts = lines.slice(start, end).find((line) => line.startsWith("- **Artifacts:**"));
+    if (artifacts === undefined || !hasRepositoryCitation(artifacts)) {
+      return err({
+        kind: "report_structure_invalid",
+        message: `prioritized finding is missing an artifact citation: ${findingHeadings[ordinal]!.line}`,
+      });
+    }
+  }
   return ok(content);
+}
+
+/** Return Markdown lines while excluding fenced code content from structure. */
+function markdownLinesOutsideFences(content: string): readonly string[] {
+  const lines: string[] = [];
+  let fence: { readonly marker: "`" | "~"; readonly length: number } | undefined;
+  const visibleContent = content.replace(/<!--[\s\S]*?(?:-->|$)/gu, "");
+  for (const line of visibleContent.split(/\r?\n/u)) {
+    const opening = /^ {0,3}(`{3,}|~{3,})/u.exec(line)?.[1];
+    if (fence === undefined && opening !== undefined) {
+      fence = { marker: opening[0] as "`" | "~", length: opening.length };
+      continue;
+    }
+    if (fence !== undefined) {
+      const closing = new RegExp(`^ {0,3}${fence.marker}{${String(fence.length)},}\\s*$`, "u");
+      if (closing.test(line)) fence = undefined;
+    } else {
+      lines.push(line);
+    }
+  }
+  return lines;
+}
+
+/** Require at least one confined repository-relative path citation. */
+function hasRepositoryCitation(content: string): boolean {
+  for (const match of content.matchAll(REPOSITORY_CITATION_PATTERN)) {
+    const citation = match[1];
+    if (citation === undefined) continue;
+    const path = citation.split(/[#:]/u, 1)[0]!;
+    if (!path.split("/").includes("..")) return true;
+  }
+  return false;
 }
 
 /** Map the adapter taxonomy into the stable final-report boundary. */

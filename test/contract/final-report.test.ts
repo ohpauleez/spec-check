@@ -22,6 +22,21 @@ import {
   isPermissionLiteralPath,
 } from "../../src/domain/prompts/final-report.js";
 
+const VALID_REPORT = [
+  "# Final spec-check Assessment",
+  "## Executive Assessment",
+  "## Prioritized Findings",
+  "## Logical Analysis",
+  "## Qualitative And Coverage Findings",
+  "## Traceability And Code Alignment",
+  "## Recurring Defect Patterns",
+  "## Remediation Plan",
+  "## Evidence And Count Reconciliation",
+  "## Residual Uncertainty And Rerun Criteria",
+  "Evidence: `spec-check-output/manifest.json`.",
+  "",
+].join("\n");
+
 describe("final-report prompt and policy", () => {
   it("keeps the embedded prompt byte-identical to the canonical source", async () => {
     traceSpec("RAE-FINAL-PROMPT-PARITY");
@@ -117,7 +132,7 @@ describe("final-report filesystem boundary", () => {
     traceSpec("RAE-FINAL-VALIDATE", "RAE-FINAL-VALID-FILE", "RAE-NAMES-FINAL");
     const root = await mkdtemp(join(tmpdir(), "spec-check-final-report-"));
     const path = join(root, "report.md");
-    await writeFile(path, "x".repeat(FINAL_REPORT_MAX_BYTES));
+    await writeFile(path, VALID_REPORT + "x".repeat(FINAL_REPORT_MAX_BYTES - Buffer.byteLength(VALID_REPORT)));
     const result = await validateFinalReport(path);
     expect(result.ok).toBe(true);
   });
@@ -166,6 +181,100 @@ describe("final-report filesystem boundary", () => {
     })).toMatchObject({ ok: false, error: { kind: "report_unreadable" } });
   });
 
+  it("rejects reports without the required sections or repository citation", async () => {
+    traceSpec("RAE-FINAL-VALIDATE", "RAE-FINAL-STRUCTURE", "RAE-PRESERVE-EVID");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-final-report-"));
+    const path = join(root, "report.md");
+    await writeFile(path, "# Final spec-check Assessment\n", "utf8");
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+    await writeFile(path, VALID_REPORT.replace("spec-check-output/manifest.json", "manifest"), "utf8");
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+  });
+
+  it("rejects a numbered prioritized finding without its own artifact citation", async () => {
+    traceSpec("RAE-FINAL-VALIDATE", "RAE-FINAL-STRUCTURE", "RAE-PRESERVE-EVID");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-final-report-"));
+    const path = join(root, "report.md");
+    const unsupported = VALID_REPORT.replace(
+      "## Prioritized Findings",
+      "## Prioritized Findings\n### 1. Unsupported\n- **Artifacts:** None",
+    );
+    await writeFile(path, unsupported, "utf8");
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+  });
+
+  it("does not accept headings or citations from fenced or non-relative text", async () => {
+    traceSpec("RAE-FINAL-STRUCTURE", "RAE-PRESERVE-EVID");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-final-report-"));
+    const path = join(root, "report.md");
+    await writeFile(path, `\`\`\`markdown\n${VALID_REPORT}\`\`\`\n`, "utf8");
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+    await writeFile(path, `\`\`\`\`markdown\n\`\`\`\n${VALID_REPORT}\`\`\`\`\n`, "utf8");
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+    await writeFile(path, VALID_REPORT.replace(
+      "`spec-check-output/manifest.json`",
+      "https://example.invalid/src/fake.ts",
+    ), "utf8");
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+    await writeFile(path, VALID_REPORT.replace(
+      "`spec-check-output/manifest.json`",
+      "`src/../../etc/passwd`",
+    ), "utf8");
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+  });
+
+  it("rejects duplicate or malformed prioritized headings", async () => {
+    traceSpec("RAE-FINAL-STRUCTURE");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-final-report-"));
+    const path = join(root, "report.md");
+    await writeFile(path, VALID_REPORT.replace(
+      "## Executive Assessment",
+      "## Executive Assessment\n## Executive Assessment",
+    ), "utf8");
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+    const malformed = VALID_REPORT.replace(
+      "## Prioritized Findings",
+      "## Prioritized Findings\n### 1 - Unsupported\n- **Artifacts:** `src/fake.ts`",
+    );
+    await writeFile(path, malformed, "utf8");
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+    const alternateLevel = VALID_REPORT.replace(
+      "## Prioritized Findings",
+      "## Prioritized Findings\n#### 1. Unsupported",
+    );
+    await writeFile(path, alternateLevel, "utf8");
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+  });
+
+  it("does not accept report structure hidden in HTML comments", async () => {
+    traceSpec("RAE-FINAL-STRUCTURE", "RAE-PRESERVE-EVID");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-final-report-"));
+    const path = join(root, "report.md");
+    await writeFile(path, `<!--\n${VALID_REPORT}\n-->\n`, "utf8");
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+    await writeFile(path, `<script>\n${VALID_REPORT}\n</script>\n`, "utf8");
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+    await writeFile(path, `<script\n${VALID_REPORT}\n`, "utf8");
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+  });
+
+  it("rejects blockquoted finding headings that evade artifact checks", async () => {
+    traceSpec("RAE-FINAL-STRUCTURE", "RAE-PRESERVE-EVID");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-final-report-"));
+    const path = join(root, "report.md");
+    const quoted = VALID_REPORT.replace(
+      "## Prioritized Findings",
+      "## Prioritized Findings\n> ### 1. Unsupported",
+    );
+    await writeFile(path, quoted, "utf8");
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+    await writeFile(path, VALID_REPORT.replace(
+      "## Prioritized Findings",
+      "## Prioritized Findings\n- ### 1. Unsupported",
+    ), "utf8");
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+  });
+
   it("removes stale files and directories idempotently", async () => {
     traceSpec("RAE-FINAL-CLEANUP", "RAE-FINAL-CLEAN-STALE", "RAE-FINAL-CLEAN-FAILED");
     const root = await mkdtemp(join(tmpdir(), "spec-check-final-report-"));
@@ -185,7 +294,7 @@ describe("final-report generation and lifecycle", () => {
     await mkdir(output);
     const designated = join(output, "report.md");
     const invoke = vi.fn(async () => ({ ok: true as const, value: {
-      report_path: designated, report_markdown: "# Valid\n",
+      report_path: designated, report_markdown: VALID_REPORT,
     } }));
     const fs = await import("node:fs/promises");
     const write = vi.fn(async (outputDir, relativePath, content) => {
@@ -203,8 +312,8 @@ describe("final-report generation and lifecycle", () => {
       workspaceRoot: expect.stringContaining("spec-check-final-report-"),
       opencodeConfigDir: expect.stringContaining("spec-check-final-report-"),
     }));
-    expect(write).toHaveBeenCalledWith(output, "report.md", "# Valid\n");
-    expect(await readFile(designated, "utf8")).toBe("# Valid\n");
+    expect(write).toHaveBeenCalledWith(output, "report.md", VALID_REPORT);
+    expect(await readFile(designated, "utf8")).toBe(VALID_REPORT);
   });
 
   it("does not inspect an acknowledged alternate path", async () => {
@@ -228,6 +337,7 @@ describe("final-report generation and lifecycle", () => {
   it.each([
     ["empty", " \n", "acknowledgment_invalid"],
     ["oversized", "x".repeat(FINAL_REPORT_MAX_BYTES + 1), "report_too_large"],
+    ["unstructured", "# Report\n", "report_structure_invalid"],
   ])("rejects %s returned Markdown before publication", async (_name, reportMarkdown, kind) => {
     traceSpec("RAE-FINAL-EMPTY", "RAE-FINAL-OVERSIZED");
     const write = vi.fn();
@@ -251,7 +361,7 @@ describe("final-report generation and lifecycle", () => {
       outputDir: toOutputDirPath("/tmp/designated"), workspaceRoot: "/tmp",
     }, {
       invoke: vi.fn(async () => ({ ok: true as const, value: {
-        report_path: "/tmp/designated/report.md", report_markdown: "# Report\n",
+        report_path: "/tmp/designated/report.md", report_markdown: VALID_REPORT,
       } })),
       inspect: vi.fn(), read: vi.fn(),
       write: vi.fn(async () => { throw new Error("ENOSPC"); }),
@@ -267,7 +377,7 @@ describe("final-report generation and lifecycle", () => {
       outputDir: toOutputDirPath("/tmp/designated"), workspaceRoot: "/tmp",
     }, {
       invoke: vi.fn(async () => ({ ok: true as const, value: {
-        report_path: "/tmp/designated/report.md", report_markdown: "# Report\n",
+        report_path: "/tmp/designated/report.md", report_markdown: VALID_REPORT,
       } })),
       inspect: vi.fn(async () => { throw missing; }), read: vi.fn(), write: vi.fn(),
     });

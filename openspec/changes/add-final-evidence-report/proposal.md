@@ -14,8 +14,8 @@ This change adds a bounded final-report step that reads a completed evidence bun
 - Require the agent to return the destination and complete Markdown in one strict JSON payload.
 - Validate the payload path and Markdown, then atomically publish `report.md` through the trusted filesystem adapter and independently validate the resulting file.
 - Keep `report.md` outside `manifest.json` because the report is produced after core completion and derives from the manifested evidence.
-- Remove a stale `report.md` before a new run starts.
-- Treat every final-report failure as nonfatal: remove any partial or invalid report, append a `reporting.final_report_failed` warning, rewrite `report_summary.md`, and refresh `manifest.json` so its checksum remains valid.
+- Invalidate the prior manifest first, then remove stale tool-owned reports, metrics, and raw evidence before a new run starts.
+- Treat generation and validation failures as nonfatal: remove any partial or invalid report, append a `reporting.final_report_failed` warning, rewrite `report_summary.md`, and refresh `manifest.json` so its checksum remains valid. Surface cleanup or warning-persistence failures as fatal `OutputError` results.
 - Resolve the configured output directory to an absolute path before it enters the pipeline.
 - Preserve prompt parity between the repository prompt and the prompt embedded in the bundled distribution.
 - Extend the reporting lifecycle model and verification evidence for report success, failure, cleanup, permissions, path confinement, and manifest exclusion.
@@ -51,7 +51,7 @@ Evaluations in `pasture/report_prompts_eval*` selected prompt F as a strong deci
 ### Assumptions and Dependencies
 
 - Core reporting has completed and a readable `manifest.json` exists before final-report generation starts.
-- OpenCode supports a non-interactive agent with workspace reads and path-restricted edits.
+- OpenCode supports a non-interactive agent with workspace reads and explicit denial of mutation tools.
 - OpenCode `--pure` suppresses external plugins for this invocation; managed administrator policy may still deny required access but cannot be bypassed.
 - The workspace root supplied to OpenCode contains the analyzed specifications and, when configured, source files.
 - The configured evidence directory and report path can be represented as absolute filesystem paths, including paths containing spaces.
@@ -65,7 +65,7 @@ Evaluations in `pasture/report_prompts_eval*` selected prompt F as a strong deci
 - `report.md` is intentionally absent from that manifest in both success and failure states.
 - Existing input documents and source files remain read-only.
 - The agent must not receive unrestricted build permissions and must not run with `--auto`.
-- All expected failures are represented as data and degrade to a warning; they must not change a completed analysis into a fatal run.
+- Expected generation and validation failures are represented as data and degrade to a warning. Cleanup and warning-persistence failures are fatal `OutputError` results because no safe handled postcondition can be claimed.
 - Report validation is independent of the model acknowledgment.
 - The report is bounded to at most 1,048,576 bytes to limit resource use and accidental output amplification.
 - Because OpenCode permission paths treat `*` and `?` as wildcards, an output path containing either character cannot express exact single-file authority and degrades final-report generation to a warning.
@@ -89,9 +89,9 @@ Evaluations in `pasture/report_prompts_eval*` selected prompt F as a strong deci
 - **Final Report Request**: The evaluated instructions plus the absolute evidence-directory path, absolute destination path, model, timeout, and workspace root.
 - **Restricted Report Agent**: A transient read-only OpenCode agent that may inspect the workspace and evidence bundle but cannot modify files.
 - **Report Payload**: A strict JSON object whose `report_path` equals the designated destination and whose `report_markdown` contains the complete assessment.
-- **Final Report**: A post-completion Markdown derivative named `report.md`. A valid report is a non-symlink regular file, contains at least one non-whitespace character, and is at most 1 MiB.
+- **Final Report**: A post-completion Markdown derivative named `report.md`. A valid report is a non-symlink regular UTF-8 file, is at most 1 MiB, contains every prompt-required section and a repository-relative citation, and gives every numbered prioritized finding its own artifact citation.
 - **Report Failure Warning**: A warning finding with category `reporting.final_report_failed` that describes a terminal report-generation or validation failure and records its failure kind.
-- **Final Report Outcome**: Exactly one terminal outcome for an attempted report: `valid_report` or `warning_without_report`.
+- **Final Report Outcome**: Exactly one terminal result for an attempted report: `valid_report`, `warning_without_report`, or fatal `output_failure`. The third result means cleanup or warning persistence could not establish a safe handled outcome.
 
 ```mermaid
 flowchart LR
@@ -117,17 +117,17 @@ flowchart LR
 
 ### Postconditions
 
-- Every attempted final-report generation reaches exactly one terminal outcome: one validated `report.md`, or no `report.md` plus one persisted `reporting.final_report_failed` warning.
-- On success, `report.md` is a non-symlink regular file, contains non-whitespace content, is no larger than 1 MiB, and is absent from `manifest.json`.
-- On failure, the designated report path is absent, the refreshed summary contains the warning, every manifest checksum still matches its core file, and the run remains complete.
-- A new run cannot expose a stale `report.md` as its result.
+- Every attempted final-report generation reaches exactly one terminal result: one validated `report.md`; no `report.md` plus one persisted `reporting.final_report_failed` warning; or a fatal `OutputError` without a claim that either handled postcondition holds.
+- On success, `report.md` meets the strict UTF-8, required-heading, citation, regular-file, and 1 MiB rules and is absent from `manifest.json`.
+- On handled failure, the designated report path is absent, the refreshed summary contains the warning, every manifest checksum still matches its core file, and the run remains complete.
+- A new run invalidates the prior manifest before it removes all tool-owned output. If cleanup fails, analysis does not start and the CLI returns `OutputError` without claiming a current completed bundle.
 - Prompt source and bundled prompt content remain equivalent after the defined runtime substitutions.
 
 ### Invariants
 
 - **Core-completion monotonicity**: once the core manifest exists, final-report success or handled failure does not turn the run into a failed analysis.
 - **Manifest exclusion**: `report.md` is never a manifest entry.
-- **Terminal partition**: after an attempted report step, exactly one of `ValidReport` and `WarningWithoutReport` holds.
+- **Terminal partition**: after an attempted report step, exactly one of `ValidReport`, `WarningWithoutReport`, and `OutputFailure` holds.
 - **No invalid residue**: a failed report step leaves no file, symlink, directory, empty file, whitespace-only file, or oversized file at the designated path.
 - **Single-writer confinement**: the agent cannot modify files; only the trusted filesystem adapter may atomically publish the exact report destination.
 - **Path agreement**: the requested path, acknowledgment path, and validated path are equal absolute paths inside the configured output directory.
@@ -158,6 +158,8 @@ flowchart LR
   - **Rationale**: The report could be falsely attributed to the current evidence bundle.
 - **Process termination after core completion**: The process ends after the manifest is written but before report success or handled cleanup.
   - **Rationale**: Core completion remains truthful, but `report.md` may be absent or partial; the next run's stale-report cleanup is required to restore a clean attempt boundary.
+- **Run-start cleanup failure**: The prior manifest is invalidated, but one or more managed output paths cannot be removed.
+  - **Rationale**: The CLI returns `OutputError` before ingestion. Residue can remain, but no current manifest may attest it as the new run.
 
 ## Quality Attributes
 

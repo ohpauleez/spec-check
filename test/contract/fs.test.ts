@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 
 import { describe, expect, it, vi } from "vitest";
 import { traceSpec } from "../support/spec-trace.js";
-import { removeOutputTree, resolveConfinedOutputPath, writeOutputAtomic, sha256Hex } from "../../src/adapters/fs.js";
+import { removeOutputTemporaryFiles, removeOutputTree, resolveConfinedOutputPath, writeOutputAtomic, sha256Hex } from "../../src/adapters/fs.js";
 import { toOutputDirPath, toRelativePath } from "../../src/domain/branded.js";
 import type * as FsPromises from "node:fs/promises";
 
@@ -51,6 +51,26 @@ describe("filesystem adapter contracts", () => {
 
     await expect(access(join(dir, "formalization_evidence"))).rejects.toThrow();
     expect(await readFile(join(dir, "keep.txt"), "utf8")).toBe("keep\n");
+  });
+
+  it("recreates a removed cached output directory in the same process", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "spec-check-fs-cache-"));
+    const output = toOutputDirPath(dir);
+    const path = toRelativePath("smt/result.smt2");
+    await writeOutputAtomic(output, path, "first");
+    await removeOutputTree(output, toRelativePath("smt"));
+    await writeOutputAtomic(output, path, "second");
+    expect(await readFile(join(dir, path), "utf8")).toBe("second");
+  });
+
+  it("removes interrupted atomic-write siblings only for managed root files", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "spec-check-fs-temp-"));
+    const output = toOutputDirPath(dir);
+    await writeFile(join(dir, "report.md.tmp-123-abcd"), "partial", "utf8");
+    await writeFile(join(dir, "user.md.tmp-123-abcd"), "keep", "utf8");
+    await removeOutputTemporaryFiles(output, [toRelativePath("report.md")]);
+    await expect(readFile(join(dir, "report.md.tmp-123-abcd"), "utf8")).rejects.toThrow();
+    expect(await readFile(join(dir, "user.md.tmp-123-abcd"), "utf8")).toBe("keep");
   });
 
   it("accepts filenames containing '..' as a substring (not a traversal segment)", () => {

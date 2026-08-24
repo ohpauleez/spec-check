@@ -355,7 +355,6 @@ function classifyProcessResult(
       message: "opencode output exceeded the configured capture bound",
     });
   }
-
   // Process failure is authoritative even when a partial payload was emitted.
   if (processResult.signal !== null || processResult.exitCode !== 0) {
     const stderrPreview = processResult.stderr.trim().slice(0, 300);
@@ -371,6 +370,13 @@ function classifyProcessResult(
           ? `opencode exited with ${exitDescription} (empty stdout, no stderr)`
           : `opencode exited with ${exitDescription} (no stderr)`,
       stderr: processResult.stderr,
+    });
+  }
+  if (options.phase === "final-report" && processResult.stdoutInvalidUtf8 === true) {
+    return err({
+      kind: "invalid_json",
+      phase: options.phase,
+      message: "opencode final-report event stream is not valid UTF-8",
     });
   }
 
@@ -697,11 +703,14 @@ function parseOpencodePayload(stdout: string, strictPayload = false): unknown {
 
   const direct = tryParseJson(trimmed);
   if (direct.ok) {
-    const singleEvents = Array.isArray(direct.value) ? direct.value : [direct.value];
+    const singleEvents = strictPayload ? [direct.value] : Array.isArray(direct.value) ? direct.value : [direct.value];
     throwOnErrorEvent(singleEvents);
     const eventPayload = extractPayloadFromEvents(singleEvents);
     if (eventPayload !== undefined) {
       return strictPayload ? parseStrictJsonPayload(eventPayload) : extractJsonPayload(eventPayload);
+    }
+    if (strictPayload) {
+      throw new Error("missing final-report payload text event");
     }
     return strictPayload ? parseStrictJsonPayload(trimmed) : extractJsonPayload(trimmed);
   }

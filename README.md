@@ -22,7 +22,7 @@ At a high level it supports:
 - **formalization pipeline**: translates requirement and scenario claims into typed logic IR, clusters alternate interpretations, and generates SMT-LIB artifacts for Z3 analysis
 - **optional source-backed analysis**: traces requirements to source evidence, generates EARS-preferring code-derived specifications, formalizes them through the same pipeline, and uses solver-backed cross-side implication (ie: how strongly aligned are the specs and code?)
 - **evidence-preserving reports**: bounded Markdown reports with provenance, intermediate artifacts, and manifest-based completion semantics
-- **final assessment**: after core completion, a read-only agent returns a synthesized assessment and `spec-check` atomically publishes optional `report.md`; failure preserves the core run and is recorded as a warning
+- **final assessment**: after core completion, a read-only agent returns a cited synthesized assessment and `spec-check` validates and atomically publishes optional `report.md`; handled failure preserves the core run and is recorded as a warning
 
 For the full design rationale, see [docs/design.md](docs/design.md).
 
@@ -77,6 +77,8 @@ node dist/spec-check.js \
 That analysis will use 1M-2M tokens and cost ~$3.50 with the default model.
 
 Successful runs automatically attempt a decision-oriented `report.md` after the core manifest. If this optional step fails, `report_summary.md` records `reporting.final_report_failed`, its manifest checksum is refreshed, and core analysis remains complete.
+
+At run start, `spec-check` invalidates the prior manifest first. It then removes all prior tool-owned reports, metrics, generated specifications, SMT files, and comparison evidence. Cleanup failure returns an output error before analysis starts, so stale omitted artifacts cannot appear to belong to the new run.
 
 You can still use another coding agent to explain the evidence with a prompt like:
 

@@ -293,7 +293,7 @@ This split matters for assurance. The more the decision logic is isolated from t
 | **Entry point** ([`src/index.ts`](src/index.ts)) | Parse argv into typed `CliArgs`, dispatch to pipeline or informational output, write stdout/stderr, set exit code | No business logic; only routing and I/O |
 | **Argument parser** ([`src/cli/parse-argv.ts`](src/cli/parse-argv.ts)) | Hand-rolled argv parsing with `Result<CliArgs, ArgError>` return | Pure function; exhaustive `FlagKey` switch + `assertNever`; never throws |
 | **Config resolver** ([`src/cli/config.ts`](src/cli/config.ts)) | Three-tier merge: CLI flags > config file > built-in defaults | Resolved `RunConfig` is immutable once analysis begins |
-| **Pipeline orchestrator** ([`src/cli/run-cli.ts`](src/cli/run-cli.ts)) | Run-start output invalidation followed by phase-group decomposition into ingestion, analysis, source, reporting | Before any phase work, invalidates the stale manifest and then removes the prior `formalization_evidence/` tree; pipeline progresses in ordered phases only; `PipelineAbortError` for unrecoverable failures |
+| **Pipeline orchestrator** ([`src/cli/run-cli.ts`](src/cli/run-cli.ts)) | Run-start output invalidation followed by phase-group decomposition into ingestion, analysis, source, reporting | Before any phase work, invalidates the stale manifest and then removes all prior tool-owned output; pipeline progresses in ordered phases only; `PipelineAbortError` for unrecoverable failures |
 | **Phase runner** ([`src/cli/phase-runner.ts`](src/cli/phase-runner.ts)) | Progress event decoration: exactly one `started` and one `completed`/`failed` event per phase | Generic decorator; no phase-specific knowledge |
 | **Catalog** ([`src/domain/parser/catalog.ts`](src/domain/parser/catalog.ts)) | Resolve input set, classify documents, handle delta/final conflicts | Deterministic given the same inputs; at most one finalized + one delta spec per capability |
 | **Structured parsers** ([`src/domain/parser/`](src/domain/parser/)) | Line-oriented parsing for proposal, design, spec, and task documents | Every input line is either classified or preserved as unparsed evidence |
@@ -314,7 +314,7 @@ This split matters for assurance. The more the decision logic is isolated from t
 | **Blind comparison** ([`src/domain/code-backwards/blind-compare.ts`](src/domain/code-backwards/blind-compare.ts)) | Explanatory LLM rationale for formal classification | Code-derived side never receives original requirement text |
 | **Report rendering** ([`src/domain/reporting/render.ts`](src/domain/reporting/render.ts)) | Render Markdown reports; replace malformed findings with `reporting.unsupported_verdict` defects | Reports never contain findings without provenance; untrusted evidence text neutralized into inert Markdown via `neutralizeMarkdownInline()` (`RAE-EVID-RENDER-SAFE`) |
 | **Manifest** ([`src/domain/reporting/manifest.ts`](src/domain/reporting/manifest.ts)) | Build entries with SHA-256 checksums, including separate formalization attempt-set evidence files; write atomically; invalidate stale manifests at run start | Manifest is the final core-evidence write and sole core success marker; optional unmanifested `report.md` may physically follow |
-| **Final report** ([`src/domain/reporting/final-report.ts`](src/domain/reporting/final-report.ts)) | Build the evaluated prompt and read-only agent policy; validate returned Markdown; atomically publish and read back `report.md`; model legal lifecycle transitions | Report is optional, <=1 MiB, non-symlink, non-empty, and excluded from the core manifest; handled failure persists a checksummed warning |
+| **Final report** ([`src/domain/reporting/final-report.ts`](src/domain/reporting/final-report.ts)) | Build the evaluated prompt and read-only agent policy; validate strict event transport, required sections, and citations; atomically publish and read back `report.md`; model legal lifecycle transitions | Report is optional, <=1 MiB, strict UTF-8, non-symlink, structurally cited, and excluded from the core manifest; handled failure persists a checksummed warning |
 | **Filesystem adapter** ([`src/adapters/fs.ts`](src/adapters/fs.ts)) | Path confinement, atomic writes (temp + rename), SHA-256 checksums | All writes confined to configured output directory; `precondition` throws on traversal |
 | **Process adapter** ([`src/adapters/process.ts`](src/adapters/process.ts)) | Generic `execFile` wrapper with argv arrays, timeout handling, stdin piping | No shell interpolation; `shell: false`; ENOENT on spawn rejects the promise |
 | **`opencode` adapter** ([`src/adapters/opencode.ts`](src/adapters/opencode.ts)) | `opencode` subprocess with NDJSON event stream parsing, optional `--file` attachments, bounded retries | Bounded retries (default 3); invalid responses consume a retry; universal timeout comes from run config (default 300s) |
@@ -601,7 +601,7 @@ Relevant code: [`src/domain/findings.ts`](src/domain/findings.ts)
 - Successful runs exit with code `0` (no findings) or `1` (findings present).
 - Skipped optional phases are explained in reporting.
 - Manifest presence indicates a complete run; manifest absence indicates incomplete output.
-- Atomic formalization attempt-evidence files may remain after failure or process termination until the next run starts; they are partial-run audit evidence, not completion markers. The next run invalidates any stale manifest first and then removes the entire prior `formalization_evidence/` tree before other pipeline work.
+- Tool-owned output may remain after failure or process termination until the next run starts; it is partial-run audit evidence, not a completion marker. The next run invalidates any stale manifest first and then removes all prior reports, metrics, formalization evidence, SMT evidence, generated specifications, and comparison evidence before other pipeline work.
 
 **Spec references:** [`catalog-and-parse`](openspec/specs/catalog-and-parse/spec.md), [`claim-graph-and-coverage`](openspec/specs/claim-graph-and-coverage/spec.md), [`formalization-and-logic-analysis`](openspec/specs/formalization-and-logic-analysis/spec.md), [`reporting-and-evidence`](openspec/specs/reporting-and-evidence/spec.md).
 
@@ -624,10 +624,10 @@ stateDiagram-v2
     ParseInvocation --> FatalExit: invalid argv
     ResolveConfig --> InvalidateStaleManifest: config valid
     ResolveConfig --> FatalExit: invalid config
-    InvalidateStaleManifest --> RemovePriorFormalizationEvidence: manifest absent
+    InvalidateStaleManifest --> RemovePriorManagedOutput: manifest absent
     InvalidateStaleManifest --> FatalExit: invalidation failure
-    RemovePriorFormalizationEvidence --> ValidateInputs: prior evidence tree absent
-    RemovePriorFormalizationEvidence --> FatalExit: removal failure
+    RemovePriorManagedOutput --> ValidateInputs: prior tool-owned output absent
+    RemovePriorManagedOutput --> FatalExit: removal failure
     ValidateInputs --> RunIngestion: inputs valid
     ValidateInputs --> FatalExit: unreadable path or missing dependency
     RunIngestion --> RunAnalysis: ingestion succeeded
@@ -655,7 +655,7 @@ stateDiagram-v2
 | invalid argv | report error to stderr | exit `2` |
 | invalid config | report error to stderr | exit `3` |
 | missing dependency | report error to stderr | exit `4` |
-| prior run output exists | invalidate `manifest.json`, then recursively remove `formalization_evidence/` | begin with no prior completion marker or formalization attempt evidence |
+| prior run output exists | invalidate `manifest.json`, then remove all tool-owned reports, metrics, and raw evidence trees | begin with no prior completion marker or stale tool-owned output |
 | run-start output cleanup fails | abort before dependency, ingestion, LLM, solver, or new evidence work | no new run output is trusted as complete |
 
 #### Invariants
@@ -666,7 +666,7 @@ stateDiagram-v2
 | TL-2 | Invalid arguments produce exit code `2` before any output is written |
 | TL-3 | CLI flags take precedence over config file values |
 | TL-4 | `PipelineAbortError` carries `ErrorCategory` for exit code mapping |
-| TL-5 | Run-start output cleanup is ordered: invalidate stale `manifest.json`, remove the prior `formalization_evidence/` tree, then begin pipeline work |
+| TL-5 | Run-start output cleanup is ordered: invalidate stale `manifest.json`, remove all prior tool-owned output, then begin pipeline work |
 | TL-6 | Attempt evidence from a failed or terminated current run may remain for audit only until the next run starts; it never coexists with a successful current-run manifest unless that manifest lists and checksums it |
 
 #### Safety and Liveness
@@ -843,8 +843,8 @@ Relevant code: [`src/cli/run-cli.ts`](src/cli/run-cli.ts), [`src/adapters/fs.ts`
 ```mermaid
 stateDiagram-v2
     [*] --> InvalidateStaleManifest
-    InvalidateStaleManifest --> RemovePriorFormalizationEvidence
-    RemovePriorFormalizationEvidence --> RunPipeline
+    InvalidateStaleManifest --> RemovePriorManagedOutput
+    RemovePriorManagedOutput --> RunPipeline
     RunPipeline --> RenderPhaseReports
     RenderPhaseReports --> RenderSummary: per-phase reports written
     RenderPhaseReports --> FatalExit: write failure
@@ -863,7 +863,7 @@ stateDiagram-v2
 |---|---|---|
 | stale manifest exists from prior run | remove before new output | clean slate |
 | no stale manifest | no-op | proceed |
-| prior `formalization_evidence/` tree exists | remove recursively after manifest invalidation and before pipeline work | prior successful or failed-run attempt evidence cannot contaminate the new run |
+| prior tool-owned reports or evidence exist | remove after manifest invalidation and before pipeline work | omitted phases and failed-run evidence cannot contaminate the new run |
 | run-start cleanup fails | abort before pipeline work | no current-run attempt evidence or reports are produced |
 | finding has valid shape | render normally | included in report |
 | finding has malformed shape | replace with `reporting.unsupported_verdict` defect | defect visible in report |
@@ -875,7 +875,7 @@ stateDiagram-v2
 
 | ID | Invariant |
 |---|---|
-| RP-1 | Run start first removes stale `manifest.json`, then removes the entire prior `formalization_evidence/` tree, before any other pipeline work or new output |
+| RP-1 | Run start first removes stale `manifest.json`, then removes all prior tool-owned reports, metrics, and evidence trees before any other pipeline work or new output |
 | RP-2 | Manifest is written after all core evidence; optional `report.md` may follow and is excluded |
 | RP-3 | Report writes are atomic (temp + rename) |
 | RP-4 | Manifest checksums match the content written to disk |
@@ -1011,7 +1011,7 @@ sequenceDiagram
 Protocol rules:
 
 - validation occurs before any external tool invocation
-- run-start output cleanup occurs before dependency and phase work: invalidate the stale manifest first, then remove the prior `formalization_evidence/` tree; abort if either operation fails
+- run-start output cleanup occurs before dependency and phase work: invalidate the stale manifest first, then remove all prior tool-owned reports, metrics, and evidence trees; abort if either operation fails
 - phase groups execute in strict order: ingestion → analysis → source → reporting
 - `PipelineAbortError` bridges domain `ErrorCategory` into the exception world for progress-event infrastructure compatibility
 - each phase emits exactly one `started` event and one `completed`/`failed` event
@@ -1342,7 +1342,8 @@ Relevant code: [`src/domain/result.ts`](src/domain/result.ts), [`src/domain/erro
 | **No code-derived generation exposes original requirement text** | Generation receives only source evidence and capability name suggestions | Property tests |
 | **No manifest written before core outputs finalize** | `invalidateStaleManifest()` at start; `writeCoreManifest()` after core evidence | Integration tests |
 | **No attempt-evidence file implies completion** | Separate atomic files are partial evidence; successful core manifest lists/checksums them | Failure/termination and manifest contract tests |
-| **No prior formalization evidence enters a new run** | Ordered run-start cleanup invalidates the stale manifest, then removes the prior `formalization_evidence/` tree before pipeline work | Run-start ordering and recursive-removal integration tests |
+| **No prior tool-owned output enters a new run** | Ordered run-start cleanup invalidates the stale manifest, then removes prior reports, metrics, and evidence trees before pipeline work | Run-start ordering and recursive-removal integration tests |
+| **No unsupported final assessment is accepted** | Strict UTF-8 event transport plus required headings, repository citation, and per-numbered-finding artifact citations before and after publication | Adapter, validator, and integration tests |
 | **No unsupported verdict reaches final report** | Report rendering replaces malformed findings with `reporting.unsupported_verdict` defects | Contract tests |
 | **No shell injection** | Argv-based `execFile` only with `shell: false`; no `exec` in codebase | Codebase invariant |
 | **No writes outside output directory** | `resolveConfinedOutputPath()` with `precondition` assertion | Contract tests |
@@ -1521,7 +1522,7 @@ The tool has no end-user authentication or authorization model because it is a l
 | human diagnostics | normalized first-line stderr in the form `[spec-check] <Category>: <message>` with optional indented details |
 | evidence visibility | per-phase reports preserved; provenance, identifiers, and evidence references visible |
 | intermediate artifacts | solver files, clustering inputs, formalization samples, comparison artifacts preserved under output directory |
-| run completion | manifest presence is the atomic completion marker; run start removes the stale manifest first and the prior `formalization_evidence/` tree second, before pipeline work |
+| run completion | manifest presence is the atomic completion marker; run start removes the stale manifest first and all prior tool-owned output second, before pipeline work |
 
 ### 14.2 Deployment and Rollout
 

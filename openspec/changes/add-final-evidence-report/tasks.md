@@ -37,7 +37,7 @@ Added a closed Result boundary and injectable effects. The body is bounded befor
 
 ## 4. Wire Post-Completion Lifecycle
 
-- [x] 4.1 Remove stale `report.md` with the other run-start cleanup before ingestion and add ordering/idempotence tests that precreate stale and partial reports (RAE-FINAL-CLEAN-STALE)
+- [x] 4.1 Invalidate the prior manifest first, remove stale tool-owned output including `report.md` before ingestion, and add ordering/idempotence tests that precreate stale and partial reports and source-backed evidence (RAE-FINAL-CLEAN-STALE, RAE-FINAL-CLEAN-MANAGED)
 - [x] 4.2 Refactor reporting descriptors so `runReportingPhase` can write the core manifest, then invoke final-report generation without ever converting `report.md` into a manifest entry (RAE-FINAL-AFTER-CORE, RAE-MANIFEST-NO-FINAL)
 - [x] 4.3 On successful validation, preserve `report.md`, complete the named progress phase, retain core run state, and leave the core manifest unchanged (RAE-FINAL-SAVE, RAE-FINAL-OPTIONAL)
 - [x] 4.4 On handled generation or validation failure, remove the candidate, append exactly one well-formed `reporting.final_report_failed` warning with stable failure-kind evidence, rerender `report_summary.md`, replace its descriptor, and atomically refresh `manifest.json` after the summary (RAE-FINAL-WARNING, RAE-FINAL-WARN-KIND, RAE-FINAL-WARN-HASH)
@@ -46,7 +46,7 @@ Added a closed Result boundary and injectable effects. The body is bounded befor
 
 ### Wire Post-Completion Lifecycle change summary
 
-Run start clears stale report output. Reporting now retains descriptors, writes the core manifest, then runs an optional phase whose expected error emits failed progress without throwing. Success preserves the report and core manifest. Failure cleans output, appends one warning, renders warning detail into the summary, and refreshes checksums. Cleanup and persistence failures surface `OutputError`; integration tests cover stale replacement, warning integrity, exclusion, and cleanup failure.
+Run start invalidates the prior marker first and clears every tool-owned output path, including stale source-backed evidence. Reporting now retains descriptors, writes the core manifest, then runs an optional phase whose expected error emits failed progress without throwing. Success preserves the report and core manifest. Failure cleans output, appends one warning, renders warning detail into the summary, and refreshes checksums. Cleanup and persistence failures enter `output_failed` and surface `OutputError`; integration tests cover stale replacement, warning integrity, exclusion, and cleanup failure.
 
 ## 5. Connect Formal Model And Executable Oracle
 
@@ -58,7 +58,7 @@ Run start clears stale report output. Reporting now retains descriptors, writes 
 
 ### Connect Formal Model And Executable Oracle change summary
 
-The full-snapshot reducer mirrors Alloy guards, mutable report/warning/summary/manifest state, and terminal stuttering, and production terminal branches call it as an executable postcondition oracle. Generated histories include stuttering, missing-file validation, generation failure, and output failure at cleanup, invalidation, summary, or refresh. Fresh review split the overcompressed persistence transition into cleanup, marker invalidation, summary rewrite, and manifest refresh. Final bounded results: four SAT witnesses and twelve UNSAT checks within four atoms/twelve steps.
+The full-snapshot reducer mirrors Alloy guards, mutable report/warning/summary/manifest state, `output_failed`, and terminal stuttering, and production terminal branches call it as an executable postcondition oracle. Generated histories include stuttering, missing-file validation, generation failure, and output failure at cleanup, invalidation, summary, or refresh. Fresh review split the overcompressed persistence transition into cleanup, marker invalidation, summary rewrite, and manifest refresh. Final bounded results: four SAT witnesses and twelve UNSAT checks within four atoms/twelve steps.
 
 ## 6. Complete Fault, Security, And Integrity Evidence
 
@@ -70,7 +70,7 @@ The full-snapshot reducer mirrors Alloy guards, mutable report/warning/summary/m
 
 ### Complete Fault, Security, And Integrity Evidence change summary
 
-Contract and integration faults cover the complete adapter union, strict acknowledgment parsing, thrown boundaries, path mismatch, missing/invalid/oversized/non-UTF-8 files, read/metadata failures, stale/partial output, and cleanup failure. Manifest metamorphic tests establish report exclusion and summary checksum sensitivity. Telemetry records phase and size/usage metadata but no prompt/report body. Summary/manifest write failures share existing filesystem fault coverage and the explicit `OutputError` orchestration boundary.
+Contract and integration faults cover the complete adapter union, exact text-event extraction, strict acknowledgment parsing, malformed event UTF-8, thrown boundaries, path mismatch, missing/invalid/oversized/non-UTF-8 files, missing report structure or citations, read/metadata failures, stale/partial managed output, and cleanup failure. Manifest metamorphic tests establish report exclusion and summary checksum sensitivity. Telemetry records phase and size/usage metadata but no prompt/report body. Summary/manifest write failures share existing filesystem fault coverage and the explicit `OutputError` orchestration boundary.
 
 ## 7. Documentation And Release Verification
 

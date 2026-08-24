@@ -165,6 +165,35 @@ describe("opencode adapter contract", () => {
     expect(result).toMatchObject({ ok: false, error: { kind: "invalid_json" } });
   });
 
+  it("rejects a raw final-report payload outside a text event", async () => {
+    traceSpec("RAE-FINAL-PROTO-ACK");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    vi.mocked(runProcess).mockResolvedValueOnce({
+      exitCode: 0, signal: null,
+      stdout: '{"report_path":"/tmp/report.md","report_markdown":"# Report"}',
+      stderr: "", timedOut: false,
+    });
+    const result = await callOpencode({
+      model: "m", phase: "final-report", prompt: "p", workspaceRoot: "/tmp",
+      opencodeConfigContent: "{}", retries: 1,
+    });
+    expect(result).toMatchObject({ ok: false, error: { kind: "invalid_json" } });
+  });
+
+  it("rejects malformed UTF-8 in the final-report event stream", async () => {
+    traceSpec("RAE-FINAL-PROTO-ACK", "RAE-FINAL-VALIDATE");
+    const { runProcess } = await import("../../src/adapters/process.js");
+    vi.mocked(runProcess).mockResolvedValueOnce({
+      exitCode: 0, signal: null, stdout: "�(", stderr: "", timedOut: false,
+      stdoutInvalidUtf8: true,
+    });
+    const result = await callOpencode({
+      model: "m", phase: "final-report", prompt: "p", workspaceRoot: "/tmp",
+      opencodeConfigContent: "{}", retries: 1,
+    });
+    expect(result).toMatchObject({ ok: false, error: { kind: "invalid_json" } });
+  });
+
   it("rejects final-report event streams that exceed the capture bound", async () => {
     traceSpec("RAE-FINAL-PROTO-ACK");
     const { runProcess } = await import("../../src/adapters/process.js");

@@ -47,7 +47,8 @@ All LLM phases use `callOpencode`, return validated JSON, and leave publication 
 ```mermaid
 stateDiagram-v2
     [*] --> Preparing
-    Preparing --> CoreReporting: stale report removed
+    Preparing --> CoreReporting: stale managed output removed
+    Preparing --> OutputFailed: cleanup fails after marker invalidation
     CoreReporting --> CoreComplete: core manifest written
     CoreComplete --> Generating: start restricted agent
     Generating --> Validating: process returns report payload
@@ -55,11 +56,13 @@ stateDiagram-v2
     Validating --> ReportAvailable: acknowledgment and file valid
     Validating --> Cleaning: acknowledgment or file invalid
     Cleaning --> WarningPersisted: candidate absent; summary rewritten; manifest refreshed
+    Cleaning --> OutputFailed: cleanup or persistence fails
     ReportAvailable --> [*]
     WarningPersisted --> [*]
+    OutputFailed --> [*]
 ```
 
-The state machine has one important asymmetry. `CoreComplete` is already a successful analysis state. `ReportAvailable` and `WarningPersisted` are post-completion refinements. Neither can transition to an analysis-failed state. On the failure path, the refreshed manifest is again the final core-artifact write. On the success path, `report.md` intentionally postdates the core manifest.
+The state machine has one important asymmetry. `CoreComplete` is already a successful analysis state. `ReportAvailable` and `WarningPersisted` are handled post-completion refinements. `OutputFailed` is a fatal CLI result when cleanup or persistence cannot establish either handled postcondition. It does not revoke completed in-memory analysis, but the manifest can be present or absent according to the side effects completed before failure. On the warning path, the refreshed manifest is again the final core-artifact write. On the success path, `report.md` intentionally postdates the core manifest.
 
 ### Component Descriptions
 
@@ -67,14 +70,14 @@ The state machine has one important asymmetry. `CoreComplete` is already a succe
 - **Transient agent policy builder**: produces isolated OpenCode configuration for a dedicated primary agent. The policy allows required reads and denies every mutation and execution tool.
 - **OpenCode adapter extension**: adds the `final-report` phase and isolated agent invocation, omits `--auto`, bounds escaped event transport, and validates exactly `{ "report_path": string, "report_markdown": string }`.
 - **Final-report generator**: resolves one destination, validates the returned path/body, atomically publishes through the filesystem adapter, validates the resulting object, and returns a typed `Result`.
-- **Report validator**: validates returned Markdown before atomic publication, then uses `lstat` and read-back checks on only the precomputed destination.
+- **Report validator**: validates required headings and citations before atomic publication, then uses `lstat`, strict UTF-8 decoding, and read-back structural checks on only the precomputed destination.
 - **Lifecycle orchestrator**: removes stale output before ingestion, writes core reports and the core manifest, invokes final-report generation, and handles the terminal result. Failure cleanup removes the report destination, appends one well-formed warning, rewrites the summary, rebuilds its manifest entry, and atomically refreshes the manifest.
 - **Reference lifecycle model**: a small pure TypeScript transition function mirrors the Alloy states and legal events. Property and differential tests compare generated event histories against orchestration-observable outcomes.
 
 ### System Invariant Tactics
 
 - **Core-completion monotonicity**: final-report generation is called only after `writeManifest` succeeds. The generator returns `Result` and never throws for expected adapter, acknowledgment, or report-validation failures. The orchestrator maps `Err` to warning persistence rather than `PipelineAbortError`.
-- **Terminal partition**: the pure lifecycle reducer has two handled terminal states, `report_available` and `warning_persisted`. Invalid transitions are rejected. The orchestrator has one success branch and one failure branch corresponding to those states.
+- **Terminal partition**: the pure lifecycle reducer has two handled terminal states, `report_available` and `warning_persisted`, plus fatal `output_failed`. Invalid transitions are rejected. The orchestrator maps success, handled degradation, and output failure to those three states.
 - **Manifest exclusion**: `report.md` is never converted to a `ManifestEntry`; manifest construction accepts only existing core descriptors. Contract and property tests assert exclusion in success and failure histories.
 - **No invalid residue**: all handled failures converge on one cleanup function that removes the confined destination with force semantics before the warning is persisted. Cleanup itself is mandatory; if cleanup cannot establish absence, the system must surface an output failure rather than falsely claim `warning_without_report`.
 - **Single-writer confinement**: all agent edit tools are denied. Bash and delegation are denied. `--auto` is absent. Only `writeOutputAtomic` publishes the precomputed destination.
@@ -96,14 +99,16 @@ The state machine has one important asymmetry. `CoreComplete` is already a succe
 
 ### Interaction Protocols
 
-1. **Run preparation**: remove stale `manifest.json`, prior formalization evidence, and `report.md` before any analysis phase. These targets are disjoint; cleanup may run concurrently only if failure propagation remains deterministic.
+1. **Run preparation**: invalidate stale `manifest.json` first. Then remove every tool-owned phase report, summary, final report, metrics file, formalization tree, SMT tree, generated-spec tree, and cross-implication tree. If cleanup fails, return `OutputError` before ingestion; residue can remain, but no current completion marker remains.
 2. **Core reporting**: render phase reports and summary, write optional metrics, then atomically write the core manifest.
 3. **Request construction**: derive absolute evidence and report paths from the resolved output; derive an absolute workspace root; build prompt and inline restricted-agent configuration from these values.
 4. **OpenCode invocation**: execute `opencode run --pure <prompt> --model <model> --format json --agent spec-check-final-report --dir <isolated-root>` plus the existing model variant. The isolated root is also `OPENCODE_CONFIG`, `OPENCODE_CONFIG_DIR`, and `XDG_CONFIG_HOME`; formatter, LSP, and MCP surfaces are disabled. The analyzed workspace is named in the prompt and explicitly allowlisted for external reads. Do not include `--auto`.
-5. **Report payload**: parse strict JSON with exactly `report_path` and `report_markdown`; require exact destination equality and Markdown no larger than 1 MiB.
-6. **Trusted publication and validation**: atomically write the returned Markdown, then `lstat` and read back the precomputed destination; reject links, non-files, oversized bytes, invalid UTF-8, or whitespace-only content.
-7. **Success**: preserve the validated file, emit completed progress, return state without adding a finding, and do not rewrite the manifest.
-8. **Failure**: remove the destination, append one warning, invalidate the old manifest, rerender the summary from updated state, replace its core descriptor, and write a fresh manifest with checksums for final core bytes. Persistence failure leaves no stale completion marker. The warning can cause CLI exit code `1`, but it is not fatal.
+5. **Event transport**: decode stdout bytes as strict UTF-8 newline-delimited JSON. Reject malformed lines and any `type: "error"` event. Concatenate `part.text` only from events whose top-level `type` is `"text"`; non-text status and usage events are ignored. Reject a raw payload outside a text event, a missing text payload, Markdown fences, and prose wrappers.
+6. **Report payload**: parse the concatenated text as one strict JSON object with exactly non-empty `report_path` and `report_markdown` strings; require exact destination equality and Markdown no larger than 1 MiB.
+7. **Trusted publication and validation**: require every prompt-defined heading, at least one repository-relative citation, and one artifact citation for every numbered prioritized finding. Atomically write the returned Markdown, then `lstat` and read back the precomputed destination with strict UTF-8 decoding and the same structural checks. Reject links, non-files, oversized bytes, invalid UTF-8, whitespace-only content, or invalid structure.
+8. **Success**: preserve the validated file, emit completed progress, return state without adding a finding, and do not rewrite the manifest.
+9. **Handled failure**: emit failed progress for the optional attempt, remove the destination, append one warning, invalidate the old manifest, rerender the summary from updated state, replace its core descriptor, and write a fresh manifest with checksums for final core bytes. The warning can cause CLI exit code `1`, but it is not fatal.
+10. **Output failure**: if cleanup, marker invalidation, summary rewrite, or manifest refresh fails, return fatal `OutputError`. Do not claim `warning_without_report`. No additional final-report progress event is emitted after the already failed optional-attempt event. The report and manifest facts remain exactly those established before the failed side effect; after successful marker invalidation, no manifest remains.
 
 ### Forward Evolution
 
@@ -150,6 +155,7 @@ const FINAL_REPORT_MAX_BYTES = 1_048_576;
 
 interface FinalReportAcknowledgment {
   readonly report_path: string;
+  readonly report_markdown: string;
 }
 
 type FinalReportErrorKind =
@@ -161,6 +167,7 @@ type FinalReportErrorKind =
   | "report_symlink"
   | "report_not_regular"
   | "report_empty"
+  | "report_structure_invalid"
   | "report_too_large"
   | "report_unreadable";
 
@@ -186,7 +193,7 @@ Encoding and validity rules:
 - `report_path` and `report_markdown` are the only payload fields; both must be non-empty strings and Markdown must fit the 1 MiB bound.
 - Runtime paths in the prompt are encoded as JSON string literals, so quotes, backslashes, spaces, Unicode, and non-pattern metacharacters preserve their exact decoded value.
 - Path equality is evaluated on pre-resolved absolute strings. The acknowledgment does not select a path.
-- `report.md` is UTF-8 Markdown, has at least one non-whitespace character, and has at most 1,048,576 bytes according to `lstat.size` before read.
+- `report.md` is strict UTF-8 Markdown, has at most 1,048,576 bytes according to `lstat.size` before read, contains all required headings and a repository-relative citation, and gives every numbered prioritized finding an artifact citation.
 - A symbolic link is invalid even if its target is a regular file inside the output directory.
 - The warning uses severity `warning`, category `reporting.final_report_failed`, provenance file `<reporting>`, a non-empty rationale, and evidence containing the stable failure kind.
 - Inline agent configuration has a fixed private agent name and contains no credentials. Environment construction inherits the parent environment and overrides only `OPENCODE_CONFIG_CONTENT`.
@@ -221,6 +228,7 @@ Encoding and validity rules:
 - **Ordering**: core outputs -> core manifest -> final-report attempt -> success terminal, or cleanup -> warning summary -> refreshed manifest -> failure terminal.
 - **Postcondition**: a handled attempt ends in exactly one terminal state.
 - **Failure boundary**: cleanup or warning-persistence I/O failure is an output failure because the `warning_without_report` postcondition cannot be established safely.
+- **Output-failure postcondition**: the CLI returns fatal `OutputError`; the lifecycle reaches `output_failed`; the implementation does not claim report or warning success; report, summary, and manifest facts reflect only side effects that completed before failure.
 
 ### Code Map
 
@@ -242,7 +250,7 @@ Encoding and validity rules:
 ### Failure Mode Analysis
 
 - **Unsafe inputs**: relative or traversing destinations, malformed acknowledgment paths, symlink destinations, oversized content, whitespace-only content. Controls: absolute configuration, confined destination derivation, exact path equality, `lstat`, byte bound, content validation.
-- **Fragile formats**: invalid OpenCode event JSON, wrapped or malformed acknowledgment JSON, invalid UTF-8 replacement behavior. Controls: existing event parser and phase schema; report validity relies on bounded UTF-8 read and non-whitespace content, not Markdown parsing.
+- **Fragile formats**: invalid OpenCode event JSON, raw or wrapped payloads, malformed acknowledgment JSON, and invalid UTF-8. Controls: strict byte decoding, exact `type: "text"`/`part.text` extraction, strict payload parsing, phase schema, and pre-write plus read-back structural validation.
 - **Inadequate control actions**: the agent returns malformed or oversized Markdown; atomic publication or warning persistence fails. Controls: strict schema/body validation, trusted atomic write, and explicit `OutputError` for persistence failure.
 - **Process model flaws**: payload path claims the wrong destination or content changes across transport. Controls: exact precomputed path comparison, body size validation, atomic publication, and read-back validation.
 - **Coordination failures**: concurrent runs target one output directory. Controls: existing single-writer assumption and atomic publication; no stronger concurrency support is introduced.
@@ -351,10 +359,11 @@ Post-review Alloy 6.2.0 recheck on 2026-08-24: all four success, handled-failure
 - Absolute config output for default, CLI, config-file, parent segments, and paths containing spaces.
 - Prompt substitution leaves no placeholders and names exactly the evidence and report paths.
 - Canonical prompt and embedded prompt parity; source and bundled builder parity.
-- Generated agent policy denies all edits except the exact report path, denies bash/task/web, grants required reads/external-directory access, and requires no `--auto`.
+- Generated agent policy denies all edits, bash/task/web, and other mutation or delegation tools; it grants only required reads/external-directory access and requires no `--auto`.
 - OpenCode argv includes `--agent` and `--dir`; existing phases remain unchanged.
-- Acknowledgment accepts only the required shape and rejects missing, empty, non-string, and wrong-path values.
-- Validation accepts a bounded regular file and rejects missing, symlink, directory, special-file where testable, empty, whitespace-only, oversized, and unreadable output.
+- Event transport accepts payload fragments only from top-level `type: "text"` events at `part.text`; it rejects raw payloads, malformed UTF-8, malformed lines, error events, missing text, wrappers, and fences.
+- Acknowledgment accepts only the required path/body shape and rejects missing, empty, non-string, extra, and wrong-path values.
+- Validation accepts a structurally complete cited bounded regular file and rejects missing, symlink, directory, special-file where testable, empty, whitespace-only, oversized, malformed UTF-8, missing headings, and missing finding citations.
 
 ### Property and Metamorphic Tests
 

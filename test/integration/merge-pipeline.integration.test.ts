@@ -219,7 +219,7 @@ describe("merge pipeline integration", () => {
   it.each([
     "agent_failed", "acknowledgment_invalid", "path_unsupported", "path_mismatch",
     "report_missing", "report_symlink", "report_not_regular", "report_empty",
-    "report_too_large", "report_unreadable",
+    "report_structure_invalid", "report_too_large", "report_unreadable",
   ] as const)("persists warning for final-report %s degradation", async (kind) => {
     traceSpec("RAE-FINAL-OPTIONAL", "RAE-FINAL-WARN-KIND");
     const { generateFinalReport } = await import("../../src/domain/reporting/final-report.js");
@@ -233,7 +233,7 @@ describe("merge pipeline integration", () => {
   });
 
   it("removes stale report output before the current final-report attempt", async () => {
-    traceSpec("RAE-FINAL-CLEAN-STALE", "RAE-FINAL-SAVE", "RAE-MANIFEST-NO-FINAL");
+    traceSpec("RAE-FINAL-CLEAN-STALE", "RAE-FINAL-CLEAN-MANAGED", "RAE-FINAL-SAVE", "RAE-MANIFEST-NO-FINAL");
     const { generateFinalReport } = await import("../../src/domain/reporting/final-report.js");
     const root = await mkdtemp(join(tmpdir(), "spec-check-int-final-stale-"));
     const outputDir = join(root, "output");
@@ -241,6 +241,10 @@ describe("merge pipeline integration", () => {
     await mkdir(outputDir, { recursive: true });
     await mkdir(specDir, { recursive: true });
     await writeFile(join(outputDir, "report.md"), "stale", "utf8");
+    await writeFile(join(outputDir, "report_summary.md.tmp-123-abcd"), "partial", "utf8");
+    await writeFile(join(outputDir, "report_2.trace.md"), "stale", "utf8");
+    await mkdir(join(outputDir, "cross_implication"));
+    await writeFile(join(outputDir, "cross_implication", "stale.smt2"), "stale", "utf8");
     await writeFile(
       join(specDir, "spec.md"),
       "## ADDED Requirements\n\n### Requirement: Stale [STALE-REQ]\nTHE system SHALL continue.\n",
@@ -248,6 +252,9 @@ describe("merge pipeline integration", () => {
     );
     vi.mocked(generateFinalReport).mockImplementationOnce(async () => {
       await expect(readFile(join(outputDir, "report.md"), "utf8")).rejects.toThrow();
+      await expect(readFile(join(outputDir, "report_2.trace.md"), "utf8")).rejects.toThrow();
+      await expect(readFile(join(outputDir, "report_summary.md.tmp-123-abcd"), "utf8")).rejects.toThrow();
+      await expect(access(join(outputDir, "cross_implication"))).rejects.toThrow();
       await writeFile(join(outputDir, "report.md"), "# Current\n", "utf8");
       return { ok: true, value: { path: toRelativePath("report.md"), content: "# Current\n" } };
     });
@@ -259,8 +266,35 @@ describe("merge pipeline integration", () => {
     expect(manifest.files.some((entry) => entry.path === "report.md")).toBe(false);
   });
 
+  it("surfaces run-start managed-output cleanup failure before ingestion", async () => {
+    traceSpec("RAE-FINAL-CLEAN-START-ERROR");
+    const { generateFinalReport, removeFinalReport } = await import("../../src/domain/reporting/final-report.js");
+    vi.mocked(removeFinalReport).mockRejectedValueOnce(new Error("startup cleanup denied"));
+    const { root, outputDir } = await minimalPipelineFixture("startup-cleanup-failure");
+    await writeFile(join(outputDir, "manifest.json"), "{\"stale\":true}\n", "utf8");
+    await expect(runCli(makeConfig(root, outputDir))).rejects.toMatchObject({
+      category: "OutputError", message: expect.stringContaining("startup cleanup denied"),
+    });
+    await expect(access(join(outputDir, "manifest.json"))).rejects.toThrow();
+    expect(generateFinalReport).not.toHaveBeenCalled();
+  });
+
+  it("supports consecutive runs against the same output directory", async () => {
+    traceSpec("RAE-FINAL-CLEAN-MANAGED", "RAE-MANIFEST-STALE");
+    const { root, outputDir } = await minimalPipelineFixture("same-output-rerun");
+    const config = makeConfig(root, outputDir);
+    await runCli(config);
+    await runCli(config);
+    const manifest = JSON.parse(await readFile(join(outputDir, "manifest.json"), "utf8")) as {
+      readonly files: readonly { readonly path: string }[];
+    };
+    expect(manifest.files).toContainEqual(expect.objectContaining({
+      path: "formalization_evidence/specs_forward.json",
+    }));
+  });
+
   it("surfaces cleanup failure instead of claiming warning-without-report", async () => {
-    traceSpec("RAE-FINAL-CLEAN-ERROR");
+    traceSpec("RAE-FINAL-CLEAN-ERROR", "RAE-FINAL-OUTPUT-ERROR");
     const { generateFinalReport, removeFinalReport } = await import("../../src/domain/reporting/final-report.js");
     vi.mocked(generateFinalReport).mockResolvedValueOnce({
       ok: false,
@@ -286,7 +320,7 @@ describe("merge pipeline integration", () => {
   });
 
   it("surfaces warning-summary persistence failure as OutputError", async () => {
-    traceSpec("RAE-FINAL-CLEAN-ERROR", "RAE-FINAL-WARN-HASH");
+    traceSpec("RAE-FINAL-CLEAN-ERROR", "RAE-FINAL-OUTPUT-ERROR", "RAE-FINAL-WARN-HASH");
     const { generateFinalReport } = await import("../../src/domain/reporting/final-report.js");
     const { writeSummaryReport } = await import("../../src/domain/reporting/render.js");
     vi.mocked(generateFinalReport).mockResolvedValueOnce({

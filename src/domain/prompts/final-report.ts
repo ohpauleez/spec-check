@@ -93,7 +93,7 @@ State completion status, readiness, the highest-priority decisions, confidence t
 
 ## Prioritized Findings
 
-Present consolidated issues in priority order. For each include:
+Present consolidated issues in priority order. Format each issue heading as \`### <number>. <title>\`. For each include:
 
 - reported severity;
 - confidence;
@@ -102,7 +102,7 @@ Present consolidated issues in priority order. For each include:
 - verified evidence;
 - engineering impact;
 - required decision or validation action;
-- artifact citations.
+- artifact citations on a line that starts with \`- **Artifacts:**\`.
 
 ## Logical Analysis
 

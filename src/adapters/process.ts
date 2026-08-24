@@ -23,6 +23,8 @@ export interface ProcessResult {
   readonly stderr: string;
   readonly timedOut: boolean;
   readonly outputLimitExceeded?: boolean;
+  readonly stdoutInvalidUtf8?: boolean;
+  readonly stderrInvalidUtf8?: boolean;
 }
 
 /**
@@ -101,24 +103,22 @@ export async function runProcess(
     });
 
     // Accumulate chunks in arrays to avoid O(n^2) string concatenation.
-    const stdoutChunks: string[] = [];
-    const stderrChunks: string[] = [];
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
     let timedOut = false;
     let outputLimitExceeded = false;
     let outputBytes = 0;
 
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
+    child.stdout.on("data", (chunk: Buffer) => {
       captureChunk(chunk, stdoutChunks);
     });
-    child.stderr.on("data", (chunk: string) => {
+    child.stderr.on("data", (chunk: Buffer) => {
       captureChunk(chunk, stderrChunks);
     });
 
-    function captureChunk(chunk: string, target: string[]): void {
+    function captureChunk(chunk: Buffer, target: Buffer[]): void {
       if (outputLimitExceeded) return;
-      outputBytes += Buffer.byteLength(chunk, "utf8");
+      outputBytes += chunk.byteLength;
       if (options?.maxOutputBytes !== undefined && outputBytes > options.maxOutputBytes) {
         outputLimitExceeded = true;
         child.kill("SIGKILL");
@@ -152,16 +152,32 @@ export async function runProcess(
       if (timer !== undefined) {
         clearTimeout(timer);
       }
+      const stdoutBytes = Buffer.concat(stdoutChunks);
+      const stderrBytes = Buffer.concat(stderrChunks);
+      const stdoutInvalidUtf8 = !isValidUtf8(stdoutBytes);
+      const stderrInvalidUtf8 = !isValidUtf8(stderrBytes);
       resolve({
         exitCode,
         signal,
-        stdout: stdoutChunks.join(""),
-        stderr: stderrChunks.join(""),
+        stdout: stdoutBytes.toString("utf8"),
+        stderr: stderrBytes.toString("utf8"),
         timedOut,
         outputLimitExceeded,
+        stdoutInvalidUtf8,
+        stderrInvalidUtf8,
       });
     });
   });
+}
+
+/** Check captured bytes without silently accepting UTF-8 replacement decoding. */
+function isValidUtf8(bytes: Buffer): boolean {
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 /**

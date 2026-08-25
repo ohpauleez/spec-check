@@ -4,8 +4,9 @@ import { tmpdir } from "node:os";
 
 import { describe, expect, it, vi } from "vitest";
 import { traceSpec } from "../support/spec-trace.js";
-import { removeOutputTree, resolveConfinedOutputPath, writeOutputAtomic, sha256Hex } from "../../src/adapters/fs.js";
+import { removeOutputTemporaryFiles, removeOutputTree, resolveConfinedOutputPath, writeOutputAtomic, sha256Hex } from "../../src/adapters/fs.js";
 import { toOutputDirPath, toRelativePath } from "../../src/domain/branded.js";
+import type * as FsPromises from "node:fs/promises";
 
 describe("filesystem adapter contracts", () => {
   it("allows path within output directory", () => {
@@ -52,6 +53,26 @@ describe("filesystem adapter contracts", () => {
     expect(await readFile(join(dir, "keep.txt"), "utf8")).toBe("keep\n");
   });
 
+  it("recreates a removed cached output directory in the same process", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "spec-check-fs-cache-"));
+    const output = toOutputDirPath(dir);
+    const path = toRelativePath("smt/result.smt2");
+    await writeOutputAtomic(output, path, "first");
+    await removeOutputTree(output, toRelativePath("smt"));
+    await writeOutputAtomic(output, path, "second");
+    expect(await readFile(join(dir, path), "utf8")).toBe("second");
+  });
+
+  it("removes interrupted atomic-write siblings only for managed root files", async () => {
+    const dir = await mkdtemp(join(tmpdir(), "spec-check-fs-temp-"));
+    const output = toOutputDirPath(dir);
+    await writeFile(join(dir, "report.md.tmp-123-abcd"), "partial", "utf8");
+    await writeFile(join(dir, "user.md.tmp-123-abcd"), "keep", "utf8");
+    await removeOutputTemporaryFiles(output, [toRelativePath("report.md")]);
+    await expect(readFile(join(dir, "report.md.tmp-123-abcd"), "utf8")).rejects.toThrow();
+    expect(await readFile(join(dir, "user.md.tmp-123-abcd"), "utf8")).toBe("keep");
+  });
+
   it("accepts filenames containing '..' as a substring (not a traversal segment)", () => {
     // Per-segment check: only path segments that are literally ".." are rejected.
     // Filenames like "version..2" contain ".." but are not directory traversal.
@@ -91,6 +112,31 @@ describe("filesystem adapter contracts", () => {
       // The temp orphan must be cleaned up: no `.tmp-` file may remain.
       const leftover = (await readdir(dir)).filter((name) => name.includes(".tmp-"));
       expect(leftover).toEqual([]);
+    } finally {
+      vi.doUnmock("node:fs/promises");
+      vi.resetModules();
+    }
+  });
+
+  it("removes partial temp output when the temp write fails", async () => {
+    traceSpec("RAE-OUTPUT-ATOMIC", "RAE-ATOMIC-INTERRUPT");
+    const dir = await mkdtemp(join(tmpdir(), "spec-check-fs-write-"));
+    vi.resetModules();
+    vi.doMock("node:fs/promises", async () => {
+      const actual = await vi.importActual<typeof FsPromises>("node:fs/promises");
+      return {
+        ...actual,
+        writeFile: vi.fn(async (path: Parameters<typeof actual.writeFile>[0]) => {
+          await actual.writeFile(path, "partial", "utf8");
+          throw new Error("ENOSPC: partial write");
+        }),
+      };
+    });
+    try {
+      const { writeOutputAtomic: mockedWrite } = await import("../../src/adapters/fs.js");
+      await expect(mockedWrite(toOutputDirPath(dir), toRelativePath("atomic.md"), "payload\n"))
+        .rejects.toThrow("ENOSPC");
+      expect((await readdir(dir)).filter((name) => name.includes(".tmp-"))).toEqual([]);
     } finally {
       vi.doUnmock("node:fs/promises");
       vi.resetModules();

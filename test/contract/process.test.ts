@@ -66,3 +66,23 @@ describe("process adapter — isCommandAvailable", () => {
     expect(isCommandAvailable("nonexistent")).toBe(false);
   });
 });
+
+describe("process adapter environment", () => {
+  it("inherits parent variables and applies child-only overrides", async () => {
+    const { buildProcessEnvironment } = await import("../../src/adapters/process.js");
+    const previous = process.env.SPEC_CHECK_PROCESS_SENTINEL;
+    process.env.SPEC_CHECK_PROCESS_SENTINEL = "inherited";
+    try {
+      const child = buildProcessEnvironment({ OPENCODE_CONFIG_CONTENT: "restricted" });
+      expect(child.SPEC_CHECK_PROCESS_SENTINEL).toBe("inherited");
+      expect(child.OPENCODE_CONFIG_CONTENT).toBe("restricted");
+      expect(process.env.OPENCODE_CONFIG_CONTENT).not.toBe("restricted");
+    } finally {
+      if (previous === undefined) {
+        delete process.env.SPEC_CHECK_PROCESS_SENTINEL;
+      } else {
+        process.env.SPEC_CHECK_PROCESS_SENTINEL = previous;
+      }
+    }
+  });
+});

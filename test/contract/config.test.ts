@@ -1,5 +1,5 @@
 import { mkdtemp, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { tmpdir } from "node:os";
 
 import { describe, expect, it } from "vitest";
@@ -20,6 +20,7 @@ describe("config loading and precedence", () => {
     expect(resolved.ok).toBe(true);
     if (!resolved.ok) return;
     expect(resolved.value.model).toBe("github-copilot/gpt-5.6-terra");
+    expect(resolved.value.output).toBe(resolve("spec-check-output"));
   });
 
   it("uses CLI flags over config values", async () => {
@@ -59,10 +60,51 @@ describe("config loading and precedence", () => {
     }
 
     expect(resolved.value.inputs).toEqual(["from-cli"]);
-    expect(resolved.value.output).toBe("cli-output");
+    expect(resolved.value.output).toBe(resolve("cli-output"));
     expect(resolved.value.src).toBe("cli-src");
     expect(resolved.value.timeoutMs).toBe(45000);
     expect(resolved.value.allowArchive).toBe(true);
+  });
+
+  it("resolves every configured output spelling to an absolute path", async () => {
+    traceSpec("RAE-FINAL-PATHS", "RAE-FINAL-PATH-ABS", "RAE-FINAL-PATH-SPACE");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-config-paths-"));
+    const spellings = [
+      join(root, "absolute"),
+      join("relative", "..", "resolved"),
+      join(root, "with spaces", "output"),
+    ];
+    for (const output of spellings) {
+      const resolved = await resolveRunConfig({
+        inputs: ["in"],
+        output,
+        help: false,
+        version: false,
+        allowArchive: false,
+      });
+      expect(resolved.ok).toBe(true);
+      if (resolved.ok) {
+        expect(resolved.value.output).toBe(resolve(output));
+      }
+    }
+  });
+
+  it("resolves output supplied only by the config file", async () => {
+    traceSpec("RAE-FINAL-PATH-ABS");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-config-output-"));
+    const configPath = join(root, "config.json");
+    await writeFile(configPath, JSON.stringify({ output: "configured output" }), "utf8");
+    const resolved = await resolveRunConfig({
+      inputs: ["in"],
+      config: configPath,
+      help: false,
+      version: false,
+      allowArchive: false,
+    });
+    expect(resolved.ok).toBe(true);
+    if (resolved.ok) {
+      expect(resolved.value.output).toBe(resolve("configured output"));
+    }
   });
 
   it("rejects invalid config JSON", async () => {

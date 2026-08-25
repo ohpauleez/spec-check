@@ -6,7 +6,7 @@
  * Exports confined atomic writing, hashing, path resolution, and tree removal.
  */
 import { createHash } from "node:crypto";
-import { mkdir, rename, rm, unlink, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, unlink, writeFile } from "node:fs/promises";
 import { dirname, relative, resolve } from "node:path";
 
 import { precondition } from "../domain/assert.js";
@@ -90,17 +90,17 @@ export async function writeOutputAtomic(outputDir: OutputDirPath, relativePath: 
     ensuredDirectories.add(parentDir);
   }
   const tempPath = `${finalPath}.tmp-${process.pid}-${Date.now().toString(16)}`;
-  await writeFile(tempPath, content, "utf8");
   try {
+    await writeFile(tempPath, content, "utf8");
     await rename(tempPath, finalPath);
-  } catch (renameError: unknown) {
-    // Clean up orphan temp file before propagating the failure.
+  } catch (writeError: unknown) {
+    // Clean up partial temp output after either write or rename failure.
     try {
       await unlink(tempPath);
     } catch {
-      // Swallow cleanup errors — the rename failure is the primary error.
+      // Swallow cleanup errors — the write/rename failure is primary.
     }
-    throw renameError;
+    throw writeError;
   }
 }
 
@@ -142,4 +142,31 @@ export async function removeOutputTree(
   const target = resolveConfinedOutputPath(outputDir, relativePath);
   precondition(target !== resolve(outputDir), "output tree removal must not target the output root");
   await rm(target, { recursive: true, force: true });
+  for (const directory of ensuredDirectories) {
+    const fromTarget = relative(target, directory);
+    if (directory === target || (!fromTarget.startsWith("..") && !fromTarget.startsWith("/"))) {
+      ensuredDirectories.delete(directory);
+    }
+  }
+}
+
+/** Remove interrupted atomic-write siblings for known root-level outputs. */
+export async function removeOutputTemporaryFiles(
+  outputDir: OutputDirPath,
+  managedFiles: readonly RelativePath[],
+): Promise<void> {
+  const rootNames = new Set(managedFiles.filter((path) => !path.includes("/")));
+  let names: string[];
+  try {
+    names = await readdir(outputDir);
+  } catch (error: unknown) {
+    if (error instanceof Error && "code" in error && (error as NodeJS.ErrnoException).code === "ENOENT") return;
+    throw error;
+  }
+  await Promise.all(names.map(async (name) => {
+    const match = /^(.*)\.tmp-\d+-[0-9a-f]+$/u.exec(name);
+    if (match?.[1] !== undefined && rootNames.has(match[1] as RelativePath)) {
+      await removeOutputTree(outputDir, name as RelativePath);
+    }
+  }));
 }

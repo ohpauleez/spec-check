@@ -11,6 +11,13 @@ import type { Finding } from "../findings.js";
 import { writeOutputAtomic } from "../../adapters/fs.js";
 import { toRelativePath, type OutputDirPath } from "../branded.js";
 
+/** Manifest-ready descriptor for one atomically rendered Markdown report. */
+export interface RenderedReportFile {
+  readonly path: string;
+  readonly phase: string;
+  readonly content: string;
+}
+
 /**
  * Neutralize untrusted Markdown data so evidence renders as inert text.
  *
@@ -137,7 +144,7 @@ export async function writePhaseReports(input: {
   readonly srcTraceReport?: readonly Finding[];
   readonly srcLogicReport?: readonly Finding[];
   readonly compareReport?: readonly Finding[];
-}): Promise<readonly { readonly path: string; readonly phase: string; readonly content: string }[]> {
+}): Promise<readonly RenderedReportFile[]> {
   const outputs: { path: string; phase: string; content: string }[] = [];
 
   const report11 = renderFindingsReport("report_1.1.md", "Qualitative Pass 1", enforceFindingSupport(input.report11));
@@ -241,7 +248,7 @@ export async function writeSummaryReport(input: {
   readonly outputDir: OutputDirPath;
   readonly allFindings: readonly Finding[];
   readonly skippedPhases: readonly string[];
-}): Promise<{ readonly path: string; readonly phase: string; readonly content: string }> {
+}): Promise<RenderedReportFile> {
   const supportedFindings = enforceFindingSupport(input.allFindings);
   const grouped = new Map<string, number>();
   for (const finding of supportedFindings) {
@@ -259,6 +266,18 @@ export async function writeSummaryReport(input: {
   } else {
     for (const skipped of input.skippedPhases) {
       lines.push(`- ${skipped} (optional phase not enabled)`);
+    }
+  }
+
+  const reportingWarnings = supportedFindings.filter((finding) => finding.category.startsWith("reporting."));
+  if (reportingWarnings.length > 0) {
+    lines.push("", "## Reporting warnings", "");
+    for (const finding of reportingWarnings) {
+      const evidence = finding.evidence
+        .map((item) => `${neutralizeMarkdownInline(item.kind)}=${neutralizeMarkdownInline(item.value)}`)
+        .join("; ");
+      lines.push(`- ${neutralizeMarkdownInline(finding.category)}: ${neutralizeMarkdownInline(finding.description)}`);
+      lines.push(`  - evidence: ${evidence}`);
     }
   }
 

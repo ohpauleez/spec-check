@@ -15,6 +15,9 @@ import {
 } from "../../src/domain/code-backwards/blind-compare.js";
 import type { ParsedSpec } from "../../src/domain/model.js";
 import { toCapabilityName, toClaimId, toOutputDirPath, toRelativePath } from "../../src/domain/branded.js";
+import { buildManifestEntries } from "../../src/domain/reporting/manifest.js";
+import { buildFinalReportAgentConfig } from "../../src/domain/prompts/final-report.js";
+import { INITIAL_FINAL_REPORT_LIFECYCLE, reduceFinalReportLifecycle } from "../../src/domain/reporting/final-report.js";
 
 import type * as FsAdapter from "../../src/adapters/fs.js";
 import type FsPromises from "node:fs/promises";
@@ -243,6 +246,42 @@ describe("safety properties", () => {
     expect(result.ok).toBe(true);
     expect(contextPath).toBeDefined();
     expect(existsSync(contextPath!)).toBe(false);
+  });
+
+  it("SAFE-17: final-report authority is one exact edit path", () => {
+    traceSpec("RAE-FINAL-AGENT", "RAE-FINAL-AGENT-WRITE", "RAE-FINAL-AGENT-DENY", "RAE-FINAL-AGENT-TOOLS");
+    const reportPath = "/workspace/output/report.md";
+    const config = JSON.parse(buildFinalReportAgentConfig("/workspace", "/workspace/output", reportPath)) as {
+      readonly agent: Record<string, { readonly permission: { readonly edit: Record<string, string>; readonly bash: string } }>;
+    };
+    const policy = config.agent["spec-check-final-report"]?.permission;
+    expect(policy?.edit).toBe("deny");
+    expect(policy?.bash).toBe("deny");
+  });
+
+  it("SAFE-18: final report never enters core manifest descriptors", () => {
+    traceSpec("RAE-MANIFEST-NO-FINAL", "RAE-ATOMIC-MANIFEST");
+    const entries = buildManifestEntries([{ path: "report_summary.md", phase: "summary", content: "summary" }]);
+    expect(entries.some((entry) => entry.path === "report.md")).toBe(false);
+  });
+
+  it("LIVE-13: every handled final-report branch reaches one terminal outcome", () => {
+    traceSpec("RAE-FINAL-OPTIONAL", "RAE-FINAL-CLEAN-FAILED", "RAE-FINAL-WARN-COMPLETE");
+    const common = ["begin_core_reporting", "complete_core", "start_report"] as const;
+    const tails = [
+      ["generation_returns", "validation_succeeds"],
+      ["generation_returns", "validation_fails", "cleanup_succeeds", "marker_invalidation_succeeds", "summary_rewrite_succeeds", "begin_manifest_refresh", "manifest_refresh_succeeds"],
+      ["generation_fails", "cleanup_succeeds", "marker_invalidation_succeeds", "summary_rewrite_succeeds", "begin_manifest_refresh", "manifest_refresh_succeeds"],
+    ] as const;
+    for (const tail of tails) {
+      let state: Parameters<typeof reduceFinalReportLifecycle>[0] = INITIAL_FINAL_REPORT_LIFECYCLE;
+      for (const event of [...common, ...tail]) {
+        const next = reduceFinalReportLifecycle(state, event);
+        expect(next.ok).toBe(true);
+        if (next.ok) state = next.value;
+      }
+      expect(["report_available", "warning_persisted"]).toContain(state.stage);
+    }
   });
 
   it("SAFE-14: duplicate and missing IDs retain distinct identity", () => {

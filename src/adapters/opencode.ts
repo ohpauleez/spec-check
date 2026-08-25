@@ -6,6 +6,7 @@
  * Exports: OpencodePhase, OpencodeInvocation, invokeOpencode.
  */
 import { lstat, stat } from "node:fs/promises";
+import { isAbsolute } from "node:path";
 
 import { PROMPT_ARG_MAX_BYTES } from "./opencode-limits.js";
 import { runProcess, type ProcessResult } from "./process.js";
@@ -36,6 +37,9 @@ const RETRY_BACKOFF_BASE_MS = 250;
  * is bounded by this constant rather than by the attempt count.
  */
 const RETRY_BACKOFF_MAX_MS = 2_000;
+// Two JSON encoding layers can expand every report byte to a six-byte escape;
+// leave additional room for event metadata and reasoning/tool events.
+const FINAL_REPORT_OUTPUT_MAX_BYTES = 8_388_608;
 
 /**
  * Closed domain of verification phases supported by the opencode invocation protocol.
@@ -50,7 +54,8 @@ export type OpencodePhase =
   | "formalization"
   | "code-derived-generation"
   | "code-derived-formalization"
-  | "blind-comparison";
+  | "blind-comparison"
+  | "final-report";
 
 /**
  * Configuration for a single opencode subprocess invocation.
@@ -67,6 +72,10 @@ export interface OpencodeCallOptions {
   readonly timeoutMs?: number;
   readonly retries?: number;
   readonly files?: readonly string[];
+  readonly workspaceRoot?: string;
+  readonly opencodeConfigContent?: string;
+  readonly opencodeConfigDir?: string;
+  readonly opencodeConfigPath?: string;
   /**
    * Delay hook applied between retry attempts; defaults to a real timer.
    *
@@ -249,6 +258,19 @@ async function validateCallOptions(
     });
   }
 
+  if (options.phase === "final-report"
+      && (options.workspaceRoot === undefined
+        || options.workspaceRoot.length === 0
+        || !isAbsolute(options.workspaceRoot)
+        || options.opencodeConfigContent === undefined
+        || options.opencodeConfigContent.length === 0)) {
+    return err({
+      kind: "invalid_files",
+      phase: options.phase,
+      message: "final-report phase requires workspaceRoot and restricted inline configuration",
+    });
+  }
+
   return ok({
     command: options.binaryPath ?? "opencode",
     retries: options.retries ?? 3,
@@ -269,13 +291,21 @@ async function validateCallOptions(
  * text. Pure and total; no element is mutated after construction.
  */
 function buildOpencodeArgs(options: OpencodeCallOptions): string[] {
-  const args: string[] = ["run", options.prompt, "--model", options.model, "--format", "json"];
+  const args: string[] = ["run"];
+  if (options.phase === "final-report") {
+    args.push("--pure");
+  }
+  args.push(options.prompt, "--model", options.model, "--format", "json");
   const variant = variantForModel(options.model);
   if (variant !== undefined) {
     args.push("--variant", variant);
   }
   for (const filePath of options.files ?? []) {
     args.push("--file", filePath);
+  }
+  if (options.phase === "final-report") {
+    postcondition(options.workspaceRoot !== undefined, "validated final-report call has a workspace root");
+    args.push("--agent", "spec-check-final-report", "--dir", options.workspaceRoot);
   }
   return args;
 }
@@ -318,7 +348,13 @@ function classifyProcessResult(
       stderr: processResult.stderr,
     });
   }
-
+  if (processResult.outputLimitExceeded === true) {
+    return err({
+      kind: "spawn_error",
+      phase: options.phase,
+      message: "opencode output exceeded the configured capture bound",
+    });
+  }
   // Process failure is authoritative even when a partial payload was emitted.
   if (processResult.signal !== null || processResult.exitCode !== 0) {
     const stderrPreview = processResult.stderr.trim().slice(0, 300);
@@ -336,10 +372,17 @@ function classifyProcessResult(
       stderr: processResult.stderr,
     });
   }
+  if (options.phase === "final-report" && processResult.stdoutInvalidUtf8 === true) {
+    return err({
+      kind: "invalid_json",
+      phase: options.phase,
+      message: "opencode final-report event stream is not valid UTF-8",
+    });
+  }
 
   let parsed: unknown;
   try {
-    parsed = parseOpencodePayload(processResult.stdout);
+    parsed = parseOpencodePayload(processResult.stdout, options.phase === "final-report");
   } catch (parseError: unknown) {
     const baseMessage = parseError instanceof Error ? parseError.message : "opencode returned non-JSON output";
     const stderrHint = processResult.stderr.trim().length > 0
@@ -383,7 +426,22 @@ async function attemptOpencodeOnce(
 ): Promise<{ readonly result: Result<unknown, OpencodeError>; readonly processResult?: ProcessResult }> {
   let processResult: ProcessResult;
   try {
-    processResult = await runProcess(command, [...args], { timeoutMs });
+    processResult = await runProcess(command, [...args], {
+      timeoutMs,
+      ...(options.opencodeConfigContent === undefined
+        ? {}
+        : { envOverrides: {
+          OPENCODE_CONFIG_CONTENT: options.opencodeConfigContent,
+          ...(options.opencodeConfigDir === undefined ? {} : {
+            OPENCODE_CONFIG_DIR: options.opencodeConfigDir,
+            XDG_CONFIG_HOME: options.opencodeConfigDir,
+          }),
+          ...(options.opencodeConfigPath === undefined ? {} : {
+            OPENCODE_CONFIG: options.opencodeConfigPath,
+          }),
+        } }),
+      ...(options.phase === "final-report" ? { maxOutputBytes: FINAL_REPORT_OUTPUT_MAX_BYTES } : {}),
+    });
   } catch (error) {
     return {
       result: err({
@@ -637,7 +695,7 @@ async function validateFilesOption(files: readonly string[] | undefined): Promis
  * - Error event present in stream → throws with the error event's message.
  * - No text events found → throws Error("missing payload text event").
  */
-function parseOpencodePayload(stdout: string): unknown {
+function parseOpencodePayload(stdout: string, strictPayload = false): unknown {
   const trimmed = stdout.trim();
   if (trimmed.length === 0) {
     throw new Error("empty stdout");
@@ -645,13 +703,16 @@ function parseOpencodePayload(stdout: string): unknown {
 
   const direct = tryParseJson(trimmed);
   if (direct.ok) {
-    const singleEvents = Array.isArray(direct.value) ? direct.value : [direct.value];
+    const singleEvents = strictPayload ? [direct.value] : Array.isArray(direct.value) ? direct.value : [direct.value];
     throwOnErrorEvent(singleEvents);
     const eventPayload = extractPayloadFromEvents(singleEvents);
     if (eventPayload !== undefined) {
-      return extractJsonPayload(eventPayload);
+      return strictPayload ? parseStrictJsonPayload(eventPayload) : extractJsonPayload(eventPayload);
     }
-    return extractJsonPayload(trimmed);
+    if (strictPayload) {
+      throw new Error("missing final-report payload text event");
+    }
+    return strictPayload ? parseStrictJsonPayload(trimmed) : extractJsonPayload(trimmed);
   }
 
   const events = trimmed
@@ -672,7 +733,16 @@ function parseOpencodePayload(stdout: string): unknown {
   if (payload === undefined) {
     throw new Error("missing payload text event");
   }
-  return extractJsonPayload(payload);
+  return strictPayload ? parseStrictJsonPayload(payload) : extractJsonPayload(payload);
+}
+
+/** Parse an exact JSON payload without fence or prose recovery. */
+function parseStrictJsonPayload(raw: string): unknown {
+  const parsed = tryParseJson(raw.trim());
+  if (!parsed.ok) {
+    throw new Error("final-report payload must contain only the JSON acknowledgment");
+  }
+  return parsed.value;
 }
 
 /**
@@ -981,6 +1051,24 @@ function validatePhaseSchema(
       phase,
       message: "expected top-level JSON object",
     });
+  }
+
+  if (phase === "final-report") {
+    const reportPath = record.report_path;
+    const reportMarkdown = record.report_markdown;
+    if (Array.isArray(payload)
+        || Object.keys(record).length !== 2
+        || typeof reportPath !== "string"
+        || reportPath.trim().length === 0
+        || typeof reportMarkdown !== "string"
+        || reportMarkdown.trim().length === 0) {
+      return err({
+        kind: "schema_validation_error",
+        phase,
+        message: "expected final-report payload with non-empty report_path and report_markdown strings",
+      });
+    }
+    return ok(payload);
   }
 
   const findings = record.findings;

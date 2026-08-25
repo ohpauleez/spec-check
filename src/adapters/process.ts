@@ -22,6 +22,9 @@ export interface ProcessResult {
   readonly stdout: string;
   readonly stderr: string;
   readonly timedOut: boolean;
+  readonly outputLimitExceeded?: boolean;
+  readonly stdoutInvalidUtf8?: boolean;
+  readonly stderrInvalidUtf8?: boolean;
 }
 
 /**
@@ -87,28 +90,42 @@ export async function runProcess(
     readonly timeoutMs?: number;
     readonly cwd?: string;
     readonly stdinText?: string;
+    readonly envOverrides?: Readonly<NodeJS.ProcessEnv>;
+    readonly maxOutputBytes?: number;
   },
 ): Promise<ProcessResult> {
   return await new Promise<ProcessResult>((resolve, reject) => {
     const child = spawn(command, args, {
       cwd: options?.cwd,
+      env: buildProcessEnvironment(options?.envOverrides),
       shell: false,
       stdio: ["pipe", "pipe", "pipe"],
     });
 
     // Accumulate chunks in arrays to avoid O(n^2) string concatenation.
-    const stdoutChunks: string[] = [];
-    const stderrChunks: string[] = [];
+    const stdoutChunks: Buffer[] = [];
+    const stderrChunks: Buffer[] = [];
     let timedOut = false;
+    let outputLimitExceeded = false;
+    let outputBytes = 0;
 
-    child.stdout.setEncoding("utf8");
-    child.stderr.setEncoding("utf8");
-    child.stdout.on("data", (chunk: string) => {
-      stdoutChunks.push(chunk);
+    child.stdout.on("data", (chunk: Buffer) => {
+      captureChunk(chunk, stdoutChunks);
     });
-    child.stderr.on("data", (chunk: string) => {
-      stderrChunks.push(chunk);
+    child.stderr.on("data", (chunk: Buffer) => {
+      captureChunk(chunk, stderrChunks);
     });
+
+    function captureChunk(chunk: Buffer, target: Buffer[]): void {
+      if (outputLimitExceeded) return;
+      outputBytes += chunk.byteLength;
+      if (options?.maxOutputBytes !== undefined && outputBytes > options.maxOutputBytes) {
+        outputLimitExceeded = true;
+        child.kill("SIGKILL");
+        return;
+      }
+      target.push(chunk);
+    }
 
     if (options?.stdinText !== undefined) {
       child.stdin.write(options.stdinText);
@@ -135,13 +152,47 @@ export async function runProcess(
       if (timer !== undefined) {
         clearTimeout(timer);
       }
+      const stdoutBytes = Buffer.concat(stdoutChunks);
+      const stderrBytes = Buffer.concat(stderrChunks);
+      const stdoutInvalidUtf8 = !isValidUtf8(stdoutBytes);
+      const stderrInvalidUtf8 = !isValidUtf8(stderrBytes);
       resolve({
         exitCode,
         signal,
-        stdout: stdoutChunks.join(""),
-        stderr: stderrChunks.join(""),
+        stdout: stdoutBytes.toString("utf8"),
+        stderr: stderrBytes.toString("utf8"),
         timedOut,
+        outputLimitExceeded,
+        stdoutInvalidUtf8,
+        stderrInvalidUtf8,
       });
     });
   });
+}
+
+/** Check captured bytes without silently accepting UTF-8 replacement decoding. */
+function isValidUtf8(bytes: Buffer): boolean {
+  try {
+    new TextDecoder("utf-8", { fatal: true }).decode(bytes);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Merge child-specific environment values over the inherited process environment.
+ *
+ * @param overrides - optional variables that take precedence for one child
+ * @returns a fresh environment object preserving all inherited variables
+ *
+ * @remarks
+ * Postcondition: every parent variable not named by `overrides` is preserved.
+ * The function is pure with respect to the returned object and never mutates
+ * `process.env` or `overrides`.
+ */
+export function buildProcessEnvironment(
+  overrides: Readonly<NodeJS.ProcessEnv> | undefined,
+): NodeJS.ProcessEnv {
+  return { ...process.env, ...overrides };
 }

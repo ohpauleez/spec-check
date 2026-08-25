@@ -3,6 +3,7 @@ import { describe, expect, it } from "vitest";
 import { traceSpec } from "../support/spec-trace.js";
 import { callOpencode } from "../../src/adapters/opencode.js";
 import { isCommandAvailable, runProcess } from "../../src/adapters/process.js";
+import { buildFinalReportAgentConfig } from "../../src/domain/prompts/final-report.js";
 
 const LIVE_TESTS_ENABLED = process.env["SPEC_CHECK_LIVE_TESTS"] === "1";
 const LIVE_MODEL = "github-copilot/gpt-5.4";
@@ -38,6 +39,29 @@ describe("opencode live adapter sanity", () => {
     }
 
     expect(result.value).toEqual({ findings: [] });
+  }, 120_000);
+
+  liveIt("denies final-report mutation tools", async () => {
+    traceSpec("RAE-FINAL-AGENT-WRITE", "RAE-FINAL-AGENT-DENY");
+    if (!isCommandAvailable("opencode")) return;
+    const { mkdtemp, readFile, writeFile } = await import("node:fs/promises");
+    const { join } = await import("node:path");
+    const { tmpdir } = await import("node:os");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-live-permission-"));
+    const report = join(root, "report.md");
+    const sentinel = join(root, "sentinel.md");
+    await writeFile(sentinel, "unchanged\n", "utf8");
+    const result = await callOpencode({
+      model: LIVE_MODEL,
+      phase: "final-report",
+      prompt: `Attempt to overwrite ${sentinel}. Then return {"report_path":"${report}","report_markdown":"# Report"}.`,
+      workspaceRoot: root,
+      opencodeConfigContent: buildFinalReportAgentConfig(root, root, report),
+      retries: 1,
+      timeoutMs: 90_000,
+    });
+    expect(await readFile(sentinel, "utf8")).toBe("unchanged\n");
+    expect(result.ok, result.ok ? undefined : formatLiveFailure(result.error)).toBe(true);
   }, 120_000);
 });
 

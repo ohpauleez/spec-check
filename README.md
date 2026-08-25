@@ -22,6 +22,7 @@ At a high level it supports:
 - **formalization pipeline**: translates requirement and scenario claims into typed logic IR, clusters alternate interpretations, and generates SMT-LIB artifacts for Z3 analysis
 - **optional source-backed analysis**: traces requirements to source evidence, generates EARS-preferring code-derived specifications, formalizes them through the same pipeline, and uses solver-backed cross-side implication (ie: how strongly aligned are the specs and code?)
 - **evidence-preserving reports**: bounded Markdown reports with provenance, intermediate artifacts, and manifest-based completion semantics
+- **final assessment**: after core completion, a read-only agent returns a cited synthesized assessment and `spec-check` validates and atomically publishes optional `report.md`; handled failure preserves the core run and is recorded as a warning
 
 For the full design rationale, see [docs/design.md](docs/design.md).
 
@@ -35,7 +36,8 @@ Runtime requirements:
 
 Notes:
 - `spec-check` does not manage `opencode` or `z3` configuration for you.
-- All output writes are confined to the configured output directory (default `./build/spec-check`).
+- All output writes are confined to the configured output directory (default `./spec-check-output`).
+- `manifest.json` marks completion of the core evidence bundle. Optional `report.md` is generated afterward and is intentionally not listed in that manifest.
 - Luna and Terra models use fixed OpenCode reasoning variants:
   `github-copilot/gpt-5.6-luna` uses `max`, and
   `github-copilot/gpt-5.6-terra` uses `high`.
@@ -74,18 +76,21 @@ node dist/spec-check.js \
 
 That analysis will use 1M-2M tokens and cost ~$3.50 with the default model.
 
-Use your coding agent in Plan mode to explain the results with a prompt like:
+**Successful runs automatically attempt a decision-oriented `report.md` after the core manifest.** If this optional step fails, `report_summary.md` records `reporting.final_report_failed`, its manifest checksum is refreshed, and core analysis remains complete.
+
+At run start, `spec-check` invalidates the prior manifest first. It then removes all prior tool-owned reports, metrics, generated specifications, SMT files, and comparison evidence. Cleanup failure returns an output error before analysis starts, so stale omitted artifacts cannot appear to belong to the new run.
+
+You can still use another coding agent to explain specific evidence with a prompt like:
 
 ```
-Surface any findings from running `spec-check`. The artifact directory is @spec-check-output/ .
-Produce a dedicated section in the findings for results from logical analysis passes.
+Surface all logical analysis findings from running `spec-check`. The artifact directory is @spec-check-output/ .
 ```
 
 ### Options
 
 | Option | Purpose |
 |---|---|
-| `--output <dir>` | Output directory for reports and artifacts (default `./build/spec-check`) |
+| `--output <dir>` | Output directory for reports and artifacts (default `./spec-check-output`) |
 | `--src <dir>` | Source directory; enables code-backwards analysis |
 | `--model <name>` | LLM model to use (default `github-copilot/gpt-5.6-terra` at `high`) |
 | `--caps <file>` | Capability listing file; inferred from inputs by default |

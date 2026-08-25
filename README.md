@@ -76,15 +76,14 @@ node dist/spec-check.js \
 
 That analysis will use 1M-2M tokens and cost ~$3.50 with the default model.
 
-Successful runs automatically attempt a decision-oriented `report.md` after the core manifest. If this optional step fails, `report_summary.md` records `reporting.final_report_failed`, its manifest checksum is refreshed, and core analysis remains complete.
+**Successful runs automatically attempt a decision-oriented `report.md` after the core manifest.** If this optional step fails, `report_summary.md` records `reporting.final_report_failed`, its manifest checksum is refreshed, and core analysis remains complete.
 
 At run start, `spec-check` invalidates the prior manifest first. It then removes all prior tool-owned reports, metrics, generated specifications, SMT files, and comparison evidence. Cleanup failure returns an output error before analysis starts, so stale omitted artifacts cannot appear to belong to the new run.
 
-You can still use another coding agent to explain the evidence with a prompt like:
+You can still use another coding agent to explain specific evidence with a prompt like:
 
 ```
-Surface any findings from running `spec-check`. The artifact directory is @spec-check-output/ .
-Produce a dedicated section in the findings for results from logical analysis passes.
+Surface all logical analysis findings from running `spec-check`. The artifact directory is @spec-check-output/ .
 ```
 
 ### Options

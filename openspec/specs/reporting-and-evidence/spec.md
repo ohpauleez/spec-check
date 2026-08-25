@@ -24,11 +24,14 @@ one sig SourceTrace, CodeLogic, CodeCompare extends Phase {}                // s
 // Report file names (stable naming convention per RAE-REPORT-NAMES)
 abstract sig ReportName {}
 one sig R_1_1, R_1_2, R_1_3, R_1_Logic extends ReportName {}              // base reports
-one sig R_2_Trace, R_2_Logic, R_2_Compare, R_Summary extends ReportName {} // additional
+one sig R_2_Trace, R_2_Logic, R_2_Compare, R_Summary, R_Final extends ReportName {} // additional
 
 // Severity levels for findings
 abstract sig Severity {}
 one sig ErrorSev, WarningSev, InfoSev extends Severity {}
+
+abstract sig FindingCategory {}
+one sig GeneralCategory, FinalReportFailedCategory extends FindingCategory {}
 
 // Evidence artifacts attached to findings
 sig Evidence {
@@ -42,16 +45,20 @@ sig Provenance {
 }
 sig Artifact {}
 sig Heading {}
+one sig ReportingArtifact extends Artifact {}
+one sig ReportingHeading extends Heading {}
 
 // Findings: the unit of analysis output
 sig Finding {
   severity : one Severity,
+  category : one FindingCategory,
   hasCategory : one Bool,
   provenance : lone Provenance,
   hasDescription : one Bool,
   hasRationale : one Bool,
   evidenceSet : set Evidence,
-  originPhase : one Phase
+  originPhase : one Phase,
+  finalFailureEvidence : lone FinalFailureKind
 }
 
 // Output path resolution
@@ -62,11 +69,58 @@ one sig InsideDir, OutsideDir extends WriteLoc {}
 abstract sig WriteCompletion {}
 one sig AtomicComplete, PartialWrite extends WriteCompletion {}
 
+// Consumer-visible final-path state for atomic output publication.
+abstract sig FilePathState {}
+one sig Absent, TempWriting, FinalComplete extends FilePathState {}
+
+sig OutputFile {
+  var pathState : one FilePathState
+}
+
+// The optional assessment has one precomputed, confined final path whose
+// lifecycle is owned only by final-report publication and cleanup.
+one sig FinalReportDestination {
+  var reportPathState : one FilePathState
+}
+
 // Manifest entries (for RAE-MANIFEST-SCHEMA)
+abstract sig MetricsArtifact {}
+one sig MetricsFile extends MetricsArtifact {}
+abstract sig ManifestPhase {}
+one sig QualPass1ManifestPhase, QualPass2ManifestPhase, CoverageManifestPhase,
+  LogicManifestPhase, SourceTraceManifestPhase, CodeLogicManifestPhase,
+  CodeCompareManifestPhase, SummaryManifestPhase, FormalizationManifestPhase,
+  MetricsManifestPhase extends ManifestPhase {}
 sig ManifestEntry {
-  entryReport : one ReportName,
+  entryReport : lone ReportName,
+  entryAttemptSet : lone AttemptSet,
+  entryMetrics : lone MetricsArtifact,
   checksumValid : one Bool,
-  entryPhase : one Phase
+  entryPhase : one ManifestPhase
+}
+
+fact manifest_entry_has_one_target {
+  all e : ManifestEntry |
+    one (e.entryReport + e.entryAttemptSet + e.entryMetrics)
+}
+
+fun reportManifestPhase : ReportName -> ManifestPhase {
+  R_1_1 -> QualPass1ManifestPhase
+  + R_1_2 -> QualPass2ManifestPhase
+  + R_1_3 -> CoverageManifestPhase
+  + R_1_Logic -> LogicManifestPhase
+  + R_2_Trace -> SourceTraceManifestPhase
+  + R_2_Logic -> CodeLogicManifestPhase
+  + R_2_Compare -> CodeCompareManifestPhase
+  + R_Summary -> SummaryManifestPhase
+}
+
+fact manifest_entry_phase_matches_target {
+  all e : ManifestEntry | {
+    some e.entryReport implies e.entryPhase = reportManifestPhase[e.entryReport]
+    some e.entryAttemptSet implies e.entryPhase = FormalizationManifestPhase
+    some e.entryMetrics implies e.entryPhase = MetricsManifestPhase
+  }
 }
 
 // --- Catalog construction lifecycle (for RAE-CATALOG-ERROR) ---
@@ -86,6 +140,44 @@ one sig NoRecognizedDocs, AllArchived, AllFiltered extends CatalogEmptyReason {}
 // Code 0 = success, 1 = findings present, 5 = CatalogError.
 abstract sig ExitCode {}
 one sig ExitSuccess, ExitFindings, ExitCatalogError extends ExitCode {}
+
+// --- Optional final-report lifecycle ---
+abstract sig FinalStage {}
+one sig Preparing, StartupCleaning, CoreReporting, CoreComplete, Generating,
+  Validating, PublishedCandidate, Cleaning, Cleaned, WarningRecorded,
+  MarkerInvalidated, SummaryRewritten,
+  ManifestRefreshing, ReportAvailable, WarningPersisted, OutputFailed
+  extends FinalStage {}
+
+// Closed failure taxonomy. Handled failures converge on Cleaning; output
+// failures cannot safely claim a handled warning-without-report outcome.
+abstract sig FinalFailureKind {}
+one sig AgentFailed, AcknowledgmentInvalid, PathUnsupported, PathMismatch,
+  ReportMissing, ReportSymlink, ReportNotRegular, ReportEmpty,
+  ReportStructureInvalid, ReportTooLarge, ReportUnreadable,
+  StartupCleanupFailed, CleanupFailed, WarningPersistenceFailed, MarkerInvalidationFailed,
+  SummaryRewriteFailed, ManifestRefreshFailed extends FinalFailureKind {}
+
+fun handledFinalFailures : set FinalFailureKind {
+  AgentFailed + AcknowledgmentInvalid + PathUnsupported + PathMismatch
+  + ReportMissing + ReportSymlink + ReportNotRegular + ReportEmpty
+  + ReportStructureInvalid + ReportTooLarge + ReportUnreadable
+}
+
+fun generationFinalFailures : set FinalFailureKind {
+  AgentFailed
+}
+
+fun validationFinalFailures : set FinalFailureKind {
+  AcknowledgmentInvalid + PathMismatch + ReportMissing + ReportSymlink
+  + ReportNotRegular + ReportEmpty
+  + ReportStructureInvalid + ReportTooLarge + ReportUnreadable
+}
+
+fun outputFinalFailures : set FinalFailureKind {
+  StartupCleanupFailed + CleanupFailed + MarkerInvalidationFailed
+  + WarningPersistenceFailed + SummaryRewriteFailed + ManifestRefreshFailed
+}
 
 // --- Phase-to-report mapping ---
 fun phaseToReport : Phase -> ReportName {
@@ -110,6 +202,7 @@ fun requiredReports : set ReportName {
 // --- Run state (behavioral) ---
 one sig Run {
   mode : one AnalysisMode,
+  telemetryEnabled : one Bool,
   var catalog : one CatalogStage,
   var catalogReason : lone CatalogEmptyReason,
   var completedPhases : set Phase,
@@ -117,12 +210,32 @@ one sig Run {
   var reports : set ReportName,
   var manifestPresent : one Bool,
   var manifestFiles : set ReportName,
-  var failed : one Bool
+  var manifestAttemptSets : set AttemptSet,
+  var failed : one Bool,
+  // Post-completion derivative state. `coreComplete` remains true while the
+  // manifest is temporarily invalidated and refreshed on the warning path.
+  var finalStage : one FinalStage,
+  var coreComplete : one Bool,
+  var reportPresent : one Bool,
+  var reportValid : one Bool,
+  var warningPresent : one Bool,
+  var summaryCurrent : one Bool,
+  var finalFailure : lone FinalFailureKind,
+  var agentInvoked : one Bool,
+  // Startup residue is distinct from current-run output.
+  var staleManifestPresent : one Bool,
+  var staleManagedOutputPresent : one Bool,
+  // metrics.json is a core-completion snapshot, not a post-completion report.
+  var metricsPresent : one Bool,
+  var metricsChecksummed : one Bool,
+  var metricsListed : one Bool,
+  var reportsAtomicallyComplete : one Bool
 }
 
 // --- Finding well-formedness ---
 pred finding_wellformed [f : Finding] {
   f.hasCategory = True
+  one f.category
   some f.provenance
   f.hasDescription = True
   f.hasRationale = True
@@ -386,6 +499,7 @@ pred complete_phase [p : Phase] {
   p not in Run.completedPhases
   p in enabledPhases
   Run.catalog = CatalogConstructed   // phases run only after catalog survives
+  Run.finalStage = CoreReporting
   Run.failed = False
   Run.manifestPresent = False    // stale manifest must be removed first
   // Effect: phase marked complete, report written
@@ -400,6 +514,11 @@ pred complete_phase [p : Phase] {
   Run.failed' = Run.failed
   Run.catalog' = Run.catalog
   Run.catalogReason' = Run.catalogReason
+  frame_final_state
+  Run.metricsPresent' = Run.metricsPresent
+  Run.metricsChecksummed' = Run.metricsChecksummed
+  Run.metricsListed' = Run.metricsListed
+  Run.reportsAtomicallyComplete' = False
 }
 
 // Base mode produces exactly the base phase reports plus summary
@@ -480,7 +599,7 @@ WHEN the spec-check tool writes phase reports or synthesized reports, THE spec-c
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
-- `openspec/changes/add-final-evidence-report/proposal.md#Scope`
+- `openspec/changes/archive/2026-08-24-add-final-evidence-report/proposal.md#Scope`
 
 #### Scenario: Phase Report Named Correctly [RAE-NAMES-PHASE]
 WHEN the qualitative analysis phase completes its first pass, THE spec-check tool SHALL write the report to `report_1.1.md` under the output directory.
@@ -543,12 +662,272 @@ assert phases_monotonic {
 WHEN the core evidence manifest is successfully written, THE spec-check tool SHALL attempt to generate one optional decision-oriented Markdown assessment at `report.md` from the completed evidence bundle.
 
 **References:**
-- `openspec/changes/add-final-evidence-report/proposal.md#Domain-Model`
-- `openspec/changes/add-final-evidence-report/design.md#System-Model`
+- `openspec/changes/archive/2026-08-24-add-final-evidence-report/proposal.md#Domain-Model`
+- `openspec/changes/archive/2026-08-24-add-final-evidence-report/design.md#System-Model`
 
 #### Requirement model
 
-[`alloy/final-report.als`](alloy/final-report.als) models core completion, final-report success and failure, cleanup, warning persistence, manifest refresh, and terminal progress.
+```alloy
+// --- Optional final assessment: post-completion lifecycle ---
+
+// Preconditions for invoking the optional report agent. Core reports and the
+// summary are complete, and manifest presence attests the core evidence bundle.
+pred final_report_preconditions {
+  Run.finalStage = CoreComplete
+  Run.coreComplete = True
+  Run.manifestPresent = True
+  requiredReports in Run.reports
+  Run.summaryCurrent = True
+  Run.reportPresent = False
+}
+
+pred start_final_report {
+  final_report_preconditions
+  request_paths_safe
+  protocol_preconditions
+  FinalAgentPolicy.admitted = True
+  PromptBuild.accepted = True
+  Run.finalStage' = Generating
+  Run.agentInvoked' = True
+  Run.finalFailure' = none
+  frame_core_and_final_files
+  frame_final_observations
+}
+
+pred generation_returns {
+  Run.finalStage = Generating
+  protocol_preconditions
+  ReportProtocol.agentSucceeded = True
+  Run.finalStage' = Validating
+  Run.agentInvoked' = Run.agentInvoked
+  Run.finalFailure' = Run.finalFailure
+  frame_core_and_final_files
+  frame_final_observations
+}
+
+pred generation_fails [k : FinalFailureKind] {
+  Run.finalStage = Generating
+  k in generationFinalFailures
+  k = AgentFailed implies ReportProtocol.agentSucceeded = False
+  Run.finalStage' = Cleaning
+  Run.finalFailure' = k
+  Run.agentInvoked' = Run.agentInvoked
+  frame_core_and_final_files
+  frame_final_observations
+}
+
+pred validation_succeeds {
+  Run.finalStage = PublishedCandidate
+  final_paths_safe
+  protocol_preconditions
+  acknowledgment_valid
+  candidate_valid
+  Run.finalStage' = ReportAvailable
+  Run.reportPresent' = True
+  Run.reportValid' = True
+  Run.agentInvoked' = Run.agentInvoked
+  Run.finalFailure' = none
+  frame_core_state
+  Run.warningPresent' = Run.warningPresent
+  Run.summaryCurrent' = Run.summaryCurrent
+  Run.staleManifestPresent' = Run.staleManifestPresent
+  Run.staleManagedOutputPresent' = Run.staleManagedOutputPresent
+  frame_metrics
+  FinalReportDestination.reportPathState = FinalComplete
+  FinalReportDestination.reportPathState' = FinalReportDestination.reportPathState
+  all f : OutputFile | f.pathState' = f.pathState
+}
+
+// Trusted code atomically publishes a payload that passed all pre-write checks.
+pred publish_candidate {
+  Run.finalStage = Validating
+  final_paths_safe
+  acknowledgment_valid
+  candidate_payload_valid
+  ReportCandidate.publicationAtomic = True
+  FinalReportDestination.reportPathState = Absent
+  FinalReportDestination.reportPathState' = FinalComplete
+  Run.finalStage' = PublishedCandidate
+  Run.agentInvoked' = Run.agentInvoked
+  Run.finalFailure' = Run.finalFailure
+  frame_core_state
+  frame_final_observations
+  all f : OutputFile | f.pathState' = f.pathState
+}
+
+pred publish_candidate_enabled {
+  Run.finalStage = Validating
+  final_paths_safe
+  acknowledgment_valid
+  candidate_payload_valid
+  ReportCandidate.publicationAtomic = True
+}
+
+// Permission wildcard rejection occurs before invocation.
+pred reject_unsafe_path {
+  Run.finalStage = CoreComplete
+  Run.coreComplete = True
+  FinalPathBinding.containsPermissionWildcard = True
+  Run.finalStage' = Cleaning
+  Run.finalFailure' = PathUnsupported
+  Run.agentInvoked' = False
+  frame_core_and_final_files
+  frame_final_observations
+}
+
+pred reject_unadmitted_agent_or_prompt {
+  Run.finalStage = CoreComplete
+  Run.coreComplete = True
+  FinalPathBinding.containsPermissionWildcard = False
+  FinalAgentPolicy.admitted = False or PromptBuild.accepted = False
+  Run.finalStage' = Cleaning
+  Run.finalFailure' = AgentFailed
+  Run.agentInvoked' = False
+  frame_core_and_final_files
+  frame_final_observations
+}
+
+pred start_final_report_enabled {
+  final_report_preconditions
+  request_paths_safe
+  protocol_preconditions
+  FinalAgentPolicy.admitted = True
+  PromptBuild.accepted = True
+}
+
+pred reject_unsafe_path_enabled {
+  Run.finalStage = CoreComplete
+  Run.coreComplete = True
+  FinalPathBinding.containsPermissionWildcard = True
+}
+
+pred reject_unadmitted_agent_or_prompt_enabled {
+  Run.finalStage = CoreComplete
+  Run.coreComplete = True
+  FinalPathBinding.containsPermissionWildcard = False
+  FinalAgentPolicy.admitted = False or PromptBuild.accepted = False
+}
+
+pred validation_fails [k : FinalFailureKind] {
+  Run.finalStage in Validating + PublishedCandidate
+  k in validationFinalFailures
+  final_failure_cause[k]
+  Run.finalStage' = Cleaning
+  Run.finalFailure' = k
+  Run.agentInvoked' = Run.agentInvoked
+  frame_core_and_final_files
+  frame_final_observations
+}
+
+pred validation_failure_enabled [k : FinalFailureKind] {
+  Run.finalStage in Validating + PublishedCandidate
+  k in validationFinalFailures
+  final_failure_cause[k]
+}
+
+pred candidate_payload_valid {
+  ReportCandidate.payloadPresent = True
+  ReportCandidate.pathMatches = True
+  ReportCandidate.payloadNonWhitespace = True
+  ReportCandidate.payloadWithinByteLimit = True
+  ReportCandidate.payloadHeadingsComplete = True
+  ReportCandidate.payloadRepositoryCitation = True
+  ReportCandidate.payloadEveryFindingCited = True
+}
+
+// Each stable validation failure kind has one normative cause.
+pred final_failure_cause [k : FinalFailureKind] {
+  k = AcknowledgmentInvalid implies {
+    Run.finalStage = Validating
+    not acknowledgment_valid or ReportCandidate.payloadPresent = False
+  }
+  k = PathMismatch implies {
+    Run.finalStage = Validating
+    acknowledgment_valid
+    FinalPathBinding.acknowledgmentAgrees = False
+      or ReportCandidate.pathMatches = False
+  }
+  k = ReportMissing implies {
+    Run.finalStage = PublishedCandidate
+    ReportCandidate.filePresent = False
+  }
+  k = ReportSymlink implies {
+    Run.finalStage = PublishedCandidate
+    ReportCandidate.symlink = True
+  }
+  k = ReportNotRegular implies {
+    Run.finalStage = PublishedCandidate
+    ReportCandidate.regularFile = False
+  }
+  k = ReportEmpty implies
+    (Run.finalStage = Validating and ReportCandidate.payloadNonWhitespace = False)
+      or (Run.finalStage = PublishedCandidate and ReportReadBack.readStage = ContentRead
+        and ReportCandidate.nonWhitespace = False)
+  k = ReportStructureInvalid implies {
+    (Run.finalStage = Validating and (
+      ReportCandidate.payloadHeadingsComplete = False
+        or ReportCandidate.payloadRepositoryCitation = False
+        or ReportCandidate.payloadEveryFindingCited = False))
+    or (Run.finalStage = PublishedCandidate and ReportReadBack.readStage = ContentRead and (
+      ReportCandidate.headingsComplete = False
+        or ReportCandidate.repositoryCitation = False
+        or ReportCandidate.everyFindingCited = False))
+  }
+  k = ReportTooLarge implies
+    (Run.finalStage = Validating and ReportCandidate.payloadWithinByteLimit = False)
+      or (Run.finalStage = PublishedCandidate and ReportCandidate.withinByteLimit = False)
+  k = ReportUnreadable implies {
+    (Run.finalStage = Validating and ReportCandidate.publicationAtomic = False)
+    or (Run.finalStage = PublishedCandidate and ReportReadBack.readStage = ContentRead and (
+      ReportCandidate.strictUtf8 = False
+        or FinalPathBinding.validationAgrees = False
+        or ReportCandidate.readBackContentId != ReportCandidate.payloadContentId))
+  }
+}
+
+assert validating_has_classified_outcome {
+  always (Run.finalStage = Validating implies
+    (publish_candidate_enabled
+      or some k : validationFinalFailures | validation_failure_enabled[k]))
+}
+
+assert published_candidate_has_classified_outcome {
+  always (Run.finalStage = PublishedCandidate implies
+    (inspect_report_metadata or read_report_content or candidate_valid
+      or some k : validationFinalFailures | validation_failure_enabled[k]))
+}
+
+// Success postcondition: exactly one current, independently validated report is
+// available, core completion remains true, and report.md is not self-manifested.
+assert valid_report_postcondition {
+  always (Run.finalStage = ReportAvailable implies {
+    Run.coreComplete = True
+    Run.reportPresent = True
+    Run.reportValid = True
+    FinalReportDestination.reportPathState = FinalComplete
+    Run.warningPresent = False
+    R_Final not in Run.manifestFiles
+  })
+}
+
+assert final_report_terminal_states_stutter {
+  always (Run.finalStage in ReportAvailable + WarningPersisted + OutputFailed
+    implies Run.finalStage' = Run.finalStage)
+}
+
+// Safety: report generation and every later stage require prior core completion.
+assert final_report_starts_after_core_completion {
+  always (Run.finalStage in Generating + Validating + PublishedCandidate + Cleaning + Cleaned + WarningRecorded
+    + MarkerInvalidated + SummaryRewritten + ManifestRefreshing
+    + ReportAvailable + WarningPersisted
+    implies Run.coreComplete = True)
+}
+
+// Optionality: handled report failure does not revoke completed core analysis.
+assert core_completion_monotonic_after_attempt {
+  always (Run.coreComplete = True implies Run.coreComplete' = True)
+}
+```
 
 #### Scenario: Generate After Core Completion [RAE-FINAL-AFTER-CORE]
 WHEN final-report generation starts, THE spec-check tool SHALL have already finalized the phase reports, `report_summary.md`, and the core `manifest.json`.
@@ -565,12 +944,24 @@ IF final-report generation or validation fails after core completion, THEN THE s
 
 **Postcondition:** Core completion remains true even though no final report is available; the warning may produce the existing findings-present exit code.
 
+```alloy
+// RAE-FINAL-OPTIONAL: handled failure is observable but nonfatal to core completion.
+assert handled_failure_preserves_core {
+  always (Run.finalStage = WarningPersisted implies {
+    Run.coreComplete = True
+    Run.failed = False
+    Run.reportPresent = False
+    Run.warningPresent = True
+  })
+}
+```
+
 ### Requirement: Bind Final Report Paths [RAE-FINAL-PATHS]
 THE spec-check tool SHALL resolve the configured output directory to an absolute path and SHALL use one confined absolute `report.md` path for the prompt, payload comparison, atomic publication, and filesystem validation.
 
 **References:**
-- `openspec/changes/add-final-evidence-report/proposal.md#Preconditions-Postconditions-and-Invariants`
-- `openspec/changes/add-final-evidence-report/design.md#Interface-Contracts`
+- `openspec/changes/archive/2026-08-24-add-final-evidence-report/proposal.md#Preconditions-Postconditions-and-Invariants`
+- `openspec/changes/archive/2026-08-24-add-final-evidence-report/design.md#Interface-Contracts`
 
 #### Scenario: Resolve Relative Output [RAE-FINAL-PATH-ABS]
 WHEN a relative output directory is configured, THE spec-check tool SHALL resolve it to an absolute path before final-report request construction.
@@ -592,12 +983,75 @@ IF the absolute evidence or report path contains `*` or `?`, THEN THE spec-check
 
 **Postcondition:** OpenCode wildcard matching cannot broaden read-only external-directory access.
 
+#### Requirement model
+
+```alloy
+// --- Final-report path binding and confinement ---
+one sig FinalPathBinding {
+  outputAbsolute : one Bool,
+  workspaceAbsolute : one Bool,
+  destinationAbsolute : one Bool,
+  destinationConfined : one Bool,
+  promptAgrees : one Bool,
+  acknowledgmentAgrees : one Bool,
+  validationAgrees : one Bool,
+  containsPermissionWildcard : one Bool,
+  containsSpaces : one Bool
+}
+
+pred final_paths_safe {
+  FinalPathBinding.outputAbsolute = True
+  FinalPathBinding.workspaceAbsolute = True
+  FinalPathBinding.destinationAbsolute = True
+  FinalPathBinding.destinationConfined = True
+  FinalPathBinding.promptAgrees = True
+  FinalPathBinding.acknowledgmentAgrees = True
+  FinalPathBinding.validationAgrees = True
+  FinalPathBinding.containsPermissionWildcard = False
+}
+
+// Preconditions: request construction has one resolved, confined absolute path.
+pred path_preconditions {
+  FinalPathBinding.outputAbsolute = True
+  FinalPathBinding.workspaceAbsolute = True
+  FinalPathBinding.destinationAbsolute = True
+  FinalPathBinding.destinationConfined = True
+}
+
+pred request_paths_safe {
+  path_preconditions
+  FinalPathBinding.promptAgrees = True
+  FinalPathBinding.containsPermissionWildcard = False
+}
+
+// Configuration resolution always establishes absolute confinement and exact
+// prompt binding. Wildcard presence alone selects invoke versus fail-closed.
+fact configured_final_report_paths {
+  path_preconditions
+  FinalPathBinding.promptAgrees = True
+}
+
+// Path mismatch and wildcard paths are handled before any model-selected path is read.
+assert unsafe_paths_prevent_agent_or_validation {
+  always {
+    FinalPathBinding.containsPermissionWildcard = True implies Run.agentInvoked = False
+    FinalPathBinding.acknowledgmentAgrees = False implies Run.reportValid = False
+  }
+}
+
+// Success postcondition: prompt, acknowledgment, publication, and validation all
+// refer to the precomputed destination inside the output directory.
+assert report_success_requires_path_agreement {
+  always (Run.finalStage = ReportAvailable implies final_paths_safe)
+}
+```
+
 ### Requirement: Restrict Final Report Agent [RAE-FINAL-AGENT]
 WHEN the spec-check tool invokes the final-report agent, THE spec-check tool SHALL use OpenCode pure mode and a transient primary-agent policy that permits required reads, denies all file mutation, shell execution, and delegation, and does not enable OpenCode auto-approval.
 
 **References:**
-- `openspec/changes/add-final-evidence-report/proposal.md#Constraints`
-- `openspec/changes/add-final-evidence-report/design.md#Security`
+- `openspec/changes/archive/2026-08-24-add-final-evidence-report/proposal.md#Constraints`
+- `openspec/changes/archive/2026-08-24-add-final-evidence-report/design.md#Security`
 
 #### Scenario: Allow Designated Write [RAE-FINAL-AGENT-WRITE]
 WHEN a valid report payload is returned, THE spec-check tool SHALL atomically publish its Markdown through the confined filesystem adapter at the exact designated `report.md`.
@@ -614,12 +1068,70 @@ IF the report agent attempts shell execution, task delegation, web access, or an
 
 **Postcondition:** The report cannot bypass read-only policy through a more powerful tool.
 
+#### Requirement model
+
+```alloy
+// --- Restricted agent capability model ---
+abstract sig AgentCapability {}
+one sig ReadCapability, SearchCapability, EditCapability, BashCapability,
+  DelegateCapability, WebCapability, SkillCapability, QuestionCapability,
+  TodoCapability, AutoApprovalCapability extends AgentCapability {}
+one sig FinalAgentPolicy {
+  configuredAllowed : set AgentCapability,
+  admitted : one Bool
+}
+one sig FinalAgentInvocation {
+  requestedCapabilities : set AgentCapability,
+  effectiveCapabilities : set AgentCapability
+}
+
+fun allowedAgentCapabilities : set AgentCapability {
+  ReadCapability + SearchCapability
+}
+
+fun deniedAgentCapabilities : set AgentCapability {
+  EditCapability + BashCapability + DelegateCapability + WebCapability
+  + SkillCapability + QuestionCapability + TodoCapability + AutoApprovalCapability
+}
+
+fact final_agent_policy_admission {
+  FinalAgentPolicy.admitted = True iff
+    FinalAgentPolicy.configuredAllowed = allowedAgentCapabilities
+}
+
+fact configured_final_agent_policy {
+  FinalAgentPolicy.configuredAllowed in allowedAgentCapabilities
+  FinalAgentPolicy.admitted = True implies
+    FinalAgentPolicy.configuredAllowed = allowedAgentCapabilities
+}
+
+fact final_agent_invocation_enforces_policy {
+  FinalAgentInvocation.effectiveCapabilities
+    = FinalAgentInvocation.requestedCapabilities & FinalAgentPolicy.configuredAllowed
+}
+
+// Invariant: the agent is read-only; trusted publication is not an agent capability.
+assert agent_policy_is_read_only {
+  FinalAgentPolicy.admitted = True implies {
+    FinalAgentPolicy.configuredAllowed = ReadCapability + SearchCapability
+    no (FinalAgentPolicy.configuredAllowed & deniedAgentCapabilities)
+  }
+}
+
+// A denied mutation/tool attempt is a handled agent failure, never a report success.
+assert denied_agent_action_cannot_publish {
+  no (FinalAgentInvocation.effectiveCapabilities & deniedAgentCapabilities)
+  FinalAgentInvocation.requestedCapabilities & deniedAgentCapabilities
+    in AgentCapability - FinalAgentInvocation.effectiveCapabilities
+}
+```
+
 ### Requirement: Use File And Acknowledgment Protocol [RAE-FINAL-PROTOCOL]
 WHEN the final-report phase invokes OpenCode with `--format json`, THE spec-check tool SHALL decode stdout as strict UTF-8 newline-delimited OpenCode events, concatenate `part.text` only from top-level `type: "text"` events, and parse that text as one JSON object with the exact `report_path` and complete `report_markdown` strings.
 
 **References:**
-- `openspec/changes/add-final-evidence-report/proposal.md#Scope`
-- `openspec/changes/add-final-evidence-report/design.md#Interaction-Protocols`
+- `openspec/changes/archive/2026-08-24-add-final-evidence-report/proposal.md#Scope`
+- `openspec/changes/archive/2026-08-24-add-final-evidence-report/design.md#Interaction-Protocols`
 
 #### Scenario: Invoke In Workspace [RAE-FINAL-PROTO-DIR]
 WHEN OpenCode is started for the final-report phase, THE spec-check tool SHALL pass `--pure`, an isolated execution/configuration root with `--dir`, the restricted agent with `--agent`, JSON event output with `--format json`, and SHALL omit `--auto`; the analyzed workspace SHALL be named in the prompt and granted explicit read-only external-directory access.
@@ -636,12 +1148,91 @@ WHEN source or bundled artifacts are built, THE spec-check verification harness 
 
 **Postcondition:** Source and distributed CLIs use the evaluated content strategy.
 
+#### Requirement model
+
+```alloy
+// --- Strict OpenCode event and acknowledgment protocol ---
+one sig ReportProtocol {
+  agentSucceeded : one Bool,
+  strictUtf8 : one Bool,
+  linesAreJsonEvents : one Bool,
+  errorEventAbsent : one Bool,
+  textFromTopLevelEventsOnly : one Bool,
+  exactPayloadFields : one Bool,
+  pathNonempty : one Bool,
+  markdownNonempty : one Bool,
+  noWrapperOrFence : one Bool,
+  pureMode : one Bool,
+  isolatedDir : one Bool,
+  restrictedAgentSelected : one Bool,
+  autoOmitted : one Bool
+}
+
+abstract sig PromptArtifact {}
+one sig SourcePrompt, BundledPrompt extends PromptArtifact {}
+one sig PromptInstruction {}
+one sig PromptBuild {
+  normalizedInstructions : PromptArtifact -> PromptInstruction,
+  accepted : one Bool
+}
+
+// Build admission is the modeled trust boundary. Runtime placeholders are
+// normalized before this equality check; executable distribution tests compare bytes.
+fact prompt_bundle_admission {
+  PromptBuild.accepted = True iff
+    SourcePrompt.(PromptBuild.normalizedInstructions)
+      = BundledPrompt.(PromptBuild.normalizedInstructions)
+}
+
+fact distributed_prompt_is_admitted {
+  PromptBuild.accepted = True implies
+    some SourcePrompt.(PromptBuild.normalizedInstructions)
+}
+
+pred protocol_preconditions {
+  ReportProtocol.pureMode = True
+  ReportProtocol.isolatedDir = True
+  ReportProtocol.restrictedAgentSelected = True
+  ReportProtocol.autoOmitted = True
+}
+
+fact final_report_invocation_controls {
+  protocol_preconditions
+}
+
+pred acknowledgment_valid {
+  ReportProtocol.strictUtf8 = True
+  ReportProtocol.linesAreJsonEvents = True
+  ReportProtocol.errorEventAbsent = True
+  ReportProtocol.textFromTopLevelEventsOnly = True
+  ReportProtocol.exactPayloadFields = True
+  ReportProtocol.pathNonempty = True
+  ReportProtocol.markdownNonempty = True
+  ReportProtocol.noWrapperOrFence = True
+}
+
+assert validating_requires_strict_protocol {
+  always (Run.finalStage = Validating implies
+    (protocol_preconditions and ReportProtocol.agentSucceeded = True))
+}
+
+assert malformed_protocol_never_validates {
+  always (not acknowledgment_valid implies Run.finalStage != ReportAvailable)
+}
+
+assert accepted_bundle_has_prompt_parity {
+  PromptBuild.accepted = True implies
+    SourcePrompt.(PromptBuild.normalizedInstructions)
+      = BundledPrompt.(PromptBuild.normalizedInstructions)
+}
+```
+
 ### Requirement: Validate Final Report File [RAE-FINAL-VALIDATE]
 WHEN a final-report payload is accepted, THE spec-check tool SHALL validate its path and Markdown, atomically publish the Markdown, and independently validate the precomputed destination as a non-symlink regular strict UTF-8 file with all required report headings, at least one repository-relative citation, one artifact citation for every numbered prioritized finding, non-whitespace content, and size not greater than 1,048,576 bytes.
 
 **References:**
-- `openspec/changes/add-final-evidence-report/proposal.md#Postconditions`
-- `openspec/changes/add-final-evidence-report/design.md#Data-Design`
+- `openspec/changes/archive/2026-08-24-add-final-evidence-report/proposal.md#Postconditions`
+- `openspec/changes/archive/2026-08-24-add-final-evidence-report/design.md#Data-Design`
 
 #### Scenario: Accept Bounded Regular File [RAE-FINAL-VALID-FILE]
 WHEN trusted atomic publication produces a regular non-symlink file that meets the strict UTF-8, required-heading, citation, non-whitespace, and 1,048,576-byte rules, THE spec-check tool SHALL accept it as the final report.
@@ -678,12 +1269,118 @@ IF returned or read-back Markdown omits a required report heading, contains no r
 
 **Postcondition:** A structurally incomplete or uncited prioritized finding cannot be published as a successful final report.
 
+#### Requirement model
+
+```alloy
+// --- Independent payload and filesystem validation ---
+one sig ReportCandidate {
+  payloadPresent : one Bool,
+  pathMatches : one Bool,
+  publicationAtomic : one Bool,
+  payloadNonWhitespace : one Bool,
+  payloadWithinByteLimit : one Bool,
+  payloadHeadingsComplete : one Bool,
+  payloadRepositoryCitation : one Bool,
+  payloadEveryFindingCited : one Bool,
+  payloadContentId : one ContentIdentity,
+  filePresent : one Bool,
+  strictUtf8 : one Bool,
+  regularFile : one Bool,
+  symlink : one Bool,
+  nonWhitespace : one Bool,
+  withinByteLimit : one Bool,
+  headingsComplete : one Bool,
+  repositoryCitation : one Bool,
+  everyFindingCited : one Bool,
+  readBackContentId : one ContentIdentity
+}
+abstract sig ContentIdentity {}
+one sig PayloadContent, AlternateContent extends ContentIdentity {}
+abstract sig ReadBackStage {}
+one sig MetadataPending, MetadataChecked, ContentRead, ReadRejected extends ReadBackStage {}
+one sig ReportReadBack {
+  var readStage : one ReadBackStage
+}
+
+pred inspect_report_metadata {
+  Run.finalStage = PublishedCandidate
+  ReportReadBack.readStage = MetadataPending
+  ReportReadBack.readStage' = (
+    ReportCandidate.filePresent = True
+      and ReportCandidate.regularFile = True
+      and ReportCandidate.symlink = False
+      and ReportCandidate.withinByteLimit = True
+    implies MetadataChecked else ReadRejected)
+  Run.finalStage' = Run.finalStage
+  Run.agentInvoked' = Run.agentInvoked
+  Run.finalFailure' = Run.finalFailure
+  frame_core_and_final_files
+  frame_final_observations
+}
+
+pred read_report_content {
+  Run.finalStage = PublishedCandidate
+  ReportReadBack.readStage = MetadataChecked
+  ReportCandidate.filePresent = True
+  ReportCandidate.regularFile = True
+  ReportCandidate.symlink = False
+  ReportCandidate.withinByteLimit = True
+  ReportReadBack.readStage' = ContentRead
+  Run.finalStage' = Run.finalStage
+  Run.agentInvoked' = Run.agentInvoked
+  Run.finalFailure' = Run.finalFailure
+  frame_core_and_final_files
+  frame_final_observations
+}
+
+pred candidate_valid {
+  ReportCandidate.payloadPresent = True
+  ReportCandidate.pathMatches = True
+  ReportCandidate.publicationAtomic = True
+  ReportCandidate.filePresent = True
+  ReportCandidate.strictUtf8 = True
+  ReportCandidate.regularFile = True
+  ReportCandidate.symlink = False
+  ReportCandidate.nonWhitespace = True
+  ReportCandidate.withinByteLimit = True
+  ReportCandidate.headingsComplete = True
+  ReportCandidate.repositoryCitation = True
+  ReportCandidate.everyFindingCited = True
+  ReportCandidate.readBackContentId = ReportCandidate.payloadContentId
+  ReportReadBack.readStage = ContentRead
+}
+
+assert oversized_report_rejected_before_content_read {
+  always (ReportCandidate.withinByteLimit = False implies
+    ReportReadBack.readStage != ContentRead)
+}
+
+// Validation authority: success requires payload checks, trusted atomic
+// publication, and independent read-back checks at the designated path.
+assert report_available_requires_candidate_valid {
+  always (Run.finalStage = ReportAvailable implies candidate_valid)
+}
+
+assert invalid_objects_never_succeed {
+  always ((ReportCandidate.symlink = True
+    or ReportCandidate.regularFile = False
+    or ReportCandidate.filePresent = False
+    or ReportCandidate.nonWhitespace = False
+    or ReportCandidate.withinByteLimit = False
+    or ReportCandidate.strictUtf8 = False
+    or ReportCandidate.headingsComplete = False
+    or ReportCandidate.repositoryCitation = False
+    or ReportCandidate.everyFindingCited = False)
+    implies Run.reportValid = False)
+}
+```
+
 ### Requirement: Clean Final Report Output [RAE-FINAL-CLEANUP]
 WHEN a new run starts or a handled final-report failure occurs, THE spec-check tool SHALL remove the confined `report.md` destination before that run can claim a final-report outcome.
 
 **References:**
-- `openspec/changes/add-final-evidence-report/proposal.md#Failure-Modes`
-- `openspec/changes/add-final-evidence-report/design.md#Control-and-Recovery`
+- `openspec/changes/archive/2026-08-24-add-final-evidence-report/proposal.md#Failure-Modes`
+- `openspec/changes/archive/2026-08-24-add-final-evidence-report/design.md#Control-and-Recovery`
 
 #### Scenario: Remove Stale Report [RAE-FINAL-CLEAN-STALE]
 WHEN a new run starts and `report.md` exists from a prior run, THE spec-check tool SHALL remove it before analysis begins.
@@ -715,12 +1412,167 @@ IF report cleanup, marker invalidation, warning-summary rewrite, or manifest ref
 
 **Postcondition:** Report, summary, and manifest presence reflect only side effects completed before the failed operation. After successful marker invalidation, no completion manifest remains.
 
+#### Requirement model
+
+```alloy
+// --- Startup and handled-failure cleanup ---
+pred begin_startup_cleanup {
+  Run.finalStage = Preparing
+  Run.finalStage' = StartupCleaning
+  // Invalidate the old completion marker before deleting managed output.
+  Run.staleManifestPresent' = False
+  Run.staleManagedOutputPresent' = Run.staleManagedOutputPresent
+  frame_core_state
+  Run.reportPresent' = Run.reportPresent
+  Run.reportValid' = Run.reportValid
+  Run.warningPresent' = Run.warningPresent
+  Run.summaryCurrent' = Run.summaryCurrent
+  frame_metrics
+  all f : OutputFile | f.pathState' = f.pathState
+  Run.finalFailure' = Run.finalFailure
+  Run.agentInvoked' = Run.agentInvoked
+}
+
+pred startup_cleanup_succeeds {
+  Run.finalStage = StartupCleaning
+  Run.finalStage' = CoreReporting
+  Run.staleManifestPresent = False
+  Run.staleManagedOutputPresent' = False
+  FinalReportDestination.reportPathState' = Absent
+  Run.staleManifestPresent' = Run.staleManifestPresent
+  frame_core_state
+  Run.reportPresent' = Run.reportPresent
+  Run.reportValid' = Run.reportValid
+  Run.warningPresent' = Run.warningPresent
+  Run.summaryCurrent' = Run.summaryCurrent
+  frame_metrics
+  all f : OutputFile | f.pathState' = f.pathState
+  Run.finalFailure' = Run.finalFailure
+  Run.agentInvoked' = Run.agentInvoked
+}
+
+pred cleanup_succeeds {
+  Run.finalStage = Cleaning
+  one Run.finalFailure
+  Run.finalFailure in handledFinalFailures
+  Run.findings' = Run.findings
+  Run.finalStage' = Cleaned
+  Run.reportPresent' = False
+  Run.reportValid' = False
+  Run.warningPresent' = Run.warningPresent
+  Run.summaryCurrent' = Run.summaryCurrent
+  Run.agentInvoked' = Run.agentInvoked
+  Run.finalFailure' = Run.finalFailure
+  Run.completedPhases' = Run.completedPhases
+  Run.reports' = Run.reports
+  Run.manifestPresent' = Run.manifestPresent
+  Run.manifestFiles' = Run.manifestFiles
+  Run.failed' = Run.failed
+  Run.catalog' = Run.catalog
+  Run.catalogReason' = Run.catalogReason
+  Run.coreComplete' = Run.coreComplete
+  Run.staleManifestPresent' = Run.staleManifestPresent
+  Run.staleManagedOutputPresent' = Run.staleManagedOutputPresent
+  frame_metrics
+  FinalReportDestination.reportPathState' = Absent
+  all f : OutputFile | f.pathState' = f.pathState
+}
+
+pred persist_final_report_warning {
+  Run.finalStage = Cleaned
+  one Run.finalFailure
+  Run.finalFailure in handledFinalFailures
+  some w : Finding | {
+    w.severity = WarningSev
+    w.category = FinalReportFailedCategory
+    finding_wellformed[w]
+    finding_evidence_preserved[w]
+    w.provenance.srcFile = ReportingArtifact
+    w.provenance.srcHeading = ReportingHeading
+    w.finalFailureEvidence = Run.finalFailure
+    w not in Run.findings
+    Run.findings' = Run.findings + w
+  }
+  Run.finalStage' = WarningRecorded
+  Run.reportPresent' = Run.reportPresent
+  Run.reportValid' = Run.reportValid
+  Run.warningPresent' = True
+  // The new warning makes the persisted summary stale until rewrite.
+  Run.summaryCurrent' = False
+  Run.agentInvoked' = Run.agentInvoked
+  Run.finalFailure' = Run.finalFailure
+  Run.completedPhases' = Run.completedPhases
+  Run.reports' = Run.reports
+  Run.manifestPresent' = Run.manifestPresent
+  Run.manifestFiles' = Run.manifestFiles
+  Run.failed' = Run.failed
+  Run.catalog' = Run.catalog
+  Run.catalogReason' = Run.catalogReason
+  Run.coreComplete' = Run.coreComplete
+  Run.staleManifestPresent' = Run.staleManifestPresent
+  Run.staleManagedOutputPresent' = Run.staleManagedOutputPresent
+  frame_metrics
+  FinalReportDestination.reportPathState' = FinalReportDestination.reportPathState
+  all f : OutputFile | f.pathState' = f.pathState
+}
+
+pred final_output_fails [k : FinalFailureKind] {
+  k in outputFinalFailures
+  k = StartupCleanupFailed implies Run.finalStage = StartupCleaning
+  k = CleanupFailed implies Run.finalStage = Cleaning
+  k = WarningPersistenceFailed implies Run.finalStage = Cleaned
+  k = MarkerInvalidationFailed implies Run.finalStage = WarningRecorded
+  k = SummaryRewriteFailed implies Run.finalStage = MarkerInvalidated
+  k = ManifestRefreshFailed implies Run.finalStage = ManifestRefreshing
+  Run.finalStage' = OutputFailed
+  Run.failed' = True
+  Run.finalFailure' = k
+  Run.completedPhases' = Run.completedPhases
+  Run.findings' = Run.findings
+  Run.reports' = Run.reports
+  Run.manifestPresent' = Run.manifestPresent
+  Run.manifestFiles' = Run.manifestFiles
+  Run.catalog' = Run.catalog
+  Run.catalogReason' = Run.catalogReason
+  Run.coreComplete' = Run.coreComplete
+  Run.reportPresent' = Run.reportPresent
+  Run.reportValid' = Run.reportValid
+  Run.warningPresent' = Run.warningPresent
+  Run.summaryCurrent' = Run.summaryCurrent
+  Run.agentInvoked' = Run.agentInvoked
+  Run.staleManifestPresent' = Run.staleManifestPresent
+  Run.staleManagedOutputPresent' = Run.staleManagedOutputPresent
+  frame_metrics
+  all f : OutputFile | f.pathState' = f.pathState
+}
+
+assert marker_invalidated_before_managed_cleanup {
+  always (Run.finalStage = StartupCleaning implies Run.staleManifestPresent = False)
+}
+
+assert startup_cleanup_establishes_report_absence {
+  always (Run.finalStage = CoreReporting implies
+    FinalReportDestination.reportPathState = Absent)
+}
+
+assert handled_failure_has_no_report_residue {
+  always (Run.finalStage = WarningPersisted implies
+    (Run.reportPresent = False and Run.reportValid = False
+      and FinalReportDestination.reportPathState = Absent))
+}
+
+assert output_failure_never_claims_handled_outcome {
+  always (Run.finalStage = OutputFailed implies
+    Run.finalStage not in ReportAvailable + WarningPersisted)
+}
+```
+
 ### Requirement: Persist Final Report Failure [RAE-FINAL-WARNING]
 IF final-report generation or validation fails and cleanup succeeds, THEN THE spec-check tool SHALL append one well-formed warning with category `reporting.final_report_failed`, rewrite `report_summary.md`, and refresh `manifest.json` after the summary write.
 
 **References:**
-- `openspec/changes/add-final-evidence-report/proposal.md#Postconditions`
-- `openspec/changes/add-final-evidence-report/design.md#System-Invariant-Tactics`
+- `openspec/changes/archive/2026-08-24-add-final-evidence-report/proposal.md#Postconditions`
+- `openspec/changes/archive/2026-08-24-add-final-evidence-report/design.md#System-Invariant-Tactics`
 
 #### Scenario: Record Failure Kind [RAE-FINAL-WARN-KIND]
 WHEN a final-report warning is created, THE warning SHALL contain warning severity, `<reporting>` provenance, a non-empty description and rationale, and evidence naming the stable failure kind.
@@ -736,6 +1588,161 @@ WHEN the warning changes `report_summary.md`, THE spec-check tool SHALL first in
 WHEN the final-report warning is persisted, THE spec-check tool SHALL retain `manifest.json` as the core completion marker and SHALL NOT convert the handled report failure into a fatal pipeline result.
 
 **Postcondition:** The run is complete with an observable warning and no report.
+
+#### Requirement model
+
+```alloy
+// --- Warning persistence and manifest refresh ordering ---
+pred invalidate_warning_manifest {
+  Run.finalStage = WarningRecorded
+  Run.finalStage' = MarkerInvalidated
+  Run.manifestPresent' = False
+  no Run.manifestFiles'
+  no Run.manifestAttemptSets'
+  Run.summaryCurrent' = False
+  Run.agentInvoked' = Run.agentInvoked
+  Run.finalFailure' = Run.finalFailure
+  frame_core_except_manifest
+  Run.reportPresent' = Run.reportPresent
+  Run.reportValid' = Run.reportValid
+  Run.warningPresent' = Run.warningPresent
+  Run.staleManifestPresent' = Run.staleManifestPresent
+  Run.staleManagedOutputPresent' = Run.staleManagedOutputPresent
+  Run.metricsPresent' = Run.metricsPresent
+  Run.metricsChecksummed' = Run.metricsChecksummed
+  Run.metricsListed' = False
+  all f : OutputFile | f.pathState' = f.pathState
+}
+
+pred rewrite_warning_summary {
+  Run.finalStage = MarkerInvalidated
+  Run.manifestPresent = False
+  Run.finalStage' = SummaryRewritten
+  Run.summaryCurrent' = True
+  frame_core_state
+  Run.reportPresent' = Run.reportPresent
+  Run.reportValid' = Run.reportValid
+  Run.warningPresent' = Run.warningPresent
+  Run.agentInvoked' = Run.agentInvoked
+  Run.finalFailure' = Run.finalFailure
+  Run.staleManifestPresent' = Run.staleManifestPresent
+  Run.staleManagedOutputPresent' = Run.staleManagedOutputPresent
+  frame_metrics
+  all f : OutputFile | f.pathState' = f.pathState
+}
+
+pred begin_manifest_refresh {
+  Run.finalStage = SummaryRewritten
+  Run.manifestPresent = False
+  Run.summaryCurrent = True
+  Run.finalStage' = ManifestRefreshing
+  frame_core_and_final_files
+  frame_final_observations
+  Run.finalFailure' = Run.finalFailure
+  Run.agentInvoked' = Run.agentInvoked
+}
+
+pred manifest_refresh_succeeds {
+  Run.finalStage = ManifestRefreshing
+  Run.summaryCurrent = True
+  Run.finalStage' = WarningPersisted
+  Run.manifestPresent' = True
+  Run.manifestFiles' = Run.reports
+  Run.manifestAttemptSets' = { a : AttemptSet | a.finalized = True }
+  Run.completedPhases' = Run.completedPhases
+  Run.findings' = Run.findings
+  Run.reports' = Run.reports
+  Run.failed' = Run.failed
+  Run.catalog' = Run.catalog
+  Run.catalogReason' = Run.catalogReason
+  Run.coreComplete' = Run.coreComplete
+  Run.reportPresent' = Run.reportPresent
+  Run.reportValid' = Run.reportValid
+  Run.warningPresent' = Run.warningPresent
+  Run.summaryCurrent' = Run.summaryCurrent
+  Run.finalFailure' = Run.finalFailure
+  Run.agentInvoked' = Run.agentInvoked
+  Run.staleManifestPresent' = Run.staleManifestPresent
+  Run.staleManagedOutputPresent' = Run.staleManagedOutputPresent
+  Run.metricsPresent' = Run.metricsPresent
+  Run.metricsChecksummed' = Run.metricsChecksummed
+  Run.metricsListed' = Run.telemetryEnabled
+  all f : OutputFile | f.pathState' = f.pathState
+}
+
+assert warning_terminal_postcondition {
+  always (Run.finalStage = WarningPersisted implies {
+    one Run.finalFailure
+    Run.finalFailure in handledFinalFailures
+    Run.warningPresent = True
+    Run.reportPresent = False
+    Run.summaryCurrent = True
+    Run.manifestPresent = True
+    R_Final not in Run.manifestFiles
+  })
+}
+
+assert refresh_window_has_no_stale_manifest {
+  always (Run.finalStage in MarkerInvalidated + SummaryRewritten + ManifestRefreshing
+    implies Run.manifestPresent = False)
+}
+
+assert final_outcomes_are_exclusive {
+  always (lone (Run.finalStage & (ReportAvailable + WarningPersisted + OutputFailed)))
+  always (Run.finalStage = ReportAvailable implies Run.warningPresent = False)
+  always (Run.finalStage = WarningPersisted implies Run.reportPresent = False)
+}
+
+// Action-progress assumptions apply only to liveness. Safety properties above
+// permit arbitrary stuttering and fatal output failure.
+pred final_report_fairness {
+  always (Run.finalStage = Preparing implies eventually begin_startup_cleanup)
+  always (Run.finalStage = StartupCleaning implies eventually
+    (startup_cleanup_succeeds or final_output_fails[StartupCleanupFailed]))
+  always (Run.finalStage = CoreComplete implies eventually
+    (start_final_report or reject_unsafe_path or reject_unadmitted_agent_or_prompt))
+  always (Run.finalStage = Generating implies eventually
+    (generation_returns or some k : generationFinalFailures | generation_fails[k]))
+  always (Run.finalStage = Validating implies eventually
+    (publish_candidate or some k : validationFinalFailures | validation_fails[k]))
+  always (Run.finalStage = PublishedCandidate implies eventually
+    (validation_succeeds or some k : validationFinalFailures | validation_fails[k]))
+  always (Run.finalStage = Cleaning implies eventually
+    (cleanup_succeeds or some k : outputFinalFailures | final_output_fails[k]))
+  always (Run.finalStage = Cleaned implies eventually
+    (persist_final_report_warning or final_output_fails[WarningPersistenceFailed]))
+  always (Run.finalStage = WarningRecorded implies eventually
+    (invalidate_warning_manifest or final_output_fails[MarkerInvalidationFailed]))
+  always (Run.finalStage = MarkerInvalidated implies eventually
+    (rewrite_warning_summary or some k : outputFinalFailures | final_output_fails[k]))
+  always (Run.finalStage = SummaryRewritten implies eventually
+    (begin_manifest_refresh or some k : outputFinalFailures | final_output_fails[k]))
+  always (Run.finalStage = ManifestRefreshing implies eventually
+    (manifest_refresh_succeeds or some k : outputFinalFailures | final_output_fails[k]))
+}
+
+assert completed_core_eventually_attempts_report {
+  final_report_fairness implies always (Run.finalStage = CoreComplete implies
+    eventually Run.finalStage in Generating + Cleaning)
+}
+
+assert completed_core_has_enabled_report_action {
+  always (Run.finalStage = CoreComplete implies
+    (FinalPathBinding.containsPermissionWildcard = False implies
+      (start_final_report_enabled or reject_unadmitted_agent_or_prompt_enabled))
+    and (FinalPathBinding.containsPermissionWildcard = True implies reject_unsafe_path_enabled))
+}
+
+assert startup_cleanup_eventually_terminates {
+  final_report_fairness implies always (Run.finalStage in Preparing + StartupCleaning
+    implies eventually Run.finalStage in CoreReporting + OutputFailed)
+}
+
+assert attempted_report_eventually_terminates {
+  final_report_fairness implies always (Run.finalStage in Generating + Validating + PublishedCandidate
+    implies eventually Run.finalStage in ReportAvailable + WarningPersisted + OutputFailed)
+}
+```
 
 ### Requirement: Preserve Evidence For Every Surfaced Conclusion [RAE-PRESERVE-EVID]
 WHEN the spec-check tool emits a finding or final report conclusion, THE spec-check tool SHALL preserve the provenance, rationale, and supporting artifacts needed for a reviewer to inspect the basis of that conclusion, and SHALL render evidence-bearing report content so that preserved raw values remain inert data rather than report-structure control.
@@ -819,7 +1826,9 @@ pred has_unpreserved_evidence [f : Finding] {
 pred suppress_unsupported_verdict [wouldBe, defect : Finding] {
   // Guard: catalog constructed, run healthy, candidate has unpreserved evidence
   Run.catalog = CatalogConstructed
+  Run.finalStage = CoreReporting
   Run.failed = False
+  R_Summary not in Run.reports
   has_unpreserved_evidence[wouldBe]
   wouldBe not in Run.findings
   defect not in Run.findings
@@ -1217,6 +2226,8 @@ pred frame_all_but_findings {
   Run.failed' = Run.failed
   Run.catalog' = Run.catalog
   Run.catalogReason' = Run.catalogReason
+  frame_final_state
+  frame_metrics
   all f : OutputFile | f.pathState' = f.pathState
 }
 
@@ -1226,7 +2237,9 @@ pred frame_all_but_findings {
 pred emit_finding [f : Finding] {
   // Guard
   Run.catalog = CatalogConstructed
+  Run.finalStage = CoreReporting
   Run.failed = False
+  R_Summary not in Run.reports
   f not in Run.findings
   finding_wellformed[f]
   finding_evidence_preserved[f]
@@ -1243,7 +2256,9 @@ pred emit_finding [f : Finding] {
 pred supersede_finding [original, supersession : Finding] {
   // Guard
   Run.catalog = CatalogConstructed
+  Run.finalStage = CoreReporting
   Run.failed = False
+  R_Summary not in Run.reports
   original in Run.findings
   supersession not in Run.findings
   original != supersession
@@ -1267,12 +2282,7 @@ assert supersede_preserves_original {
 
 ### Requirement: Persist Opt-In Run Metrics [RAE-RUN-METRICS]
 
-WHEN the `SPEC_CHECK_TELEMETRY` environment variable equals `1`, THE spec-check
-tool SHALL atomically write `metrics.json` under the output directory before
-the successful manifest, SHALL include it as a checksummed manifest entry, and
-SHALL record named pipeline phase durations plus every OpenCode subprocess
-attempt including retries, model variant, outcome, token usage, cost, and
-analysis-scope attribution.
+WHEN the `SPEC_CHECK_TELEMETRY` environment variable equals `1`, THE spec-check tool SHALL atomically write `metrics.json` under the output directory before the successful manifest, SHALL include it as a checksummed manifest entry, and SHALL record named pipeline phase durations plus every OpenCode subprocess attempt before core completion, including retries, model variant, outcome, token usage, cost, and analysis-scope attribution. The post-completion final-report attempt SHALL remain in in-memory telemetry and SHALL NOT mutate the core `metrics.json` snapshot.
 
 #### Scenario: Metrics Reconcile Attempt And Phase Totals [RAE-METRICS-RECONCILE]
 
@@ -1300,6 +2310,202 @@ marker.
 - Implementation: [run-cli.ts: runReportingPhase()](/src/cli/run-cli.ts)
 - Test: [metrics.test.ts: reconciles phase and run totals and returns its checksum](/test/contract/metrics.test.ts)
 
+#### Requirement model
+
+```alloy
+// --- Opt-in core metrics snapshot ---
+abstract sig TelemetryPhase {}
+one sig CoreOpenCodePhase, FinalReportTelemetryPhase extends TelemetryPhase {}
+abstract sig PipelinePhaseName {}
+one sig ReportingPhaseName, FormalizationPhaseName extends PipelinePhaseName {}
+abstract sig AnalysisScope {}
+one sig SpecsScope, GeneratedScope, FinalReportScope extends AnalysisScope {}
+abstract sig AttemptOutcome {}
+one sig AttemptSucceeded, AttemptFailed extends AttemptOutcome {}
+abstract sig DurationUnit {}
+one sig DurationA, DurationB, DurationFinal extends DurationUnit {}
+abstract sig TokenUnit {}
+one sig TokenA, TokenB, TokenFinal extends TokenUnit {}
+abstract sig CostUnit {}
+one sig CostA, CostB, CostFinal extends CostUnit {}
+abstract sig ModelVariant {}
+one sig DefaultVariant, ReasoningVariant extends ModelVariant {}
+abstract sig TelemetryAttempt {
+  attemptPhase : one TelemetryPhase,
+  pipelinePhase : one PipelinePhaseName,
+  attemptScope : one AnalysisScope,
+  outcome : one AttemptOutcome,
+  modelVariant : one ModelVariant,
+  retryOf : lone TelemetryAttempt,
+  durationUnits : some DurationUnit,
+  tokenUnits : some TokenUnit,
+  costUnits : some CostUnit
+}
+one sig CoreAttemptA, CoreAttemptB, FinalReportAttempt extends TelemetryAttempt {}
+abstract sig PipelinePhaseDuration {
+  phaseName : one PipelinePhaseName,
+  durationUnits : some DurationUnit
+}
+one sig ReportingDuration, FormalizationDuration extends PipelinePhaseDuration {}
+fact pipeline_phase_duration_kinds {
+  ReportingDuration.phaseName = ReportingPhaseName
+  ReportingDuration.durationUnits = DurationA
+  FormalizationDuration.phaseName = FormalizationPhaseName
+  FormalizationDuration.durationUnits = DurationA + DurationB
+  DurationFinal not in MetricsSnapshot.phaseDurations.durationUnits
+}
+one sig MetricsSnapshot {
+  persistedAttempts : set TelemetryAttempt,
+  phaseDurations : set PipelinePhaseDuration,
+  scopeTotalsCover : set AnalysisScope,
+  durationTotal : set DurationUnit,
+  tokenTotal : set TokenUnit,
+  costTotal : set CostUnit
+}
+
+fact telemetry_attempt_kinds {
+  CoreAttemptA.attemptPhase = CoreOpenCodePhase
+  CoreAttemptB.attemptPhase = CoreOpenCodePhase
+  FinalReportAttempt.attemptPhase = FinalReportTelemetryPhase
+  CoreAttemptA.pipelinePhase = FormalizationPhaseName
+  CoreAttemptB.pipelinePhase = FormalizationPhaseName
+  FinalReportAttempt.pipelinePhase = ReportingPhaseName
+  CoreAttemptA.attemptScope = SpecsScope
+  CoreAttemptB.attemptScope = GeneratedScope
+  FinalReportAttempt.attemptScope = FinalReportScope
+  CoreAttemptA.outcome = AttemptFailed
+  CoreAttemptB.outcome = AttemptSucceeded
+  FinalReportAttempt.outcome = AttemptSucceeded
+  CoreAttemptA.modelVariant = DefaultVariant
+  CoreAttemptB.modelVariant = ReasoningVariant
+  FinalReportAttempt.modelVariant = ReasoningVariant
+  no CoreAttemptA.retryOf
+  CoreAttemptB.retryOf = CoreAttemptA
+  no FinalReportAttempt.retryOf
+  CoreAttemptA.durationUnits = DurationA
+  CoreAttemptB.durationUnits = DurationB
+  FinalReportAttempt.durationUnits = DurationFinal
+  CoreAttemptA.tokenUnits = TokenA
+  CoreAttemptB.tokenUnits = TokenB
+  FinalReportAttempt.tokenUnits = TokenFinal
+  CoreAttemptA.costUnits = CostA
+  CoreAttemptB.costUnits = CostB
+  FinalReportAttempt.costUnits = CostFinal
+}
+
+fact metrics_snapshot_inventory {
+  MetricsSnapshot.persistedAttempts = coreAttempts
+  MetricsSnapshot.phaseDurations = PipelinePhaseDuration
+  MetricsSnapshot.scopeTotalsCover = coreAttempts.attemptScope
+  MetricsSnapshot.durationTotal = coreAttempts.durationUnits
+  MetricsSnapshot.tokenTotal = coreAttempts.tokenUnits
+  MetricsSnapshot.costTotal = coreAttempts.costUnits
+}
+
+// The persisted snapshot contains exactly pre-completion attempts. Set equality
+// is the relational counterpart of reconciling totals by summing each attempt
+// exactly once; grouping by attemptScope gives the same scope partition.
+fun coreAttempts : set TelemetryAttempt {
+  { a : TelemetryAttempt | a.attemptPhase = CoreOpenCodePhase }
+}
+
+fun finalReportAttempts : set TelemetryAttempt {
+  { a : TelemetryAttempt | a.attemptPhase = FinalReportTelemetryPhase }
+}
+
+pred write_metrics {
+  Run.telemetryEnabled = True
+  Run.failed = False
+  requiredReports in Run.reports
+  Run.metricsPresent = False
+  Run.finalStage = CoreReporting
+  Run.metricsPresent' = True
+  Run.metricsChecksummed' = True
+  Run.metricsListed' = False
+  Run.completedPhases' = Run.completedPhases
+  Run.findings' = Run.findings
+  Run.reports' = Run.reports
+  Run.manifestPresent' = Run.manifestPresent
+  Run.manifestFiles' = Run.manifestFiles
+  Run.failed' = Run.failed
+  Run.catalog' = Run.catalog
+  Run.catalogReason' = Run.catalogReason
+  Run.finalStage' = Run.finalStage
+  Run.coreComplete' = Run.coreComplete
+  Run.reportPresent' = Run.reportPresent
+  Run.reportValid' = Run.reportValid
+  Run.warningPresent' = Run.warningPresent
+  Run.summaryCurrent' = Run.summaryCurrent
+  Run.finalFailure' = Run.finalFailure
+  Run.agentInvoked' = Run.agentInvoked
+  Run.staleManifestPresent' = Run.staleManifestPresent
+  Run.staleManagedOutputPresent' = Run.staleManagedOutputPresent
+  all f : OutputFile | f.pathState' = f.pathState
+}
+
+assert metrics_opt_in_only {
+  always (Run.telemetryEnabled = False implies Run.metricsPresent = False)
+}
+
+assert persisted_attempts_reconcile {
+  always (Run.metricsPresent = True implies {
+    MetricsSnapshot.persistedAttempts = coreAttempts
+    no (MetricsSnapshot.persistedAttempts & finalReportAttempts)
+    MetricsSnapshot.scopeTotalsCover
+      = MetricsSnapshot.persistedAttempts.attemptScope
+    MetricsSnapshot.durationTotal
+      = MetricsSnapshot.persistedAttempts.durationUnits
+    MetricsSnapshot.tokenTotal
+      = MetricsSnapshot.persistedAttempts.tokenUnits
+    MetricsSnapshot.costTotal
+      = MetricsSnapshot.persistedAttempts.costUnits
+    all s : MetricsSnapshot.scopeTotalsCover |
+      some a : MetricsSnapshot.persistedAttempts | a.attemptScope = s
+  })
+}
+
+assert retry_and_resource_inventory_reconcile {
+  CoreAttemptB.retryOf = CoreAttemptA
+  CoreAttemptA.outcome = AttemptFailed
+  CoreAttemptB.outcome = AttemptSucceeded
+  MetricsSnapshot.durationTotal = DurationA + DurationB
+  MetricsSnapshot.tokenTotal = TokenA + TokenB
+  MetricsSnapshot.costTotal = CostA + CostB
+  FinalReportAttempt not in MetricsSnapshot.persistedAttempts
+  all a : MetricsSnapshot.persistedAttempts | {
+    one a.pipelinePhase
+    one a.modelVariant
+    one a.outcome
+  }
+  all p : PipelinePhaseName |
+    some d : MetricsSnapshot.phaseDurations | d.phaseName = p
+}
+
+assert metrics_precede_completion_manifest {
+  always (Run.manifestPresent = True and Run.telemetryEnabled = True implies {
+    Run.metricsPresent = True
+    Run.metricsChecksummed = True
+    Run.metricsListed = True
+  })
+}
+
+assert metrics_listing_matches_manifest_presence {
+  always (Run.telemetryEnabled = True implies
+    (Run.metricsListed = True iff Run.manifestPresent = True))
+}
+
+// Post-completion telemetry cannot make the core snapshot stale because it is
+// deliberately outside the snapshot and does not rewrite metrics.
+assert final_report_does_not_mutate_metrics {
+  always (Run.finalStage in Generating + Validating + PublishedCandidate + Cleaning + Cleaned + WarningRecorded
+    + MarkerInvalidated + SummaryRewritten + ManifestRefreshing
+    + ReportAvailable + WarningPersisted + OutputFailed implies {
+      Run.metricsPresent' = Run.metricsPresent
+      Run.metricsChecksummed' = Run.metricsChecksummed
+    })
+}
+```
+
 ### Requirement: Complete Runs With Atomic Manifest Semantics [RAE-ATOMIC-MANIFEST]
 WHEN the spec-check tool writes core output artifacts, THE spec-check tool SHALL atomically finalize each core artifact, SHALL permit separate formalization attempt-evidence files to exist before successful core completion, and SHALL write `manifest.json` after all core artifacts as the sole core-run success marker. The successful manifest SHALL list every produced attempt-evidence file and its SHA-256 checksum together with the other produced core output files. The optional post-completion `report.md` MAY be written after that marker and SHALL remain outside the manifest.
 
@@ -1307,12 +2513,8 @@ WHEN the spec-check tool writes core output artifacts, THE spec-check tool SHALL
 - `openspec/specs/reporting-and-evidence/spec.md#Requirement-Complete-Runs-With-Atomic-Manifest-Semantics-RAE-ATOMIC-MANIFEST`
 - `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Preconditions-Postconditions-and-Invariants`
 - `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Data-Design`
-- `openspec/changes/add-final-evidence-report/proposal.md#Preconditions-Postconditions-and-Invariants`
-- `openspec/changes/add-final-evidence-report/design.md#Interaction-Protocols`
-
-#### Requirement model
-
-[`alloy/final-report.als`](alloy/final-report.als) checks that core completion precedes report generation, remains monotonic, excludes the report from manifested files, and is preserved by both final-report outcomes.
+- `openspec/changes/archive/2026-08-24-add-final-evidence-report/proposal.md#Preconditions-Postconditions-and-Invariants`
+- `openspec/changes/archive/2026-08-24-add-final-evidence-report/design.md#Interaction-Protocols`
 
 #### Scenario: Successful Manifest Covers Attempt Evidence [RAE-MANIFEST-ATTEMPT-EVIDENCE]
 WHEN a run completes core analysis after producing one or more `FormalizationAttemptSet` files, THE spec-check tool SHALL write the manifest after those files and SHALL include one entry per file with its relative path and matching SHA-256 checksum.
@@ -1375,9 +2577,13 @@ pred write_manifest {
   // Guard: all required reports written, not failed
   requiredReports in Run.reports
   Run.failed = False
+  Run.reportsAtomicallyComplete = True
+  Run.telemetryEnabled = True implies
+    (Run.metricsPresent = True and Run.metricsChecksummed = True and Run.metricsListed = False)
   // Effect: manifest present and lists exactly the produced reports
   Run.manifestPresent' = True
   Run.manifestFiles' = Run.reports
+  Run.manifestAttemptSets' = { a : AttemptSet | a.finalized = True }
   // Frame
   Run.completedPhases' = Run.completedPhases
   Run.findings' = Run.findings
@@ -1385,6 +2591,23 @@ pred write_manifest {
   Run.failed' = Run.failed
   Run.catalog' = Run.catalog
   Run.catalogReason' = Run.catalogReason
+  // The first manifest write establishes core completion. Warning refresh uses
+  // its dedicated post-completion event instead.
+  Run.finalStage = CoreReporting
+  Run.finalStage' = CoreComplete
+  Run.coreComplete' = True
+  Run.reportPresent' = Run.reportPresent
+  Run.reportValid' = Run.reportValid
+  Run.warningPresent' = Run.warningPresent
+  Run.summaryCurrent' = True
+  Run.finalFailure' = Run.finalFailure
+  Run.agentInvoked' = Run.agentInvoked
+  Run.staleManifestPresent' = Run.staleManifestPresent
+  Run.staleManagedOutputPresent' = Run.staleManagedOutputPresent
+  Run.metricsPresent' = Run.metricsPresent
+  Run.metricsChecksummed' = Run.metricsChecksummed
+  Run.metricsListed' = Run.telemetryEnabled
+  Run.reportsAtomicallyComplete' = Run.reportsAtomicallyComplete
 }
 
 pred remove_stale_manifest {
@@ -1394,6 +2617,7 @@ pred remove_stale_manifest {
   // Effect: manifest removed
   Run.manifestPresent' = False
   Run.manifestFiles' = Run.manifestFiles
+  Run.manifestAttemptSets' = Run.manifestAttemptSets
   // Frame
   Run.completedPhases' = Run.completedPhases
   Run.findings' = Run.findings
@@ -1401,12 +2625,15 @@ pred remove_stale_manifest {
   Run.failed' = Run.failed
   Run.catalog' = Run.catalog
   Run.catalogReason' = Run.catalogReason
+  frame_final_state
+  frame_metrics
 }
 
 pred run_fails {
   // Guard
   Run.failed = False
   Run.manifestPresent = False    // cannot fail after manifest written (run is complete)
+  Run.finalStage = CoreReporting
   // Effect: run marked as failed
   Run.failed' = True
   // Frame: state frozen
@@ -1415,8 +2642,11 @@ pred run_fails {
   Run.reports' = Run.reports
   Run.manifestPresent' = Run.manifestPresent
   Run.manifestFiles' = Run.manifestFiles
+  Run.manifestAttemptSets' = Run.manifestAttemptSets
   Run.catalog' = Run.catalog
   Run.catalogReason' = Run.catalogReason
+  frame_final_state
+  frame_metrics
 }
 
 // Safety: manifest only present when all required reports are written
@@ -1426,7 +2656,8 @@ assert manifest_implies_complete {
 
 // Safety: failed runs never have a manifest
 assert no_manifest_on_failure {
-  always (Run.failed = True implies Run.manifestPresent = False)
+  always ((Run.failed = True and Run.coreComplete = False)
+    implies Run.manifestPresent = False)
 }
 
 // Safety: manifest is written AFTER all reports (temporal ordering)
@@ -1444,6 +2675,11 @@ assert manifest_written_last {
 // manifest_entries_describe_run defers to.
 assert manifest_lists_all_reports {
   always (Run.manifestPresent = True implies Run.reports in Run.manifestFiles)
+}
+
+assert manifest_lists_all_finalized_attempt_sets {
+  always (Run.manifestPresent = True implies
+    Run.manifestAttemptSets = { a : AttemptSet | a.finalized = True })
 }
 
 // Liveness: stale manifests are removed before analysis begins
@@ -1523,6 +2759,9 @@ pred init_attempt_sets { all a : AttemptSet | a.finalized = False }
 // invocations happen). Other pipeline events do not clear it -- see the
 // attempt_evidence_monotonic fact -- so no per-event frame is required.
 pred finalize_attempt_set [a : AttemptSet] {
+  Run.finalStage = CoreReporting
+  Run.manifestPresent = False
+  Run.failed = False
   a.finalized = False
   a.finalized' = True
   all a2 : AttemptSet - a | a2.finalized' = a2.finalized
@@ -1535,6 +2774,8 @@ pred finalize_attempt_set [a : AttemptSet] {
   Run.failed' = Run.failed
   Run.catalog' = Run.catalog
   Run.catalogReason' = Run.catalogReason
+  frame_final_state
+  frame_metrics
   all f : OutputFile | f.pathState' = f.pathState
 }
 
@@ -1546,13 +2787,26 @@ fact attempt_evidence_monotonic {
   always (all a : AttemptSet | a.finalized = True implies a.finalized' = True)
 }
 
+// No post-completion or terminal event may create new formalization evidence.
+fact non_formalization_events_frame_attempt_sets {
+  always ((not (some a : AttemptSet | finalize_attempt_set[a])) implies
+    (all a : AttemptSet | a.finalized' = a.finalized))
+}
+
+assert attempt_evidence_finalizes_before_core_completion {
+  always (all a : AttemptSet |
+    (a.finalized = False and a.finalized' = True) implies
+      (Run.finalStage = CoreReporting and Run.manifestPresent = False))
+}
+
 // Safety [RAE-FORMAL-ATTEMPT-SETS]: an attempt-set file is never a completion
 // marker. The load-bearing form: a finalized attempt set can coexist with an
 // absent manifest on a failed run (evidence survives failure; it does not mark
 // success).
 assert evidence_survives_failure_without_manifest {
   always (all a : AttemptSet |
-    (a.finalized = True and Run.failed = True) implies Run.manifestPresent = False)
+    (a.finalized = True and Run.failed = True and Run.coreComplete = False)
+      implies Run.manifestPresent = False)
 }
 
 // Safety [RAE-FORMAL-ATTEMPT-ATOMIC]: every finalized file has exactly one claim
@@ -1565,22 +2819,26 @@ assert one_namespace_per_file {
 // did not fail, so any evidence produced belongs to a successful run and is
 // listed alongside other outputs (report-level coverage is manifest_lists_all_reports).
 assert manifest_present_implies_run_succeeded {
-  always (Run.manifestPresent = True implies Run.failed = False)
+  // A fatal post-completion output failure may preserve the already-valid core
+  // manifest if marker invalidation has not yet occurred. Before core completion,
+  // however, no failed run may expose a completion marker.
+  always ((Run.manifestPresent = True and Run.coreComplete = False)
+    implies Run.failed = False)
 }
 
 check evidence_survives_failure_without_manifest for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 2 AttemptSet, 2 Capability, 2 Ordinal, 2 ClaimSetKind, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 2 AttemptSet, 2 Capability, 2 Ordinal, 2 ClaimSetKind, 10 steps expect 0
 check one_namespace_per_file for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 2 AttemptSet, 2 Capability, 2 Ordinal, 2 ClaimSetKind, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 2 AttemptSet, 2 Capability, 2 Ordinal, 2 ClaimSetKind, 10 steps expect 0
 check manifest_present_implies_run_succeeded for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 2 AttemptSet, 2 Capability, 2 Ordinal, 2 ClaimSetKind, 12 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 2 AttemptSet, 2 Capability, 2 Ordinal, 2 ClaimSetKind, 12 steps expect 0
 
 // Non-vacuity: a finalized evidence file coexisting with a failed run and no
 // manifest is reachable (RAE-FORMAL-ATTEMPT-FAILED-RUN).
 run attempt_evidence_survives_failure {
   eventually (some a : AttemptSet | a.finalized = True and Run.failed = True and Run.manifestPresent = False)
 } for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 2 AttemptSet, 2 Capability, 2 Ordinal, 2 ClaimSetKind, 10 steps expect 1
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 2 AttemptSet, 2 Capability, 2 Ordinal, 2 ClaimSetKind, 10 steps expect 1
 
 // Non-vacuity: both claim-set namespaces (specs_forward and per-capability
 // generated_spec with an ordinal) are representable as distinct files.
@@ -1589,7 +2847,7 @@ run both_claimset_namespaces {
     a1.claimSetKind = SpecsForward
     and a2.claimSetKind = GeneratedSpec and some a2.ordinal
 } for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 2 AttemptSet, 2 Capability, 2 Ordinal, 8 steps expect 1
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 2 AttemptSet, 2 Capability, 2 Ordinal, 8 steps expect 1
 ```
 
 #### Scenario: Persist Separate Atomic File Per Invocation [RAE-FORMAL-ATTEMPT-ATOMIC]
@@ -1669,12 +2927,17 @@ hash.length; //=> 64
 
 // Every manifest entry references an actually-written report
 pred manifest_entries_valid [entries : set ManifestEntry] {
-  // Every entry references a written report
-  all e : entries | e.entryReport in Run.reports
+  // Every entry references one produced artifact class.
+  all e : entries |
+    (some e.entryReport implies e.entryReport in Run.reports)
+    and (some e.entryAttemptSet implies e.entryAttemptSet.finalized = True)
+    and (some e.entryMetrics implies Run.metricsPresent = True)
   // Every entry has a valid checksum
   all e : entries | e.checksumValid = True
   // Every entry references a phase that was completed
-  all e : entries | e.entryPhase in Run.completedPhases
+  all e : entries |
+    no e.entryReport or e.entryReport = R_Summary
+      or e.entryPhase in reportManifestPhase[phaseToReport[Run.completedPhases]]
   // Coverage: every written report has an entry
   all r : Run.reports | some e : entries | e.entryReport = r
 }
@@ -1691,21 +2954,50 @@ pred manifest_entries_valid [entries : set ManifestEntry] {
 fact manifest_entries_describe_run {
   always (Run.manifestPresent = True implies
     (all e : ManifestEntry |
-      e.entryReport in Run.reports and
-      e.entryPhase in Run.completedPhases and
+      (some e.entryReport implies e.entryReport in Run.reports) and
+      (some e.entryAttemptSet implies e.entryAttemptSet in Run.manifestAttemptSets) and
+      (some e.entryMetrics implies Run.metricsListed = True) and
+      (no e.entryReport or e.entryReport = R_Summary
+        or e.entryPhase in reportManifestPhase[phaseToReport[Run.completedPhases]]) and
       e.checksumValid = True))
+}
+
+pred complete_manifest_entries {
+  {
+    all r : Run.reports |
+      one e : ManifestEntry | {
+        e.entryReport = r
+        e.checksumValid = True
+        r != R_Summary implies one e.entryPhase
+      }
+    all a : Run.manifestAttemptSets |
+      one e : ManifestEntry | e.entryAttemptSet = a and e.checksumValid = True
+    Run.telemetryEnabled = True implies
+      one e : ManifestEntry | e.entryMetrics = MetricsFile and e.checksumValid = True
+  }
+}
+
+fact manifest_entries_cover_nonreport_artifacts {
+  always (Run.manifestPresent = True implies complete_manifest_entries)
 }
 
 // Safety: manifest entries always reference existing reports
 assert manifest_entries_match_files {
   always (Run.manifestPresent = True implies
-    (all e : ManifestEntry | e.entryReport in Run.reports))
+    (all e : ManifestEntry |
+      (some e.entryReport implies e.entryReport in Run.reports)
+      and (some e.entryAttemptSet implies e.entryAttemptSet in Run.manifestAttemptSets)
+      and (some e.entryMetrics implies Run.metricsListed = True)))
 }
 
 // Safety: manifest entries have valid checksums
 assert manifest_checksums_valid {
   always (Run.manifestPresent = True implies
     (all e : ManifestEntry | e.checksumValid = True))
+}
+
+assert manifest_entries_cover_attempt_sets_and_metrics {
+  always (Run.manifestPresent = True implies complete_manifest_entries)
 }
 ```
 
@@ -1826,27 +3118,25 @@ IF the process is interrupted during an output file write, THEN the final path S
 ```alloy
 // --- Atomic writes: temp-file-then-rename protocol ---
 
-// Model the write lifecycle as states of a file path
-abstract sig FilePathState {}
-one sig Absent, TempWriting, FinalComplete extends FilePathState {}
-
-sig OutputFile {
-  var pathState : one FilePathState
-}
-
 pred atomic_write_success [f : OutputFile] {
   // Guard: path is currently absent (no prior content)
+  Run.finalStage = CoreReporting
+  Run.failed = False
   f.pathState = Absent
   // Effect: transitions through temp to final atomically
   // In the model, the final state is FinalComplete (temp is invisible to consumers)
   f.pathState' = FinalComplete
+  all other : OutputFile - f | other.pathState' = other.pathState
 }
 
 pred atomic_write_interrupt [f : OutputFile] {
   // Guard: write was in progress (temp file exists)
+  Run.finalStage = CoreReporting
+  Run.failed = False
   f.pathState = Absent or f.pathState = TempWriting
   // Effect: final path stays absent (only temp may be orphaned)
   f.pathState' = Absent
+  all other : OutputFile - f | other.pathState' = other.pathState
 }
 
 // Safety: final path never contains partial content
@@ -1868,7 +3158,7 @@ fact no_temp_at_final {
 }
 ```
 
-### State machine and invariant checks
+#### System model: State machine and invariant checks
 
 ```alloy
 // --- Transition system ---
@@ -1882,7 +3172,75 @@ pred stutter {
   Run.failed' = Run.failed
   Run.catalog' = Run.catalog
   Run.catalogReason' = Run.catalogReason
+  frame_final_state
+  frame_metrics
   all f : OutputFile | f.pathState' = f.pathState
+}
+
+// Shared complete frames for the extended Run state. These are used by every
+// event that does not own the post-completion lifecycle or metrics snapshot.
+pred frame_final_state {
+  Run.finalStage' = Run.finalStage
+  Run.coreComplete' = Run.coreComplete
+  Run.reportPresent' = Run.reportPresent
+  Run.reportValid' = Run.reportValid
+  Run.warningPresent' = Run.warningPresent
+  Run.summaryCurrent' = Run.summaryCurrent
+  Run.finalFailure' = Run.finalFailure
+  Run.agentInvoked' = Run.agentInvoked
+  Run.staleManifestPresent' = Run.staleManifestPresent
+  Run.staleManagedOutputPresent' = Run.staleManagedOutputPresent
+}
+
+pred frame_metrics {
+  Run.metricsPresent' = Run.metricsPresent
+  Run.metricsChecksummed' = Run.metricsChecksummed
+  Run.metricsListed' = Run.metricsListed
+  Run.reportsAtomicallyComplete' = Run.reportsAtomicallyComplete
+}
+
+pred frame_core_state {
+  Run.completedPhases' = Run.completedPhases
+  Run.findings' = Run.findings
+  Run.reports' = Run.reports
+  Run.manifestPresent' = Run.manifestPresent
+  Run.manifestFiles' = Run.manifestFiles
+  Run.failed' = Run.failed
+  Run.catalog' = Run.catalog
+  Run.catalogReason' = Run.catalogReason
+  Run.coreComplete' = Run.coreComplete
+}
+
+pred frame_core_except_manifest {
+  Run.completedPhases' = Run.completedPhases
+  Run.findings' = Run.findings
+  Run.reports' = Run.reports
+  Run.failed' = Run.failed
+  Run.catalog' = Run.catalog
+  Run.catalogReason' = Run.catalogReason
+  Run.coreComplete' = Run.coreComplete
+}
+
+pred frame_core_and_final_files {
+  frame_core_state
+  Run.reportPresent' = Run.reportPresent
+  Run.reportValid' = Run.reportValid
+  Run.warningPresent' = Run.warningPresent
+  Run.summaryCurrent' = Run.summaryCurrent
+  Run.staleManifestPresent' = Run.staleManifestPresent
+  Run.staleManagedOutputPresent' = Run.staleManagedOutputPresent
+  frame_metrics
+  all f : OutputFile | f.pathState' = f.pathState
+}
+
+pred frame_final_observations {
+  Run.reportPresent' = Run.reportPresent
+  Run.reportValid' = Run.reportValid
+  Run.warningPresent' = Run.warningPresent
+  Run.summaryCurrent' = Run.summaryCurrent
+  Run.staleManifestPresent' = Run.staleManifestPresent
+  Run.staleManagedOutputPresent' = Run.staleManagedOutputPresent
+  frame_metrics
 }
 
 // --- Catalog construction events (RAE-CATALOG-ERROR) ---
@@ -1892,6 +3250,7 @@ pred construct_catalog {
   // Guard: catalog not yet decided
   Run.catalog = CatalogPending
   Run.failed = False
+  Run.finalStage = CoreReporting
   // Effect: catalog is constructed; phases may now run
   Run.catalog' = CatalogConstructed
   // Frame
@@ -1902,6 +3261,8 @@ pred construct_catalog {
   Run.manifestFiles' = Run.manifestFiles
   Run.failed' = Run.failed
   Run.catalogReason' = Run.catalogReason
+  frame_final_state
+  frame_metrics
   all f : OutputFile | f.pathState' = f.pathState
 }
 
@@ -1911,6 +3272,7 @@ pred construct_catalog {
 pred abort_catalog [r : CatalogEmptyReason] {
   // Guard: catalog not yet decided, nothing produced yet
   Run.catalog = CatalogPending
+  Run.finalStage = CoreReporting
   no Run.completedPhases
   no Run.reports
   Run.failed = False
@@ -1924,6 +3286,8 @@ pred abort_catalog [r : CatalogEmptyReason] {
   Run.reports' = Run.reports
   Run.manifestPresent' = Run.manifestPresent
   Run.manifestFiles' = Run.manifestFiles
+  frame_final_state
+  frame_metrics
   all f : OutputFile | f.pathState' = f.pathState
 }
 
@@ -1931,9 +3295,11 @@ pred write_summary {
   // Guard: all enabled phases completed
   enabledPhases in Run.completedPhases
   Run.failed = False
+  Run.finalStage = CoreReporting
   R_Summary not in Run.reports
   // Effect: summary report added
   Run.reports' = Run.reports + R_Summary
+  Run.reportsAtomicallyComplete' = Run.reportsAtomicallyComplete
   // Frame
   Run.completedPhases' = Run.completedPhases
   Run.findings' = Run.findings
@@ -1942,7 +3308,32 @@ pred write_summary {
   Run.failed' = Run.failed
   Run.catalog' = Run.catalog
   Run.catalogReason' = Run.catalogReason
+  frame_final_state
+  Run.metricsPresent' = Run.metricsPresent
+  Run.metricsChecksummed' = Run.metricsChecksummed
+  Run.metricsListed' = Run.metricsListed
   all f : OutputFile | f.pathState' = f.pathState
+}
+
+pred finalize_core_reports {
+  requiredReports in Run.reports
+  Run.failed = False
+  Run.finalStage = CoreReporting
+  Run.reportsAtomicallyComplete = False
+  Run.reportsAtomicallyComplete' = True
+  Run.completedPhases' = Run.completedPhases
+  Run.findings' = Run.findings
+  Run.reports' = Run.reports
+  Run.manifestPresent' = Run.manifestPresent
+  Run.manifestFiles' = Run.manifestFiles
+  Run.failed' = Run.failed
+  Run.catalog' = Run.catalog
+  Run.catalogReason' = Run.catalogReason
+  frame_final_state
+  Run.metricsPresent' = Run.metricsPresent
+  Run.metricsChecksummed' = Run.metricsChecksummed
+  Run.metricsListed' = Run.metricsListed
+  all f : OutputFile | f.pathState' = FinalComplete
 }
 
 pred init_state {
@@ -1953,15 +3344,34 @@ pred init_state {
   no Run.reports
   Run.manifestPresent = False
   no Run.manifestFiles
+  no Run.manifestAttemptSets
   Run.failed = False
+  Run.finalStage = Preparing
+  Run.coreComplete = False
+  Run.reportPresent = False
+  Run.reportValid = False
+  Run.warningPresent = False
+  Run.summaryCurrent = False
+  no Run.finalFailure
+  Run.agentInvoked = False
+  // Prior-run residue is unconstrained at state 0; cleanup invalidates/removes it.
+  Run.metricsPresent = False
+  Run.metricsChecksummed = False
+  Run.metricsListed = False
+  Run.reportsAtomicallyComplete = False
+  ReportReadBack.readStage = MetadataPending
   all f : OutputFile | f.pathState = Absent
   all a : AttemptSet | a.finalized = False
 }
 
 fact transitions {
   init_state and always (
+    // Run-start managed-output cleanup and stale-marker invalidation
+    begin_startup_cleanup
+    or startup_cleanup_succeeds
+    or final_output_fails[StartupCleanupFailed]
     // Catalog construction (must precede any phase)
-    construct_catalog
+    or construct_catalog
     or (some r : CatalogEmptyReason | abort_catalog[r])
     // Phase execution
     or (some p : Phase | complete_phase[p])
@@ -1971,9 +3381,30 @@ fact transitions {
     or (some o, s : Finding | supersede_finding[o, s])
     // Summary generation
     or write_summary
+    or finalize_core_reports
     // Manifest
     or write_manifest
     or remove_stale_manifest
+    // Optional post-completion final report
+    or start_final_report
+    or reject_unsafe_path
+    or reject_unadmitted_agent_or_prompt
+    or generation_returns
+    or (some k : generationFinalFailures | generation_fails[k])
+    or publish_candidate
+    or inspect_report_metadata
+    or read_report_content
+    or validation_succeeds
+    or (some k : validationFinalFailures | validation_fails[k])
+    or cleanup_succeeds
+    or persist_final_report_warning
+    or invalidate_warning_manifest
+    or rewrite_warning_summary
+    or begin_manifest_refresh
+    or manifest_refresh_succeeds
+    or (some k : outputFinalFailures | final_output_fails[k])
+    // Opt-in core metrics snapshot
+    or write_metrics
     // Failure
     or run_fails
     // File operations
@@ -2014,7 +3445,44 @@ fact file_ops_frame_run {
     Run.manifestFiles' = Run.manifestFiles and
     Run.failed' = Run.failed and
     Run.catalog' = Run.catalog and
-    Run.catalogReason' = Run.catalogReason))
+    Run.catalogReason' = Run.catalogReason and
+    Run.finalStage' = Run.finalStage and
+    Run.coreComplete' = Run.coreComplete and
+    Run.reportPresent' = Run.reportPresent and
+    Run.reportValid' = Run.reportValid and
+    Run.warningPresent' = Run.warningPresent and
+    Run.summaryCurrent' = Run.summaryCurrent and
+    Run.finalFailure' = Run.finalFailure and
+    Run.agentInvoked' = Run.agentInvoked and
+    Run.staleManifestPresent' = Run.staleManifestPresent and
+    Run.staleManagedOutputPresent' = Run.staleManagedOutputPresent and
+    Run.metricsPresent' = Run.metricsPresent and
+    Run.metricsChecksummed' = Run.metricsChecksummed and
+    Run.metricsListed' = Run.metricsListed))
+}
+
+// Only trusted final-report publication and cleanup own the designated path.
+fact non_final_report_events_frame_destination {
+  always ((not startup_cleanup_succeeds and not publish_candidate
+      and not cleanup_succeeds and not persist_final_report_warning) implies
+    FinalReportDestination.reportPathState' = FinalReportDestination.reportPathState)
+}
+
+fact non_readback_events_frame_read_stage {
+  always ((not inspect_report_metadata and not read_report_content) implies
+    ReportReadBack.readStage' = ReportReadBack.readStage)
+}
+
+fact non_report_completion_events_frame_atomic_completion {
+  always ((not (some p : Phase | complete_phase[p]) and not finalize_core_reports) implies
+    Run.reportsAtomicallyComplete' = Run.reportsAtomicallyComplete)
+}
+
+// Manifest attempt evidence changes only with marker publication/invalidation.
+fact non_manifest_events_frame_attempt_inventory {
+  always ((not write_manifest and not invalidate_warning_manifest
+      and not manifest_refresh_succeeds) implies
+    Run.manifestAttemptSets' = Run.manifestAttemptSets)
 }
 
 // --- Analysis rule: only well-formed findings enter the pipeline ---
@@ -2036,25 +3504,43 @@ pred pipeline_fairness {
   and (all p : Phase |
     (eventually always complete_phase_enabled[p]) implies (always eventually complete_phase[p]))
   and ((eventually always write_summary_enabled) implies (always eventually write_summary))
+  and ((eventually always finalize_core_reports_enabled) implies
+    (always eventually finalize_core_reports))
+  and ((eventually always write_metrics_enabled) implies (always eventually write_metrics))
   and ((eventually always write_manifest_enabled) implies (always eventually write_manifest))
 }
 
 // Enabling guards (the guard portion of each event), used by the fairness
 // premises above so a continuously-enabled step must eventually be taken.
 pred construct_catalog_enabled {
-  Run.catalog = CatalogPending and Run.failed = False
+  Run.catalog = CatalogPending and Run.failed = False and Run.finalStage = CoreReporting
 }
 pred complete_phase_enabled [p : Phase] {
   p not in Run.completedPhases and p in enabledPhases
   and Run.catalog = CatalogConstructed and Run.failed = False
+  and Run.finalStage = CoreReporting
   and Run.manifestPresent = False
 }
 pred write_summary_enabled {
   enabledPhases in Run.completedPhases and Run.failed = False
+  and Run.finalStage = CoreReporting
   and R_Summary not in Run.reports
 }
 pred write_manifest_enabled {
   requiredReports in Run.reports and Run.failed = False
+  and Run.finalStage = CoreReporting
+  and Run.reportsAtomicallyComplete = True
+  and (Run.telemetryEnabled = False or
+    (Run.metricsPresent = True and Run.metricsChecksummed = True and Run.metricsListed = False))
+}
+pred finalize_core_reports_enabled {
+  requiredReports in Run.reports and Run.failed = False
+  and Run.finalStage = CoreReporting
+  and Run.reportsAtomicallyComplete = False
+}
+pred write_metrics_enabled {
+  Run.telemetryEnabled = True and requiredReports in Run.reports
+  and Run.metricsPresent = False and Run.finalStage = CoreReporting
 }
 
 // Liveness: under fairness, a run whose catalog is successfully constructed and
@@ -2063,6 +3549,7 @@ pred write_manifest_enabled {
 // eventually-happens counterpart to the manifest safety properties.
 assert healthy_run_eventually_completes {
   (pipeline_fairness
+    and eventually (Run.finalStage = CoreReporting)
     and eventually (Run.catalog = CatalogConstructed)
     and always (Run.failed = False)
     and always (Run.manifestPresent = True implies always Run.manifestPresent = True))
@@ -2077,141 +3564,145 @@ assert healthy_run_eventually_completes {
 assert reports_done_leads_to_manifest {
   (pipeline_fairness and always Run.failed = False) implies
     always (
-      (requiredReports in Run.reports and Run.manifestPresent = False)
+      (requiredReports in Run.reports and Run.manifestPresent = False
+        and Run.finalStage = CoreReporting
+        and Run.reportsAtomicallyComplete = True
+        and (Run.telemetryEnabled = False or
+          (Run.metricsPresent = True and Run.metricsChecksummed = True and Run.metricsListed = False)))
       implies eventually Run.manifestPresent = True)
 }
 
 // --- Commands ---
 
 run show {} for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 2 WriteAttempt, 2 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 8 steps
+  8 ManifestEntry, 2 WriteAttempt, 2 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 8 steps
 
 run scenario_base_mode_complete {
   eventually (Run.manifestPresent = True and Run.mode = BaseMode)
 } for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 13 steps
 
 run scenario_failure_no_manifest {
   eventually (Run.failed = True and Run.manifestPresent = False)
 } for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 6 steps
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 6 steps
 
 check findings_never_decrease for 4 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 2 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 15 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 2 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 15 steps expect 0
 
 check all_findings_wellformed for 4 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
 
 check evidence_always_preserved for 4 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
 
 check manifest_implies_complete for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
 
 check no_manifest_on_failure for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
 
 check no_write_outside_boundary for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
-  1 ManifestEntry, 3 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 5 steps expect 0
+  8 ManifestEntry, 3 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 5 steps expect 0
 
 check no_partial_at_final_path for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 3 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 3 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
 
 check disabled_phases_no_reports for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
 
 check phases_monotonic for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
 
 // Report emission (RAE-EMIT-REPORTS)
 check base_mode_reports for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
 
 check source_mode_reports for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 14 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 14 steps expect 0
 
 // Naming convention (RAE-REPORT-NAMES)
 check naming_injective for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 check naming_total_for_phases for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 // Evidence preservation (RAE-PRESERVE-EVID)
 check provenance_always_present for 4 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
 
 check no_unsupported_verdicts_in_output for 4 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
 
 // Finding shape (RAE-FINDING-SHAPE)
 check no_malformed_findings for 4 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
 
 // Atomic manifest ordering (RAE-ATOMIC-MANIFEST)
 check manifest_written_last for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
 
 check stale_manifest_blocks_phases for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
 
 check manifest_lists_all_reports for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
 
 // Pipeline liveness: a healthy run eventually completes with a manifest (RAE-MANIFEST-DONE)
 check healthy_run_eventually_completes for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 14 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 14 steps expect 0
 
 check reports_done_leads_to_manifest for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  2 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 14 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 14 steps expect 0
 
 // Manifest schema (RAE-MANIFEST-SCHEMA)
 check manifest_entries_match_files for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  3 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
 
 check manifest_checksums_valid for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  3 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
 
 // Output confinement (RAE-OUTPUT-CONFINE)
 check all_writes_confined for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
-  1 ManifestEntry, 3 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 5 steps expect 0
+  8 ManifestEntry, 3 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 5 steps expect 0
 
 // Atomic output writes (RAE-OUTPUT-ATOMIC)
 check successful_writes_complete for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 3 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 3 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
 
 // Catalog-error classification, exit codes, and report suppression (RAE-CATALOG-ERROR)
 check classify_empty_iff_no_active for 1 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 check classify_total_when_empty for 1 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 check classify_matches_precedence for 1 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 check only_archived_recommends_allow_archive for 1 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 check exit_codes_match_spec for 1 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps, 5 Int expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps, 5 Int expect 0
 
 check catalog_abort_no_reports for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
 
 check catalog_abort_is_failure for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
 
 check phases_require_catalog for 3 Finding, 2 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
 
 check catalog_abort_surfaces_error_code for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
 
 run scenario_catalog_abort {
   eventually (Run.catalog = CatalogAborted and some Run.catalogReason)
 } for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 8 steps
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 8 steps
 
 run scenario_classify_all_reasons {
   some a1, r1, x1, a2, r2, x2, a3, r3, x3 : Bool |
@@ -2219,46 +3710,46 @@ run scenario_classify_all_reasons {
     classify[a2, r2, x2] = AllArchived and
     classify[a3, r3, x3] = AllFiltered
 } for 1 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps
 
 // Findings emission events: suppression and supersession (RAE-EVID-FAIL, RAE-IMMUT-CHANGE)
 check suppression_emits_defect for 4 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
 
 check supersede_preserves_original for 4 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps expect 0
 
 run scenario_suppress_unsupported {
   eventually (some w, d : Finding | suppress_unsupported_verdict[w, d])
 } for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 8 steps
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 8 steps
 
 run scenario_supersede {
   eventually (some o, s : Finding | supersede_finding[o, s])
 } for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 10 steps
 
 // Logic-defect finding taxonomy: evidence roles + error severity (RAE-SHAPE-MERGE-CONFLICT-EVIDENCE)
 check every_logic_kind_requires_evidence for 1 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 check merge_core_evidence for 1 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 check kind_specific_evidence for 1 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 check invalid_group_identity_evidence for 1 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 check logic_kinds_distinct_evidence for 1 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 check logic_roles_all_used for 1 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 check logic_defects_are_error for 1 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 run scenario_logic_defect_taxonomy {
   ExclusionTuple in requiredRoles[FunctionSignatureConflict]
@@ -2266,54 +3757,54 @@ run scenario_logic_defect_taxonomy {
   BothDeclKinds in requiredRoles[SymbolKindCollision]
   SharedSanitizedId in requiredRoles[SanitizedIdCollision]
 } for 1 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps
 
 // Catalog-empty diagnostics stay as reviewable as findings (RAE-SHAPE-CATALOG)
 check catalog_diagnostics_actionable for 1 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 run scenario_catalog_diagnostic_actionable {
   all r : CatalogEmptyReason |
     some catalogCause[r] and some catalogRemediation[r]
 } for 1 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps
 
 // Code-derived gen artifacts (RAE-REPORT-GENSPECS)
 check genspecs_present_when_code_backwards for 2 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
 
 check genspecs_paired for 2 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
 
 check genspecs_only_in_source_mode for 3 Finding, 2 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
 
 run scenario_genspecs_emitted {
   Run.mode = SourceBackedMode
   eventually (CodeCompare in Run.completedPhases
     and genArtifactsPresent = GenSpecsDir + GenSpecsSmtDir)
 } for 2 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 8 steps
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 8 steps
 
 // Skipped-scope explanation (RAE-REPORT-SKIP)
 check enabled_and_skipped_partition for 1 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 check base_mode_skips_source_phases for 1 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 run scenario_skip_explained {
   Run.mode = BaseMode
   skippedPhases = sourcePhases and some skippedPhases
 } for 1 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps
 
 // Source-specific evidence + inert rendering (RAE-EVID-ARTS/CROSSIMPLY/LLM, RAE-EVID-RENDER-SAFE)
 check evidence_source_requirements for 1 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 check render_evidence_inert for 1 Finding, 1 Evidence, 1 Provenance,
-  1 Artifact, 1 Heading, 1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+  1 Artifact, 1 Heading, 8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
 
 run scenario_evidence_and_render {
   // every analysis basis mandates its source-specific evidence
@@ -2325,5 +3816,126 @@ run scenario_evidence_and_render {
   rendersAsActiveStructure[True, True] = False
   rendersAsActiveStructure[False, False] = False
 } for 1 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
-  1 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps
+
+// Optional final-report lifecycle witnesses and checks (RAE-FINAL-*).
+run scenario_final_report_success {
+  Run.telemetryEnabled = False
+  Run.mode = BaseMode
+  eventually Run.finalStage = ReportAvailable
+} for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 22 steps expect 1
+
+run scenario_final_report_warning {
+  Run.telemetryEnabled = False
+  Run.mode = BaseMode
+  eventually Run.finalStage = WarningPersisted
+} for 4 Finding, 4 Evidence, 4 Provenance, 4 Artifact, 4 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 27 steps expect 1
+
+run scenario_final_report_output_failure {
+  eventually Run.finalStage = OutputFailed
+} for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 1
+
+check valid_report_postcondition for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
+check final_report_terminal_states_stutter for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
+check final_report_starts_after_core_completion for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
+check core_completion_monotonic_after_attempt for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
+check handled_failure_preserves_core for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
+check unsafe_paths_prevent_agent_or_validation for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 16 steps expect 0
+check report_success_requires_path_agreement for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
+check agent_policy_is_read_only for 2 Finding, 2 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+check denied_agent_action_cannot_publish for 2 Finding, 2 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+check accepted_bundle_has_prompt_parity for 2 Finding, 2 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+check validating_requires_strict_protocol for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
+check malformed_protocol_never_validates for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
+check report_available_requires_candidate_valid for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
+check invalid_objects_never_succeed for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
+check oversized_report_rejected_before_content_read for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
+check validating_has_classified_outcome for 2 Finding, 2 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
+check published_candidate_has_classified_outcome for 2 Finding, 2 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
+check marker_invalidated_before_managed_cleanup for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
+check startup_cleanup_establishes_report_absence for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
+run scenario_stale_report_removed {
+  FinalReportDestination.reportPathState = FinalComplete
+  eventually (Run.finalStage = CoreReporting
+    and FinalReportDestination.reportPathState = Absent)
+} for 2 Finding, 2 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 5 steps expect 1
+check handled_failure_has_no_report_residue for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
+check warning_terminal_postcondition for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
+check refresh_window_has_no_stale_manifest for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
+check final_outcomes_are_exclusive for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
+check completed_core_eventually_attempts_report for 1 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
+check attempted_report_eventually_terminates for 1 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
+check completed_core_has_enabled_report_action for 1 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
+check startup_cleanup_eventually_terminates for 1 Finding, 1 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 12 steps expect 0
+check attempt_evidence_finalizes_before_core_completion for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 2 AttemptSet, 2 Capability, 2 Ordinal, 20 steps expect 0
+check manifest_lists_all_finalized_attempt_sets for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 2 AttemptSet, 2 Capability, 2 Ordinal, 20 steps expect 0
+check manifest_entries_cover_attempt_sets_and_metrics for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  11 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 2 AttemptSet, 2 Capability, 2 Ordinal, 20 steps expect 0
+run scenario_cleanup_failure {
+  eventually Run.finalFailure = CleanupFailed
+} for 4 Finding, 4 Evidence, 3 Provenance, 3 Artifact, 3 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 26 steps expect 1
+run scenario_warning_persistence_failure {
+  eventually Run.finalFailure = WarningPersistenceFailed
+} for 4 Finding, 4 Evidence, 3 Provenance, 3 Artifact, 3 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 28 steps expect 1
+run scenario_marker_invalidation_failure {
+  eventually Run.finalFailure = MarkerInvalidationFailed
+} for 4 Finding, 4 Evidence, 3 Provenance, 3 Artifact, 3 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 29 steps expect 1
+run scenario_summary_rewrite_failure {
+  eventually Run.finalFailure = SummaryRewriteFailed
+} for 4 Finding, 4 Evidence, 3 Provenance, 3 Artifact, 3 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 31 steps expect 1
+run scenario_manifest_refresh_failure {
+  eventually Run.finalFailure = ManifestRefreshFailed
+} for 4 Finding, 4 Evidence, 3 Provenance, 3 Artifact, 3 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 33 steps expect 1
+
+// Opt-in metrics safety checks (RAE-RUN-METRICS).
+check metrics_opt_in_only for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 16 steps expect 0
+check persisted_attempts_reconcile for 2 Finding, 2 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+check retry_and_resource_inventory_reconcile for 2 Finding, 2 Evidence, 1 Provenance, 1 Artifact, 1 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 3 steps expect 0
+check metrics_precede_completion_manifest for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 16 steps expect 0
+check metrics_listing_matches_manifest_presence for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
+check final_report_does_not_mutate_metrics for 3 Finding, 3 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
+  8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 0 AttemptSet, 0 Capability, 0 Ordinal, 20 steps expect 0
 ```

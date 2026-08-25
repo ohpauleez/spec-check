@@ -85,7 +85,7 @@ The state machine has one important asymmetry. `CoreComplete` is already a succe
 - **Permission-pattern safety**: request construction rejects evidence or report paths containing OpenCode wildcard metacharacters `*` or `?`; the optional phase degrades rather than widening edit authority.
 - **Validation authority**: strict payload validation is necessary but insufficient. Success follows atomic publication and independent read-back checks.
 - **Warning integrity**: warning state is added before rerendering `report_summary.md`. The final summary descriptor replaces the original summary descriptor before manifest entries are rebuilt, and `writeManifest` occurs after the rewritten summary.
-- **Prompt parity**: a contract test normalizes only declared placeholders and transport instructions, then compares `report_prompts/prompt_f.md` with the embedded prompt constant. Distribution tests execute the bundled builder against the same fixtures.
+- **Prompt parity**: `FINAL_REPORT_PROMPT` in `src/domain/prompts/final-report.ts` is authoritative. Distribution tests inspect the bundled source and execute the bundled builders against the same fixtures as source builders.
 
 ### Quality Attribute Tactics
 
@@ -122,7 +122,7 @@ The state machine has one important asymmetry. `CoreComplete` is already a succe
 - One additional LLM call per successful core run, with the same configured per-attempt timeout and adapter retry policy.
 - One full read of a report bounded to 1 MiB.
 - On failure, one additional summary render and manifest rewrite.
-- Small maintenance cost for canonical/embedded prompt parity and OpenCode permission-schema compatibility.
+- Small maintenance cost for source/distribution prompt parity and OpenCode permission-schema compatibility.
 
 ### Alternatives Considered
 
@@ -232,8 +232,7 @@ Encoding and validity rules:
 
 ### Code Map
 
-- `report_prompts/prompt_f.md`: canonical evaluated prompt with runtime placeholders and file-output protocol.
-- `src/domain/prompts/final-report.ts`: embedded prompt, pure substitution, and transient-agent policy builder.
+- `src/domain/prompts/final-report.ts`: authoritative evaluated prompt, pure substitution, and transient-agent policy builder.
 - `src/adapters/opencode.ts`: phase union, argv/environment controls, and acknowledgment validation.
 - `src/adapters/process.ts`: optional inherited environment override for the transient inline configuration.
 - `src/adapters/fs.ts`: confined report removal and safe report metadata/read boundary, or narrow helpers called by reporting.
@@ -358,7 +357,7 @@ Post-review Alloy 6.2.0 recheck on 2026-08-24: all four success, handled-failure
 
 - Absolute config output for default, CLI, config-file, parent segments, and paths containing spaces.
 - Prompt substitution leaves no placeholders and names exactly the evidence and report paths.
-- Canonical prompt and embedded prompt parity; source and bundled builder parity.
+- Authoritative source prompt and bundled prompt parity; source and bundled builder execution parity.
 - Generated agent policy denies all edits, bash/task/web, and other mutation or delegation tools; it grants only required reads/external-directory access and requires no `--auto`.
 - OpenCode argv includes `--agent` and `--dir`; existing phases remain unchanged.
 - Event transport accepts payload fragments only from top-level `type: "text"` events at `part.text`; it rejects raw payloads, malformed UTF-8, malformed lines, error events, missing text, wrappers, and fences.

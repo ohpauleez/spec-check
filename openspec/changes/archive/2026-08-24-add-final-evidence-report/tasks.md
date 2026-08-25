@@ -1,9 +1,9 @@
 ## 1. Establish Paths And Prompt Contract
 
 - [x] 1.1 Resolve `RunConfig.output` with `path.resolve` before branding it, update TSDoc, and add config contract tests for default, CLI, config-file, parent-segment, absolute, and spaced output paths (RAE-FINAL-PATH-ABS, RAE-FINAL-PATH-SPACE)
-- [x] 1.2 Update `report_prompts/prompt_f.md` with runtime path placeholders and a strict `{ "report_path", "report_markdown" }` transport while preserving the evaluated content strategy (RAE-FINAL-PROTOCOL)
+- [x] 1.2 Encode evaluated prompt F in the authoritative `FINAL_REPORT_PROMPT` with runtime path placeholders and a strict `{ "report_path", "report_markdown" }` transport while preserving the evaluated content strategy (RAE-FINAL-PROTOCOL)
 - [x] 1.3 Add `src/domain/prompts/final-report.ts` with the embedded prompt, `buildFinalReportPrompt`, absolute/confined-path preconditions, unresolved-placeholder postconditions, and complete TSDoc (RAE-FINAL-PATHS, RAE-FINAL-PROTOCOL)
-- [x] 1.4 Add source prompt parity tests and bundle/distribution parity tests that permit only declared runtime and transport substitutions (RAE-FINAL-PROMPT-PARITY)
+- [x] 1.4 Add bundle/distribution parity tests against the authoritative TypeScript prompt and builders, permitting only declared runtime substitutions (RAE-FINAL-PROMPT-PARITY)
 - [x] 1.5 Add generated/property tests for relative, absolute, spaced, Unicode, and non-pattern shell-metacharacter path spellings to confirm exact substitution without shell interpretation; add regressions that reject OpenCode wildcard characters `*` and `?` before invocation (RAE-FINAL-PATH-SPACE, RAE-FINAL-PATH-WILDCARD)
 
 ### Establish Paths And Prompt Contract change summary

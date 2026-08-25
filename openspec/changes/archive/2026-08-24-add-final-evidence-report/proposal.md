@@ -1,6 +1,6 @@
 ## Motivation
 
-`spec-check` produces detailed phase reports, raw evidence, a summary, and a completion manifest. Engineers must still perform a separate synthesis pass before they can decide what to fix. The evaluated `report_prompts/prompt_f.md` prompt performs that synthesis well, but it is not part of the normal command. This leaves the most decision-oriented artifact dependent on a manual, inconsistently configured agent invocation.
+`spec-check` produces detailed phase reports, raw evidence, a summary, and a completion manifest. Engineers must still perform a separate synthesis pass before they can decide what to fix. The evaluated prompt F performs that synthesis well, but it was not part of the normal command. This left the most decision-oriented artifact dependent on a manual, inconsistently configured agent invocation. Its production form is now the authoritative `FINAL_REPORT_PROMPT` in `src/domain/prompts/final-report.ts`.
 
 This change adds a bounded final-report step that reads a completed evidence bundle and writes `report.md`. The report is deliberately a post-completion derivative rather than evidence used to establish pipeline completion. A report-generation failure therefore does not invalidate successful analysis. It removes any partial report and records a warning in the checksummed core bundle.
 
@@ -17,7 +17,7 @@ This change adds a bounded final-report step that reads a completed evidence bun
 - Invalidate the prior manifest first, then remove stale tool-owned reports, metrics, and raw evidence before a new run starts.
 - Treat generation and validation failures as nonfatal: remove any partial or invalid report, append a `reporting.final_report_failed` warning, rewrite `report_summary.md`, and refresh `manifest.json` so its checksum remains valid. Surface cleanup or warning-persistence failures as fatal `OutputError` results.
 - Resolve the configured output directory to an absolute path before it enters the pipeline.
-- Preserve prompt parity between the repository prompt and the prompt embedded in the bundled distribution.
+- Preserve prompt parity between the authoritative TypeScript source and the bundled distribution.
 - Extend the reporting lifecycle model and verification evidence for report success, failure, cleanup, permissions, path confinement, and manifest exclusion.
 - Update user-facing and architecture documentation for the new artifact and its completion semantics.
 
@@ -74,7 +74,7 @@ Evaluations in `pasture/report_prompts_eval*` selected prompt F as a strong deci
 ### References
 
 - `plan_b.md` - selected engineering plan
-- `report_prompts/prompt_f.md` - evaluated report prompt
+- `src/domain/prompts/final-report.ts` - authoritative production form of evaluated prompt F
 - `pasture/report_prompts_eval*` - prompt evaluation evidence
 - `docs/lfm.md` - lightweight formal methods workflow
 - `docs/typescript_style.md` - implementation and contract guidance
@@ -134,7 +134,7 @@ flowchart LR
 - **Validation authority**: payload and post-write filesystem validation together determine report success.
 - **Bounded work**: one final-report invocation uses the configured timeout, bounded adapter retries, a bounded acknowledgment, and a 1 MiB report limit.
 - **Warning integrity**: if a warning changes `report_summary.md`, the manifest is refreshed after the summary write so its checksum matches the final summary bytes.
-- **Prompt parity**: the editable canonical prompt and embedded distribution prompt differ only by declared runtime substitutions.
+- **Prompt parity**: the authoritative TypeScript prompt and distributed prompt differ only by declared runtime substitutions.
 
 ## Failure Modes
 

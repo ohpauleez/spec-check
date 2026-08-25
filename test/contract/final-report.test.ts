@@ -16,7 +16,6 @@ import {
 } from "../../src/domain/reporting/final-report.js";
 import {
   FINAL_REPORT_AGENT_NAME,
-  FINAL_REPORT_PROMPT,
   buildFinalReportAgentConfig,
   buildFinalReportPrompt,
   isPermissionLiteralPath,
@@ -38,12 +37,6 @@ const VALID_REPORT = [
 ].join("\n");
 
 describe("final-report prompt and policy", () => {
-  it("keeps the embedded prompt byte-identical to the canonical source", async () => {
-    traceSpec("RAE-FINAL-PROMPT-PARITY");
-    const canonical = await readFile(join(process.cwd(), "report_prompts", "prompt_f.md"), "utf8");
-    expect(FINAL_REPORT_PROMPT).toBe(canonical);
-  });
-
   it("substitutes absolute paths exactly without replacement interpolation", () => {
     traceSpec("RAE-FINAL-PATHS", "RAE-FINAL-PATH-SPACE", "RAE-FINAL-PROTOCOL");
     const evidence = '/tmp/spec $& \'quoted\' "double" \\ ü evidence';

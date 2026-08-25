@@ -12,7 +12,7 @@ describe("distribution parity", () => {
     expect(bundled).toContain("__SPEC_CHECK_VERSION__");
   });
 
-  it("bundles the final-report prompt and restricted protocol", async () => {
+  it("bundles the authoritative final-report prompt and restricted protocol", async () => {
     traceSpec("RAE-FINAL-PROMPT-PARITY", "RAE-FINAL-PROTO-DIR");
     const bundled = await readFile(join(process.cwd(), "dist/spec-check.js"), "utf8");
     expect(bundled).toContain("spec-check-final-report");

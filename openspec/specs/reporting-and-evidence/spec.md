@@ -1201,13 +1201,13 @@ IF final-report stdout does not decode to exactly the required non-empty `report
 - Test: [opencode.test.ts:130 rejects malformed final-report acknowledgment shapes](/test/contract/opencode.test.ts#L130), [opencode.test.ts:153 rejects fenced or prose-wrapped final-report acknowledgments](/test/contract/opencode.test.ts#L153), [opencode.test.ts:168 rejects a raw final-report payload outside a text event](/test/contract/opencode.test.ts#L168), [opencode.test.ts:183 rejects malformed UTF-8 in the final-report event stream](/test/contract/opencode.test.ts#L183), [process-output.test.ts:7 kills a child when captured output exceeds the bound](/test/contract/process-output.test.ts#L7), [process-output.test.ts:18 marks malformed UTF-8 without replacement decoding](/test/contract/process-output.test.ts#L18)
 
 #### Scenario: Preserve Prompt Parity [RAE-FINAL-PROMPT-PARITY]
-WHEN source or bundled artifacts are built, THE spec-check verification harness SHALL confirm that the embedded final-report instructions match `report_prompts/prompt_f.md` except for declared runtime placeholders and transport instructions.
+WHEN bundled artifacts are built, THE spec-check verification harness SHALL confirm that the distributed final-report prompt and builders match the authoritative `FINAL_REPORT_PROMPT` and builders in `src/domain/prompts/final-report.ts` before declared runtime placeholder substitution.
 
-**Postcondition:** Source and distributed CLIs use the evaluated content strategy.
+**Postcondition:** Source and distributed CLIs use the same authoritative evaluated content strategy without depending on an external prompt file.
 
 ##### Evidence
 - Implementation: [final-report.ts:21 FINAL_REPORT_PROMPT](/src/domain/prompts/final-report.ts#L21), [final-report.ts:173 buildFinalReportPrompt()](/src/domain/prompts/final-report.ts#L173)
-- Test: [final-report.test.ts:41 keeps the embedded prompt byte-identical to the canonical source](/test/contract/final-report.test.ts#L41), [distribution.test.ts:15 bundles the final-report prompt and restricted protocol](/test/contract/distribution.test.ts#L15)
+- Test: [distribution.test.ts:15 bundles the authoritative final-report prompt and restricted protocol](/test/contract/distribution.test.ts#L15)
 
 #### Requirement model
 

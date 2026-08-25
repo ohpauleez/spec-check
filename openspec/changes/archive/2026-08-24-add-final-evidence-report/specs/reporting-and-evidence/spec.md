@@ -93,9 +93,9 @@ IF final-report stdout does not decode to exactly the required non-empty `report
 **Postcondition:** Malformed UTF-8, malformed event lines, error events, raw payloads outside text events, missing text payloads, Markdown fences, prose wrappers, extra payload fields, and invalid field values are rejected. Non-text status and usage events are ignored.
 
 #### Scenario: Preserve Prompt Parity [RAE-FINAL-PROMPT-PARITY]
-WHEN source or bundled artifacts are built, THE spec-check verification harness SHALL confirm that the embedded final-report instructions match `report_prompts/prompt_f.md` except for declared runtime placeholders and transport instructions.
+WHEN bundled artifacts are built, THE spec-check verification harness SHALL confirm that the distributed final-report prompt and builders match the authoritative `FINAL_REPORT_PROMPT` and builders in `src/domain/prompts/final-report.ts` before declared runtime placeholder substitution.
 
-**Postcondition:** Source and distributed CLIs use the evaluated content strategy.
+**Postcondition:** Source and distributed CLIs use the same authoritative evaluated content strategy without depending on an external prompt file.
 
 ### Requirement: Validate Final Report File [RAE-FINAL-VALIDATE]
 WHEN a final-report payload is accepted, THE spec-check tool SHALL validate its path and Markdown, atomically publish the Markdown, and independently validate the precomputed destination as a non-symlink regular strict UTF-8 file with all required report headings, at least one repository-relative citation, one artifact citation for every numbered prioritized finding, non-whitespace content, and size not greater than 1,048,576 bytes.

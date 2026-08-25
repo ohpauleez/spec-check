@@ -13,10 +13,11 @@ export const FINAL_REPORT_PATH_PLACEHOLDER = "{{REPORT_PATH_JSON}}";
 export const FINAL_REPORT_WORKSPACE_PLACEHOLDER = "{{WORKSPACE_ROOT_JSON}}";
 
 /**
- * Canonical evaluated instructions embedded for single-file distribution.
+ * Authoritative final-report instructions embedded for single-file distribution.
  *
  * @remarks
- * Invariant: tests require byte parity with `report_prompts/prompt_f.md`.
+ * Invariant: source and distributed builders use this constant unchanged before
+ * replacing the three declared runtime placeholders.
  */
 export const FINAL_REPORT_PROMPT = `Act as a senior engineer reviewing a completed \`spec-check\` evidence bundle.
 

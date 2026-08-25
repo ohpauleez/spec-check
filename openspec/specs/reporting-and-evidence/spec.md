@@ -263,9 +263,9 @@ WHEN catalog construction reports `no_recognized_docs`, THE spec-check tool SHAL
 **Postcondition:** Users can distinguish missing relevant inputs from archive-policy exclusions.
 
 ##### Evidence
-- Implementation: [run-cli.ts:61 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L61), [catalog.ts:233 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L233)
-- Test: [cli.test.ts:169 formats no_recognized_docs with input count](/test/contract/cli.test.ts#L169), [catalog.test.ts:101 returns no_recognized_docs for directories without OpenSpec docs](/test/contract/catalog.test.ts#L101)
-- Test (integration): [catalog-abort.integration.test.ts:52 aborts pipeline on no_recognized_docs](/test/integration/catalog-abort.integration.test.ts#L52)
+- Implementation: [run-cli.ts:86 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L86), [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222)
+- Test: [cli.test.ts:184 formats no_recognized_docs with input count](/test/contract/cli.test.ts#L184), [catalog.test.ts:101 returns no_recognized_docs for directories without OpenSpec docs](/test/contract/catalog.test.ts#L101)
+- Test (integration): [catalog-abort.integration.test.ts:53 aborts pipeline on no_recognized_docs](/test/integration/catalog-abort.integration.test.ts#L53)
 - Example:
 ```typescript
 const { formatCatalogEmptyMessage } = await import("./src/cli/run-cli.ts");
@@ -280,9 +280,9 @@ WHEN catalog construction reports `all_archived`, THE spec-check tool SHALL emit
 **Postcondition:** Users receive the specific remediation that can admit their chosen archived inputs.
 
 ##### Evidence
-- Implementation: [run-cli.ts:63 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L63), [catalog.ts:237 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L237)
-- Test: [cli.test.ts:176 formats all_archived with archived count and --allow-archive guidance](/test/contract/cli.test.ts#L176), [catalog.test.ts:27 excludes archived change specs by default](/test/contract/catalog.test.ts#L27)
-- Test (integration): [catalog-abort.integration.test.ts:81 aborts pipeline on all_archived](/test/integration/catalog-abort.integration.test.ts#L81)
+- Implementation: [run-cli.ts:86 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L86), [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222)
+- Test: [cli.test.ts:191 formats all_archived with archived count and --allow-archive guidance](/test/contract/cli.test.ts#L191), [catalog.test.ts:27 excludes archived change specs by default](/test/contract/catalog.test.ts#L27)
+- Test (integration): [catalog-abort.integration.test.ts:82 aborts pipeline on all_archived](/test/integration/catalog-abort.integration.test.ts#L82)
 - Example:
 ```typescript
 const { formatCatalogEmptyMessage } = await import("./src/cli/run-cli.ts");
@@ -297,9 +297,9 @@ WHEN catalog construction reports `all_filtered`, THE spec-check tool SHALL emit
 **Postcondition:** Policy-based exclusions remain explainable instead of collapsing into a generic empty result.
 
 ##### Evidence
-- Implementation: [run-cli.ts:65 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L65), [catalog.ts:240 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L240)
-- Test: [cli.test.ts:183 formats all_filtered with count and filter reason](/test/contract/cli.test.ts#L183), [catalog.test.ts:113 returns all_filtered when all recognized docs are excluded](/test/contract/catalog.test.ts#L113)
-- Test (integration): [catalog-abort.integration.test.ts:110 aborts pipeline on all_filtered](/test/integration/catalog-abort.integration.test.ts#L110)
+- Implementation: [run-cli.ts:86 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L86), [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222)
+- Test: [cli.test.ts:198 formats all_filtered with count and filter reason](/test/contract/cli.test.ts#L198), [catalog.test.ts:113 returns all_filtered when all recognized docs are excluded](/test/contract/catalog.test.ts#L113)
+- Test (integration): [catalog-abort.integration.test.ts:111 aborts pipeline on all_filtered](/test/integration/catalog-abort.integration.test.ts#L111)
 - Example:
 ```typescript
 const { formatCatalogEmptyMessage } = await import("./src/cli/run-cli.ts");
@@ -457,7 +457,7 @@ WHEN specs-forward analysis completes for a run, THE spec-check tool SHALL emit 
 **Postcondition:** Reviewers can inspect each analytical pass separately instead of relying only on a synthesized summary.
 
 ##### Evidence
-- Implementation: [render.ts:131 writePhaseReports()](/src/domain/reporting/render.ts#L131), [run-cli.ts:349 runReportingPhase()](/src/cli/run-cli.ts#L349)
+- Implementation: [render.ts:138 writePhaseReports()](/src/domain/reporting/render.ts#L138), [run-cli.ts:546 runReportingPhase()](/src/cli/run-cli.ts#L546)
 - Test: [reporting.test.ts:25 writes phase reports at correct naming convention](/test/contract/reporting.test.ts#L25)
 - Test (integration): [specs-forward.integration.test.ts:18 produces phase reports and summary](/test/integration/specs-forward.integration.test.ts#L18), [pipeline.integration.test.ts:324 full pipeline produces summary with all finding categories](/test/integration/pipeline.integration.test.ts#L324)
 
@@ -467,8 +467,8 @@ WHEN code-backwards analysis completes for a run, THE spec-check tool SHALL pers
 **Postcondition:** Code-derived intermediate artifacts are available for reviewer inspection alongside reports.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:458 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L458)
-- Test (integration): [pipeline.integration.test.ts:160 code-derived spec generation produces gen_specs files](/test/integration/pipeline.integration.test.ts#L160)
+- Implementation: [pipeline-helpers.ts:469 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L469)
+- Test (integration): [pipeline.integration.test.ts:165 code-derived spec generation produces gen_specs files](/test/integration/pipeline.integration.test.ts#L165)
 
 #### Scenario: Explain Skipped Report Scope [RAE-REPORT-SKIP]
 IF an optional phase is not enabled for a run, THEN THE spec-check tool SHALL explain that skipped scope in the synthesized reporting rather than omit it silently.
@@ -476,7 +476,7 @@ IF an optional phase is not enabled for a run, THEN THE spec-check tool SHALL ex
 **Postcondition:** Reviewers can distinguish intentionally skipped analysis from missing output.
 
 ##### Evidence
-- Implementation: [render.ts:240 writeSummaryReport()](/src/domain/reporting/render.ts#L240), [pipeline-helpers.ts:81 computeSkippedPhases()](/src/cli/pipeline-helpers.ts#L81)
+- Implementation: [render.ts:247 writeSummaryReport()](/src/domain/reporting/render.ts#L247), [pipeline-helpers.ts:82 computeSkippedPhases()](/src/cli/pipeline-helpers.ts#L82)
 - Test: [reporting.test.ts:52 includes skipped-phase explanations](/test/contract/reporting.test.ts#L52)
 - Test (integration): [specs-forward.integration.test.ts:18 produces phase reports and summary](/test/integration/specs-forward.integration.test.ts#L18)
 
@@ -486,8 +486,8 @@ IF the catalog phase ends in `CatalogError`, THEN THE spec-check tool SHALL NOT 
 **Postcondition:** Report output accurately reflects that analysis never proceeded past catalog construction.
 
 ##### Evidence
-- Implementation: [run-cli.ts:178 runIngestionPhases()](/src/cli/run-cli.ts#L178)
-- Test (integration): [catalog-abort.integration.test.ts:52 aborts pipeline on no_recognized_docs](/test/integration/catalog-abort.integration.test.ts#L52), [catalog-abort.integration.test.ts:81 aborts pipeline on all_archived](/test/integration/catalog-abort.integration.test.ts#L81), [catalog-abort.integration.test.ts:110 aborts pipeline on all_filtered](/test/integration/catalog-abort.integration.test.ts#L110)
+- Implementation: [run-cli.ts:279 runIngestionPhases()](/src/cli/run-cli.ts#L279)
+- Test (integration): [catalog-abort.integration.test.ts:53 aborts pipeline on no_recognized_docs](/test/integration/catalog-abort.integration.test.ts#L53), [catalog-abort.integration.test.ts:82 aborts pipeline on all_archived](/test/integration/catalog-abort.integration.test.ts#L82), [catalog-abort.integration.test.ts:111 aborts pipeline on all_filtered](/test/integration/catalog-abort.integration.test.ts#L111)
 
 #### Requirement model
 
@@ -607,9 +607,9 @@ WHEN the qualitative analysis phase completes its first pass, THE spec-check too
 **Postcondition:** Report consumers can locate phase output using the documented naming convention.
 
 ##### Evidence
-- Implementation: [render.ts:143 writePhaseReports()](/src/domain/reporting/render.ts#L143)
+- Implementation: [render.ts:138 writePhaseReports()](/src/domain/reporting/render.ts#L138)
 - Test: [reporting.test.ts:25 writes phase reports at correct naming convention](/test/contract/reporting.test.ts#L25)
-- Test (integration): [pipeline.integration.test.ts:324 full pipeline produces summary](/test/integration/pipeline.integration.test.ts#L324)
+- Test (integration): [pipeline.integration.test.ts:330 full pipeline produces summary](/test/integration/pipeline.integration.test.ts#L330)
 
 #### Scenario: Code-Derived Logic Report Named Correctly [RAE-NAMES-GENLOGIC]
 WHEN code-derived solver analysis completes, THE spec-check tool SHALL write the report to `report_2.logic.md` under the output directory.
@@ -617,7 +617,7 @@ WHEN code-derived solver analysis completes, THE spec-check tool SHALL write the
 **Postcondition:** Code-derived formal analysis is at a predictable path distinct from specs-forward logic analysis.
 
 ##### Evidence
-- Implementation: [render.ts:168 writePhaseReports()](/src/domain/reporting/render.ts#L168)
+- Implementation: [render.ts:138 writePhaseReports()](/src/domain/reporting/render.ts#L138)
 - Test: [reporting.test.ts:146 writes code-derived logic report at report_2.logic.md](/test/contract/reporting.test.ts#L146)
 
 #### Scenario: Summary Report Named Correctly [RAE-NAMES-SUMMARY]
@@ -626,7 +626,7 @@ WHEN the core synthesized summary is generated, THE spec-check tool SHALL write 
 **Postcondition:** The core summary is always at a predictable path.
 
 ##### Evidence
-- Implementation: [render.ts:240 writeSummaryReport()](/src/domain/reporting/render.ts#L240)
+- Implementation: [render.ts:247 writeSummaryReport()](/src/domain/reporting/render.ts#L247)
 - Test: [reporting.test.ts:40 writes summary report at report_summary.md](/test/contract/reporting.test.ts#L40)
 - Test (integration): [pipeline.integration.test.ts:324 full pipeline produces summary](/test/integration/pipeline.integration.test.ts#L324)
 
@@ -634,6 +634,10 @@ WHEN the core synthesized summary is generated, THE spec-check tool SHALL write 
 WHEN final-report generation succeeds, THE spec-check tool SHALL preserve the validated assessment at `report.md` under the output directory.
 
 **Postcondition:** Consumers can distinguish the decision-oriented derivative from phase and summary reports.
+
+##### Evidence
+- Implementation: [final-report.ts:18 FINAL_REPORT_PATH](/src/domain/reporting/final-report.ts#L18), [final-report.ts:257 generateFinalReport()](/src/domain/reporting/final-report.ts#L257)
+- Test: [final-report.test.ts:131 accepts a regular report at the exact byte limit](/test/contract/final-report.test.ts#L131), [final-report.test.ts:290 uses the acknowledgment only for equality and validates the designated file](/test/contract/final-report.test.ts#L290)
 
 #### Requirement model
 
@@ -934,10 +938,19 @@ WHEN final-report generation starts, THE spec-check tool SHALL have already fina
 
 **Postcondition:** The report agent can read a completion manifest that describes the complete core evidence bundle.
 
+##### Evidence
+- Implementation: [run-cli.ts:546 runReportingPhase()](/src/cli/run-cli.ts#L546)
+- Test (integration): [merge-pipeline.integration.test.ts:179 persists a nonfatal final-report warning and refreshes the summary checksum](/test/integration/merge-pipeline.integration.test.ts#L179)
+
 #### Scenario: Save Valid Final Report [RAE-FINAL-SAVE]
 WHEN the report agent returns a valid path and Markdown payload, THE spec-check tool SHALL atomically publish and independently validate `report.md`.
 
 **Postcondition:** Exactly one valid final report is available for the current run.
+
+##### Evidence
+- Implementation: [final-report.ts:257 generateFinalReport()](/src/domain/reporting/final-report.ts#L257), [final-report.ts:359 validateFinalReport()](/src/domain/reporting/final-report.ts#L359)
+- Test: [final-report.test.ts:290 uses the acknowledgment only for equality and validates the designated file](/test/contract/final-report.test.ts#L290)
+- Test (integration): [merge-pipeline.integration.test.ts:235 removes stale report output before the current final-report attempt](/test/integration/merge-pipeline.integration.test.ts#L235)
 
 #### Scenario: Final Report Is Optional [RAE-FINAL-OPTIONAL]
 IF final-report generation or validation fails after core completion, THEN THE spec-check tool SHALL preserve the completed analysis and SHALL represent the failure as a warning rather than a fatal pipeline error.
@@ -956,6 +969,12 @@ assert handled_failure_preserves_core {
 }
 ```
 
+##### Evidence
+- Implementation: [run-cli.ts:546 runReportingPhase()](/src/cli/run-cli.ts#L546), [run-cli.ts:673 finalReportFailureFinding()](/src/cli/run-cli.ts#L673), [final-report.ts:157 reduceFinalReportLifecycle()](/src/domain/reporting/final-report.ts#L157)
+- Test: [final-report.test.ts:390 maps terminal OpenCode failures to a nonfatal agent failure](/test/contract/final-report.test.ts#L390), [final-report.test.ts:416 enforces guarded transitions and terminal stuttering](/test/contract/final-report.test.ts#L416)
+- Test (property): [final-report.property.test.ts:29 legal success and failure histories reach exactly one terminal state](/test/property/final-report.property.test.ts#L29), [final-report.property.test.ts:52 generated stuttering and failure-point histories preserve lifecycle invariants](/test/property/final-report.property.test.ts#L52)
+- Test (integration): [merge-pipeline.integration.test.ts:179 persists a nonfatal final-report warning and refreshes the summary checksum](/test/integration/merge-pipeline.integration.test.ts#L179), [merge-pipeline.integration.test.ts:223 persists warning for every final-report degradation kind](/test/integration/merge-pipeline.integration.test.ts#L223)
+
 ### Requirement: Bind Final Report Paths [RAE-FINAL-PATHS]
 THE spec-check tool SHALL resolve the configured output directory to an absolute path and SHALL use one confined absolute `report.md` path for the prompt, payload comparison, atomic publication, and filesystem validation.
 
@@ -968,20 +987,38 @@ WHEN a relative output directory is configured, THE spec-check tool SHALL resolv
 
 **Postcondition:** Prompt and permission behavior is independent of the caller's relative path spelling.
 
+##### Evidence
+- Implementation: [config.ts:196 resolveRunConfig()](/src/cli/config.ts#L196), [final-report.ts:257 generateFinalReport()](/src/domain/reporting/final-report.ts#L257)
+- Test: [config.test.ts:69 resolves every configured output spelling to an absolute path](/test/contract/config.test.ts#L69), [config.test.ts:92 resolves output supplied only by the config file](/test/contract/config.test.ts#L92)
+
 #### Scenario: Preserve Paths With Spaces [RAE-FINAL-PATH-SPACE]
 WHEN an absolute evidence or report path contains spaces, THE spec-check tool SHALL pass and compare that path without shell interpolation or token splitting.
 
 **Postcondition:** The exact configured destination remains authoritative.
+
+##### Evidence
+- Implementation: [final-report.ts:257 generateFinalReport()](/src/domain/reporting/final-report.ts#L257), [final-report.ts:173 buildFinalReportPrompt()](/src/domain/prompts/final-report.ts#L173), [process.ts:86 runProcess()](/src/adapters/process.ts#L86)
+- Test: [final-report.test.ts:47 substitutes absolute paths exactly without replacement interpolation](/test/contract/final-report.test.ts#L47), [opencode.test.ts:47 constructs restricted final-report argv and inline environment](/test/contract/opencode.test.ts#L47)
+- Test (property): [final-report.property.test.ts:16 preserves generated literal paths exactly](/test/property/final-report.property.test.ts#L16)
 
 #### Scenario: Reject Acknowledgment Mismatch [RAE-FINAL-PATH-MISMATCH]
 IF the acknowledgment `report_path` does not equal the designated absolute destination, THEN THE spec-check tool SHALL reject the report attempt and SHALL NOT read the acknowledged alternate path.
 
 **Postcondition:** Model output cannot redirect validation outside the configured destination.
 
+##### Evidence
+- Implementation: [final-report.ts:257 generateFinalReport()](/src/domain/reporting/final-report.ts#L257)
+- Test: [final-report.test.ts:290 uses the acknowledgment only for equality and validates the designated file](/test/contract/final-report.test.ts#L290), [final-report.test.ts:319 does not inspect an acknowledged alternate path](/test/contract/final-report.test.ts#L319)
+
 #### Scenario: Reject Permission Wildcards [RAE-FINAL-PATH-WILDCARD]
 IF the absolute evidence or report path contains `*` or `?`, THEN THE spec-check tool SHALL NOT invoke the report agent and SHALL classify the optional report attempt as failed.
 
 **Postcondition:** OpenCode wildcard matching cannot broaden read-only external-directory access.
+
+##### Evidence
+- Implementation: [final-report.ts:257 generateFinalReport()](/src/domain/reporting/final-report.ts#L257), [final-report.ts:157 isPermissionLiteralPath()](/src/domain/prompts/final-report.ts#L157)
+- Test: [final-report.test.ts:58 rejects wildcard paths that cannot express exact edit authority](/test/contract/final-report.test.ts#L58)
+- Test (property): [final-report.property.test.ts:16 preserves generated literal paths exactly](/test/property/final-report.property.test.ts#L16)
 
 #### Requirement model
 
@@ -1058,15 +1095,27 @@ WHEN a valid report payload is returned, THE spec-check tool SHALL atomically pu
 
 **Postcondition:** The agent remains read-only and trusted code produces the requested artifact.
 
+##### Evidence
+- Implementation: [final-report.ts:257 generateFinalReport()](/src/domain/reporting/final-report.ts#L257), [fs.ts:83 writeOutputAtomic()](/src/adapters/fs.ts#L83), [final-report.ts:214 buildFinalReportAgentConfig()](/src/domain/prompts/final-report.ts#L214)
+- Test: [final-report.test.ts:79 builds a deny-first one-path agent policy](/test/contract/final-report.test.ts#L79), [final-report.test.ts:290 uses the acknowledgment only for equality and validates the designated file](/test/contract/final-report.test.ts#L290), [safety-liveness.invariant.test.ts:251 SAFE-17: final-report authority is one exact edit path](/test/invariant/safety-liveness.invariant.test.ts#L251)
+
 #### Scenario: Deny Other Mutation [RAE-FINAL-AGENT-DENY]
 IF the report agent attempts to modify any file, THEN THE transient policy SHALL deny that action.
 
 **Postcondition:** Final-report agent execution has no writable path.
 
+##### Evidence
+- Implementation: [final-report.ts:214 buildFinalReportAgentConfig()](/src/domain/prompts/final-report.ts#L214)
+- Test: [final-report.test.ts:79 builds a deny-first one-path agent policy](/test/contract/final-report.test.ts#L79), [final-report.test.ts:95 allows external analyzed inputs for reads without broadening edits](/test/contract/final-report.test.ts#L95), [safety-liveness.invariant.test.ts:251 SAFE-17: final-report authority is one exact edit path](/test/invariant/safety-liveness.invariant.test.ts#L251)
+
 #### Scenario: Deny Shell And Delegation [RAE-FINAL-AGENT-TOOLS]
 IF the report agent attempts shell execution, task delegation, web access, or another denied capability, THEN THE transient policy SHALL deny that action.
 
 **Postcondition:** The report cannot bypass read-only policy through a more powerful tool.
+
+##### Evidence
+- Implementation: [final-report.ts:214 buildFinalReportAgentConfig()](/src/domain/prompts/final-report.ts#L214)
+- Test: [final-report.test.ts:79 builds a deny-first one-path agent policy](/test/contract/final-report.test.ts#L79), [opencode.test.ts:47 constructs restricted final-report argv and inline environment](/test/contract/opencode.test.ts#L47), [safety-liveness.invariant.test.ts:251 SAFE-17: final-report authority is one exact edit path](/test/invariant/safety-liveness.invariant.test.ts#L251)
 
 #### Requirement model
 
@@ -1138,15 +1187,27 @@ WHEN OpenCode is started for the final-report phase, THE spec-check tool SHALL p
 
 **Postcondition:** The agent can inspect workspace evidence under the declared permission boundary.
 
+##### Evidence
+- Implementation: [opencode.ts:293 buildOpencodeArgs()](/src/adapters/opencode.ts#L293), [final-report.ts:257 generateFinalReport()](/src/domain/reporting/final-report.ts#L257), [final-report.ts:214 buildFinalReportAgentConfig()](/src/domain/prompts/final-report.ts#L214)
+- Test: [opencode.test.ts:47 constructs restricted final-report argv and inline environment](/test/contract/opencode.test.ts#L47), [opencode.test.ts:77 isolates final-report config roots when provided](/test/contract/opencode.test.ts#L77), [final-report.test.ts:95 allows external analyzed inputs for reads without broadening edits](/test/contract/final-report.test.ts#L95), [distribution.test.ts:15 bundles the final-report prompt and restricted protocol](/test/contract/distribution.test.ts#L15)
+
 #### Scenario: Validate Acknowledgment Shape [RAE-FINAL-PROTO-ACK]
 IF final-report stdout does not decode to exactly the required non-empty `report_path` and `report_markdown` fields, THEN THE spec-check tool SHALL classify the attempt as failed.
 
 **Postcondition:** Malformed UTF-8, malformed event lines, error events, raw payloads outside text events, missing text payloads, Markdown fences, prose wrappers, extra payload fields, and invalid field values are rejected. Non-text status and usage events are ignored.
 
+##### Evidence
+- Implementation: [opencode.ts:338 classifyProcessResult()](/src/adapters/opencode.ts#L338), [opencode.ts:698 parseOpencodePayload()](/src/adapters/opencode.ts#L698), [opencode.ts:1043 validatePhaseSchema()](/src/adapters/opencode.ts#L1043), [final-report.ts:416 parseAcknowledgment()](/src/domain/reporting/final-report.ts#L416)
+- Test: [opencode.test.ts:130 rejects malformed final-report acknowledgment shapes](/test/contract/opencode.test.ts#L130), [opencode.test.ts:153 rejects fenced or prose-wrapped final-report acknowledgments](/test/contract/opencode.test.ts#L153), [opencode.test.ts:168 rejects a raw final-report payload outside a text event](/test/contract/opencode.test.ts#L168), [opencode.test.ts:183 rejects malformed UTF-8 in the final-report event stream](/test/contract/opencode.test.ts#L183), [process-output.test.ts:7 kills a child when captured output exceeds the bound](/test/contract/process-output.test.ts#L7), [process-output.test.ts:18 marks malformed UTF-8 without replacement decoding](/test/contract/process-output.test.ts#L18)
+
 #### Scenario: Preserve Prompt Parity [RAE-FINAL-PROMPT-PARITY]
 WHEN source or bundled artifacts are built, THE spec-check verification harness SHALL confirm that the embedded final-report instructions match `report_prompts/prompt_f.md` except for declared runtime placeholders and transport instructions.
 
 **Postcondition:** Source and distributed CLIs use the evaluated content strategy.
+
+##### Evidence
+- Implementation: [final-report.ts:21 FINAL_REPORT_PROMPT](/src/domain/prompts/final-report.ts#L21), [final-report.ts:173 buildFinalReportPrompt()](/src/domain/prompts/final-report.ts#L173)
+- Test: [final-report.test.ts:41 keeps the embedded prompt byte-identical to the canonical source](/test/contract/final-report.test.ts#L41), [distribution.test.ts:15 bundles the final-report prompt and restricted protocol](/test/contract/distribution.test.ts#L15)
 
 #### Requirement model
 
@@ -1239,35 +1300,63 @@ WHEN trusted atomic publication produces a regular non-symlink file that meets t
 
 **Postcondition:** Valid payload content plus filesystem read-back establishes report success.
 
+##### Evidence
+- Implementation: [final-report.ts:359 validateFinalReport()](/src/domain/reporting/final-report.ts#L359), [final-report.ts:435 validateFinalReportContent()](/src/domain/reporting/final-report.ts#L435)
+- Test: [final-report.test.ts:131 accepts a regular report at the exact byte limit](/test/contract/final-report.test.ts#L131)
+
 #### Scenario: Reject Missing Report [RAE-FINAL-MISSING]
 IF the report payload omits valid Markdown or trusted atomic publication does not produce the designated report, THEN THE spec-check tool SHALL classify the report attempt as failed.
 
 **Postcondition:** A path assertion cannot substitute for report content and successful publication.
+
+##### Evidence
+- Implementation: [final-report.ts:359 validateFinalReport()](/src/domain/reporting/final-report.ts#L359), [final-report.ts:521 metadataError()](/src/domain/reporting/final-report.ts#L521)
+- Test: [final-report.test.ts:153 rejects a missing report](/test/contract/final-report.test.ts#L153), [final-report.test.ts:372 rejects missing read-back output after publication](/test/contract/final-report.test.ts#L372)
 
 #### Scenario: Reject Symlink [RAE-FINAL-SYMLINK]
 IF the designated report is a symbolic link, THEN THE spec-check tool SHALL reject it without following the link target.
 
 **Postcondition:** Report validation cannot escape the configured output through a link.
 
+##### Evidence
+- Implementation: [final-report.ts:359 validateFinalReport()](/src/domain/reporting/final-report.ts#L359)
+- Test: [final-report.test.ts:160 rejects symlinks and directories](/test/contract/final-report.test.ts#L160)
+
 #### Scenario: Reject Non-Regular Report [RAE-FINAL-NOT-REGULAR]
 IF the designated report is a directory or another non-regular filesystem object, THEN THE spec-check tool SHALL classify the report attempt as failed.
 
 **Postcondition:** Only regular files can become final reports.
+
+##### Evidence
+- Implementation: [final-report.ts:359 validateFinalReport()](/src/domain/reporting/final-report.ts#L359)
+- Test: [final-report.test.ts:160 rejects symlinks and directories](/test/contract/final-report.test.ts#L160)
 
 #### Scenario: Reject Empty Report [RAE-FINAL-EMPTY]
 IF the designated report is empty or contains only whitespace, THEN THE spec-check tool SHALL classify the report attempt as failed.
 
 **Postcondition:** A successful report contains substantive Markdown text.
 
+##### Evidence
+- Implementation: [final-report.ts:359 validateFinalReport()](/src/domain/reporting/final-report.ts#L359), [final-report.ts:435 validateFinalReportContent()](/src/domain/reporting/final-report.ts#L435)
+- Test: [final-report.test.ts:141 rejects empty and whitespace report content](/test/contract/final-report.test.ts#L141), [final-report.test.ts:341 rejects empty returned Markdown before publication](/test/contract/final-report.test.ts#L341)
+
 #### Scenario: Reject Oversized Report [RAE-FINAL-OVERSIZED]
 IF the designated report is larger than 1,048,576 bytes, THEN THE spec-check tool SHALL reject it before an unbounded content read.
 
 **Postcondition:** Returned Markdown is bounded before atomic publication.
 
+##### Evidence
+- Implementation: [final-report.ts:20 FINAL_REPORT_MAX_BYTES](/src/domain/reporting/final-report.ts#L20), [final-report.ts:359 validateFinalReport()](/src/domain/reporting/final-report.ts#L359), [final-report.ts:435 validateFinalReportContent()](/src/domain/reporting/final-report.ts#L435)
+- Test: [final-report.test.ts:143 rejects oversized report content](/test/contract/final-report.test.ts#L143), [final-report.test.ts:341 rejects oversized returned Markdown before publication](/test/contract/final-report.test.ts#L341)
+
 #### Scenario: Reject Unsupported Report Structure [RAE-FINAL-STRUCTURE]
 IF returned or read-back Markdown omits a required report heading, contains no repository-relative citation, or gives a numbered prioritized finding no artifact citation, THEN THE spec-check tool SHALL classify the report attempt as failed.
 
 **Postcondition:** A structurally incomplete or uncited prioritized finding cannot be published as a successful final report.
+
+##### Evidence
+- Implementation: [final-report.ts:22 FINAL_REPORT_REQUIRED_HEADINGS](/src/domain/reporting/final-report.ts#L22), [final-report.ts:435 validateFinalReportContent()](/src/domain/reporting/final-report.ts#L435)
+- Test: [final-report.test.ts:184 rejects reports without required sections or repository citation](/test/contract/final-report.test.ts#L184), [final-report.test.ts:194 rejects a numbered finding without its own artifact citation](/test/contract/final-report.test.ts#L194), [final-report.test.ts:206 rejects fenced or non-relative structure](/test/contract/final-report.test.ts#L206), [final-report.test.ts:226 rejects duplicate or malformed prioritized headings](/test/contract/final-report.test.ts#L226)
 
 #### Requirement model
 
@@ -1387,30 +1476,59 @@ WHEN a new run starts and `report.md` exists from a prior run, THE spec-check to
 
 **Postcondition:** A prior report cannot be attributed to the new evidence bundle.
 
+##### Evidence
+- Implementation: [run-cli.ts:171 runCliWithTelemetry()](/src/cli/run-cli.ts#L171), [final-report.ts:412 removeFinalReport()](/src/domain/reporting/final-report.ts#L412)
+- Test: [final-report.test.ts:278 removes stale files and directories idempotently](/test/contract/final-report.test.ts#L278)
+- Test (integration): [merge-pipeline.integration.test.ts:235 removes stale report output before the current final-report attempt](/test/integration/merge-pipeline.integration.test.ts#L235)
+
 #### Scenario: Remove All Stale Managed Output [RAE-FINAL-CLEAN-MANAGED]
 WHEN a new run starts, THE spec-check tool SHALL first invalidate the prior `manifest.json` and SHALL then remove all tool-owned phase reports, summary, final report, metrics, formalization evidence, SMT evidence, generated specifications, and cross-implication evidence before analysis begins.
 
 **Postcondition:** Artifacts omitted by the current run cannot be mistaken for current unmanifested evidence.
+
+##### Evidence
+- Implementation: [run-cli.ts:171 runCliWithTelemetry()](/src/cli/run-cli.ts#L171), [run-cli.ts:229 MANAGED_OUTPUT_PATHS](/src/cli/run-cli.ts#L229), [fs.ts:137 removeOutputTree()](/src/adapters/fs.ts#L137)
+- Test: [fs.test.ts:66 removes interrupted atomic-write siblings only for managed root files](/test/contract/fs.test.ts#L66)
+- Test (integration): [merge-pipeline.integration.test.ts:235 removes stale report output before the current final-report attempt](/test/integration/merge-pipeline.integration.test.ts#L235), [merge-pipeline.integration.test.ts:282 supports consecutive runs against the same output directory](/test/integration/merge-pipeline.integration.test.ts#L282)
 
 #### Scenario: Surface Startup Cleanup Failure [RAE-FINAL-CLEAN-START-ERROR]
 IF managed-output cleanup fails after prior-manifest invalidation, THEN THE spec-check tool SHALL return fatal `OutputError` before ingestion and SHALL NOT claim a current completed bundle.
 
 **Postcondition:** Residue can remain for operator inspection, but no stale manifest attests it as the new run.
 
+##### Evidence
+- Implementation: [run-cli.ts:171 runCliWithTelemetry()](/src/cli/run-cli.ts#L171)
+- Test (integration): [merge-pipeline.integration.test.ts:269 surfaces run-start managed-output cleanup failure before ingestion](/test/integration/merge-pipeline.integration.test.ts#L269)
+
 #### Scenario: Remove Invalid Candidate [RAE-FINAL-CLEAN-FAILED]
 IF report generation or validation fails on a handled path, THEN THE spec-check tool SHALL remove any file or filesystem object at the designated report path before persisting the failure warning.
 
 **Postcondition:** The warning terminal state has no report residue.
+
+##### Evidence
+- Implementation: [run-cli.ts:546 runReportingPhase()](/src/cli/run-cli.ts#L546), [final-report.ts:412 removeFinalReport()](/src/domain/reporting/final-report.ts#L412)
+- Test: [final-report.test.ts:278 removes stale files and directories idempotently](/test/contract/final-report.test.ts#L278), [safety-liveness.invariant.test.ts:268 LIVE-13: every handled final-report branch reaches one terminal outcome](/test/invariant/safety-liveness.invariant.test.ts#L268)
+- Test (property): [final-report.property.test.ts:29 legal success and failure histories reach exactly one terminal state](/test/property/final-report.property.test.ts#L29)
 
 #### Scenario: Surface Cleanup Failure [RAE-FINAL-CLEAN-ERROR]
 IF the spec-check tool cannot establish that the designated report path is absent after a failed attempt, THEN THE spec-check tool SHALL surface an output failure and SHALL NOT claim the `warning_without_report` terminal outcome.
 
 **Postcondition:** The system never reports successful cleanup when invalid residue may remain.
 
+##### Evidence
+- Implementation: [run-cli.ts:546 runReportingPhase()](/src/cli/run-cli.ts#L546)
+- Test (property): [final-report.property.test.ts:52 generated stuttering and failure-point histories preserve lifecycle invariants](/test/property/final-report.property.test.ts#L52)
+- Test (integration): [merge-pipeline.integration.test.ts:296 surfaces cleanup failure instead of claiming warning-without-report](/test/integration/merge-pipeline.integration.test.ts#L296)
+
 #### Scenario: Surface Post-Completion Output Failure [RAE-FINAL-OUTPUT-ERROR]
 IF report cleanup, marker invalidation, warning-summary rewrite, or manifest refresh fails, THEN THE spec-check tool SHALL enter `output_failed`, return fatal `OutputError`, and SHALL NOT claim `valid_report` or `warning_without_report`.
 
 **Postcondition:** Report, summary, and manifest presence reflect only side effects completed before the failed operation. After successful marker invalidation, no completion manifest remains.
+
+##### Evidence
+- Implementation: [run-cli.ts:546 runReportingPhase()](/src/cli/run-cli.ts#L546), [final-report.ts:157 reduceFinalReportLifecycle()](/src/domain/reporting/final-report.ts#L157)
+- Test (property): [final-report.property.test.ts:52 generated stuttering and failure-point histories preserve lifecycle invariants](/test/property/final-report.property.test.ts#L52), [final-report.property.test.ts:82 differentially matches generated histories to an independent fake boundary](/test/property/final-report.property.test.ts#L82)
+- Test (integration): [merge-pipeline.integration.test.ts:296 surfaces cleanup failure instead of claiming warning-without-report](/test/integration/merge-pipeline.integration.test.ts#L296), [merge-pipeline.integration.test.ts:322 surfaces warning-summary persistence failure as OutputError](/test/integration/merge-pipeline.integration.test.ts#L322), [merge-pipeline.integration.test.ts:341 surfaces refreshed-manifest failure as OutputError](/test/integration/merge-pipeline.integration.test.ts#L341)
 
 #### Requirement model
 
@@ -1579,15 +1697,30 @@ WHEN a final-report warning is created, THE warning SHALL contain warning severi
 
 **Postcondition:** Reviewers can distinguish optional-report degradation from missing analysis.
 
+##### Evidence
+- Implementation: [run-cli.ts:673 finalReportFailureFinding()](/src/cli/run-cli.ts#L673)
+- Test (integration): [merge-pipeline.integration.test.ts:179 persists a nonfatal final-report warning and refreshes the summary checksum](/test/integration/merge-pipeline.integration.test.ts#L179), [merge-pipeline.integration.test.ts:223 persists warning for every final-report degradation kind](/test/integration/merge-pipeline.integration.test.ts#L223)
+
 #### Scenario: Refresh Summary Checksum [RAE-FINAL-WARN-HASH]
 WHEN the warning changes `report_summary.md`, THE spec-check tool SHALL first invalidate the old manifest, SHALL compute the new entry from final summary bytes, and SHALL atomically write `manifest.json` after the summary.
 
 **Postcondition:** Every core manifest checksum matches its final core artifact.
 
+##### Evidence
+- Implementation: [run-cli.ts:546 runReportingPhase()](/src/cli/run-cli.ts#L546), [run-cli.ts:656 writeCoreManifest()](/src/cli/run-cli.ts#L656)
+- Test (property): [final-report.property.test.ts:111 an unmanifested report cannot change core entries and warning bytes do](/test/property/final-report.property.test.ts#L111)
+- Test (integration): [merge-pipeline.integration.test.ts:179 persists a nonfatal final-report warning and refreshes the summary checksum](/test/integration/merge-pipeline.integration.test.ts#L179), [merge-pipeline.integration.test.ts:322 surfaces warning-summary persistence failure as OutputError](/test/integration/merge-pipeline.integration.test.ts#L322), [merge-pipeline.integration.test.ts:341 surfaces refreshed-manifest failure as OutputError](/test/integration/merge-pipeline.integration.test.ts#L341)
+
 #### Scenario: Preserve Core Completion [RAE-FINAL-WARN-COMPLETE]
 WHEN the final-report warning is persisted, THE spec-check tool SHALL retain `manifest.json` as the core completion marker and SHALL NOT convert the handled report failure into a fatal pipeline result.
 
 **Postcondition:** The run is complete with an observable warning and no report.
+
+##### Evidence
+- Implementation: [run-cli.ts:546 runReportingPhase()](/src/cli/run-cli.ts#L546), [final-report.ts:157 reduceFinalReportLifecycle()](/src/domain/reporting/final-report.ts#L157)
+- Test: [final-report.test.ts:416 enforces guarded transitions and terminal stuttering](/test/contract/final-report.test.ts#L416)
+- Test (property): [final-report.property.test.ts:29 legal success and failure histories reach exactly one terminal state](/test/property/final-report.property.test.ts#L29), [final-report.property.test.ts:52 generated stuttering and failure-point histories preserve lifecycle invariants](/test/property/final-report.property.test.ts#L52)
+- Test (integration): [merge-pipeline.integration.test.ts:179 persists a nonfatal final-report warning and refreshes the summary checksum](/test/integration/merge-pipeline.integration.test.ts#L179)
 
 #### Requirement model
 
@@ -1758,7 +1891,7 @@ WHEN a finding depends on solver analysis or sampled formalization output, THE s
 **Postcondition:** Formal conclusions remain auditable after the run completes.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:458 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L458)
+- Implementation: [pipeline-helpers.ts:469 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L469)
 - Test: [coverage-gaps.test.ts:44 solver and model artifacts are preserved](/test/contract/coverage-gaps.test.ts#L44), [global.invariant.test.ts:207 INV-4 + INV-13: solver artifacts are persisted](/test/invariant/global.invariant.test.ts#L207)
 
 #### Scenario: Preserve Cross-Side Implication Evidence [RAE-EVID-CROSSIMPLY]
@@ -1767,9 +1900,9 @@ WHEN a code-backwards classification depends on cross-side implication analysis,
 **Postcondition:** Cross-side comparison verdicts are traceable to their formal basis.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:558 runBoundedPairwiseComparison()](/src/cli/pipeline-helpers.ts#L558)
+- Implementation: [cross-implication.ts:332 runBoundedPairwiseComparison()](/src/domain/code-backwards/cross-implication.ts#L332)
 - Test: [global.invariant.test.ts:207 INV-4 + INV-13: solver artifacts are persisted](/test/invariant/global.invariant.test.ts#L207)
-- Test (integration): [pipeline.integration.test.ts:273 cross-side comparison pipeline](/test/integration/pipeline.integration.test.ts#L273)
+- Test (integration): [pipeline.integration.test.ts:279 cross-side comparison pipeline](/test/integration/pipeline.integration.test.ts#L279)
 
 #### Scenario: Prevent Unsupported Verdict [RAE-EVID-FAIL]
 IF a final report conclusion would be emitted without preserved provenance or supporting evidence, THEN THE spec-check tool SHALL suppress that unsupported verdict and SHALL surface the missing-evidence condition as a defect.
@@ -1777,7 +1910,7 @@ IF a final report conclusion would be emitted without preserved provenance or su
 **Postcondition:** Reported conclusions never outrun the preserved evidence set.
 
 ##### Evidence
-- Implementation: [render.ts:295 enforceFindingSupport()](/src/domain/reporting/render.ts#L295)
+- Implementation: [render.ts:314 enforceFindingSupport()](/src/domain/reporting/render.ts#L314)
 - Test: [reporting.test.ts:57 suppresses finding without required evidence](/test/contract/reporting.test.ts#L57), [reporting.test.ts:103 suppresses finding with empty provenance file](/test/contract/reporting.test.ts#L103)
 
 #### Scenario: Preserve LLM Response As Evidence [RAE-EVID-LLM]
@@ -1787,9 +1920,8 @@ WHEN a finding depends on an LLM-backed analysis response, THE spec-check tool S
 
 ##### Evidence
 - Implementation: [qualitative.ts:30 rawResponses](/src/domain/spec-forward/qualitative.ts#L30)
-- Test: [qualitative.test.ts:21 runQualitativePasses returns merged findings](/test/contract/qualitative.test.ts#L21)
+- Test: [qualitative.test.ts:21 runQualitativePasses returns merged findings](/test/contract/qualitative.test.ts#L21), [global.invariant.test.ts:126 INV-11: prompts fence document content](/test/invariant/global.invariant.test.ts#L126), [safety-liveness.invariant.test.ts:334 LIVE-10: qualitative analysis completes](/test/invariant/safety-liveness.invariant.test.ts#L334)
 - Test (property): [code-derived.property.test.ts:40 qualitative review prompts fence all documents](/test/property/code-derived.property.test.ts#L40)
-- Test: [global.invariant.test.ts:126 INV-11: prompts fence document content](/test/invariant/global.invariant.test.ts#L126), [safety-liveness.invariant.test.ts:156 LIVE-10: qualitative analysis completes](/test/invariant/safety-liveness.invariant.test.ts#L156)
 
 #### Scenario: Render Evidence Values As Inert Markdown Data [RAE-EVID-RENDER-SAFE]
 WHEN the spec-check tool renders finding descriptions, provenance, related claim identifiers, or evidence values into Markdown reports, THE spec-check tool SHALL neutralize inline Markdown control syntax in those raw values so they cannot render as links, emphasis, inline code spans, headings, list items, block quotes, or extra table cells.
@@ -1797,7 +1929,7 @@ WHEN the spec-check tool renders finding descriptions, provenance, related claim
 **Postcondition:** Evidence remains inspectable without creating synthetic report structure or misleading reviewer-visible findings.
 
 ##### Evidence
-- Implementation: [render.ts:37 neutralizeMarkdownInline()](/src/domain/reporting/render.ts#L37), [render.ts:351 renderFindingsReport()](/src/domain/reporting/render.ts#L351)
+- Implementation: [render.ts:44 neutralizeMarkdownInline()](/src/domain/reporting/render.ts#L44), [render.ts:370 renderFindingsReport()](/src/domain/reporting/render.ts#L370)
 - Test: [reporting.test.ts:160 neutralizes markdown control payloads in rendered evidence and provenance](/test/contract/reporting.test.ts#L160), [reporting.test.ts:203 neutralization helper escapes block and inline markdown controls](/test/contract/reporting.test.ts#L203), [reporting.test.ts:219 renders merge-conflict and invalid-group evidence as inert data](/test/contract/reporting.test.ts#L219)
 - Test (property): [logic.property.test.ts:801 renderer neutralization keeps markdown payloads inert](/test/property/logic.property.test.ts#L801)
 - Example:
@@ -1948,7 +2080,7 @@ WHEN a finding is created, THE spec-check tool SHALL populate severity, category
 **Postcondition:** Every finding is self-describing and reviewable without external context.
 
 ##### Evidence
-- Implementation: [findings.ts:49 Finding](/src/domain/findings.ts#L49), [render.ts:295 enforceFindingSupport()](/src/domain/reporting/render.ts#L295)
+- Implementation: [findings.ts:49 Finding](/src/domain/findings.ts#L49), [render.ts:314 enforceFindingSupport()](/src/domain/reporting/render.ts#L314)
 - Test: [reporting.test.ts:128 passes finding with all required fields including rationale](/test/contract/reporting.test.ts#L128), [global.invariant.test.ts:50 INV-2: every finding has provenance](/test/invariant/global.invariant.test.ts#L50)
 
 #### Scenario: Missing Required Field Rejected [RAE-SHAPE-FAIL]
@@ -1957,7 +2089,7 @@ IF a finding would be emitted without a required field, THEN THE spec-check tool
 **Postcondition:** The finding pipeline never produces malformed findings.
 
 ##### Evidence
-- Implementation: [render.ts:295 enforceFindingSupport()](/src/domain/reporting/render.ts#L295)
+- Implementation: [render.ts:314 enforceFindingSupport()](/src/domain/reporting/render.ts#L314)
 - Test: [reporting.test.ts:57 suppresses finding without required evidence as defect](/test/contract/reporting.test.ts#L57), [reporting.test.ts:78 suppresses finding with empty rationale as defect](/test/contract/reporting.test.ts#L78), [reporting.test.ts:103 suppresses finding with empty provenance file as defect](/test/contract/reporting.test.ts#L103)
 
 #### Scenario: Catalog Diagnostic Remains Actionable [RAE-SHAPE-CATALOG]
@@ -1966,8 +2098,8 @@ WHEN the tool surfaces a catalog-empty diagnostic, THE spec-check tool SHALL inc
 **Postcondition:** Catalog errors meet the same reviewability standard as normal findings.
 
 ##### Evidence
-- Implementation: [run-cli.ts:58 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L58)
-- Test: [cli.test.ts:194 formats each empty-catalog variant with contextual details](/test/contract/cli.test.ts#L194)
+- Implementation: [run-cli.ts:86 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L86)
+- Test: [cli.test.ts:209 formats each empty-catalog variant with contextual details](/test/contract/cli.test.ts#L209)
 - Example:
 ```typescript
 const { formatCatalogEmptyMessage } = await import("./src/cli/run-cli.ts");
@@ -2178,9 +2310,8 @@ WHEN a later analysis phase runs after earlier findings exist, THE spec-check to
 
 ##### Evidence
 - Implementation: [run-state.ts:66 addFindings()](/src/domain/run-state.ts#L66)
-- Test: [run-state.test.ts:23 appends findings preserving prior entries](/test/contract/run-state.test.ts#L23)
+- Test: [run-state.test.ts:23 appends findings preserving prior entries](/test/contract/run-state.test.ts#L23), [global.invariant.test.ts:79 INV-6: findings are never silently removed](/test/invariant/global.invariant.test.ts#L79)
 - Test (property): [run-state.property.test.ts:20 findings are never removed by later phases](/test/property/run-state.property.test.ts#L20)
-- Test: [global.invariant.test.ts:79 INV-6: findings are never silently removed](/test/invariant/global.invariant.test.ts#L79)
 - Example:
 ```typescript
 const { createInitialRunState, addFindings } = await import("./src/domain/run-state.ts");
@@ -2293,9 +2424,9 @@ SHALL equal the sum of attempts attributed to that scope.
 **Postcondition:** Consumers can compare model quality and efficiency without
 inferring tokens from report size or double-counting concurrent phase time.
 
-- Implementation: [metrics.ts: writeRunMetrics()](/src/domain/reporting/metrics.ts)
-- Implementation: [telemetry.ts: recordOpencodeAttempt()](/src/adapters/telemetry.ts)
-- Test: [metrics.test.ts: reconciles phase and run totals and returns its checksum](/test/contract/metrics.test.ts)
+##### Evidence
+- Implementation: [metrics.ts:23 writeRunMetrics()](/src/domain/reporting/metrics.ts#L23), [telemetry.ts:72 recordPipelinePhase()](/src/adapters/telemetry.ts#L72), [telemetry.ts:114 recordOpencodeAttempt()](/src/adapters/telemetry.ts#L114), [telemetry.ts:127 snapshotCurrentTelemetry()](/src/adapters/telemetry.ts#L127)
+- Test: [metrics.test.ts:13 reconciles phase and run totals and returns its checksum](/test/contract/metrics.test.ts#L13), [telemetry.test.ts:14 keeps concurrent phase attribution isolated and sorts logical calls](/test/contract/telemetry.test.ts#L14)
 
 #### Scenario: Metrics Preserve Manifest Completion Semantics [RAE-METRICS-MANIFEST]
 
@@ -2307,8 +2438,10 @@ reporting, THEN metrics SHALL NOT create a completion marker.
 **Postcondition:** `manifest.json` remains the sole successful-run completion
 marker.
 
-- Implementation: [run-cli.ts: runReportingPhase()](/src/cli/run-cli.ts)
-- Test: [metrics.test.ts: reconciles phase and run totals and returns its checksum](/test/contract/metrics.test.ts)
+##### Evidence
+- Implementation: [run-cli.ts:546 runReportingPhase()](/src/cli/run-cli.ts#L546), [run-cli.ts:691 writeCurrentRunMetrics()](/src/cli/run-cli.ts#L691), [manifest.ts:128 writeManifest()](/src/domain/reporting/manifest.ts#L128)
+- Test: [metrics.test.ts:13 reconciles phase and run totals and returns its checksum](/test/contract/metrics.test.ts#L13)
+- Test (integration): [merge-pipeline.integration.test.ts:153 writes and manifests opt-in run metrics](/test/integration/merge-pipeline.integration.test.ts#L153)
 
 #### Requirement model
 
@@ -2522,9 +2655,9 @@ WHEN a run completes core analysis after producing one or more `FormalizationAtt
 **Postcondition:** Manifest presence marks the last successful core run and mechanically binds all durable attempt evidence to it.
 
 ##### Evidence
-- Implementation: [run-cli.ts:518 runReportingPhase()](/src/cli/run-cli.ts#L518), [formalization-evidence.ts:205 writeFormalizationAttemptSet()](/src/domain/reporting/formalization-evidence.ts#L205)
+- Implementation: [run-cli.ts:546 runReportingPhase()](/src/cli/run-cli.ts#L546), [formalization-evidence.ts:205 writeFormalizationAttemptSet()](/src/domain/reporting/formalization-evidence.ts#L205)
 - Test: [manifest.test.ts:73 lists formalization evidence as an ordinary checksummed file without embedding attempts](/test/contract/manifest.test.ts#L73)
-- Test (integration): [merge-liveness.integration.test.ts:436 removes stale formalization evidence at run start and checksums the replacement](/test/integration/merge-liveness.integration.test.ts#L436)
+- Test (integration): [merge-liveness.integration.test.ts:447 removes stale formalization evidence at run start and checksums the replacement](/test/integration/merge-liveness.integration.test.ts#L447)
 
 #### Scenario: Attempt Evidence Alone Is Not Completion [RAE-MANIFEST-ATTEMPT-INCOMPLETE]
 IF attempt-evidence files exist but core analysis fails or terminates before `manifest.json` is written, THEN consumers SHALL treat the run as incomplete.
@@ -2532,8 +2665,8 @@ IF attempt-evidence files exist but core analysis fails or terminates before `ma
 **Postcondition:** Atomic evidence survival does not weaken core manifest completion semantics.
 
 ##### Evidence
-- Implementation: [run-cli.ts:381 runFormalizationPhaseWithEvidence()](/src/cli/run-cli.ts#L381), [run-cli.ts:518 runReportingPhase()](/src/cli/run-cli.ts#L518)
-- Test (integration): [merge-liveness.integration.test.ts:356 still aborts when every formalization claim fails](/test/integration/merge-liveness.integration.test.ts#L356)
+- Implementation: [run-cli.ts:435 runFormalizationPhaseWithEvidence()](/src/cli/run-cli.ts#L435), [run-cli.ts:546 runReportingPhase()](/src/cli/run-cli.ts#L546)
+- Test (integration): [merge-liveness.integration.test.ts:367 still aborts when every formalization claim fails](/test/integration/merge-liveness.integration.test.ts#L367)
 
 #### Scenario: Mark Complete Core Run [RAE-MANIFEST-DONE]
 WHEN all selected core outputs are written successfully, THE spec-check tool SHALL write a manifest that lists the produced core files and their checksums after all prior core outputs have been finalized.
@@ -2541,9 +2674,9 @@ WHEN all selected core outputs are written successfully, THE spec-check tool SHA
 **Postcondition:** Consumers can treat manifest presence as the marker of a completed core run whether the optional final report later succeeds or fails.
 
 ##### Evidence
-- Implementation: [manifest.ts:106 writeManifest()](/src/domain/reporting/manifest.ts#L106), [run-cli.ts:375 runReportingPhase()](/src/cli/run-cli.ts#L375)
-- Test: [manifest.test.ts:13 writes checksums and manifest last](/test/contract/manifest.test.ts#L13)
-- Test (integration): [pipeline.integration.test.ts:210 manifest checksums match actual file content](/test/integration/pipeline.integration.test.ts#L210)
+- Implementation: [manifest.ts:128 writeManifest()](/src/domain/reporting/manifest.ts#L128), [run-cli.ts:546 runReportingPhase()](/src/cli/run-cli.ts#L546)
+- Test: [manifest.test.ts:19 writes checksums and manifest last](/test/contract/manifest.test.ts#L19)
+- Test (integration): [pipeline.integration.test.ts:215 manifest checksums match actual file content](/test/integration/pipeline.integration.test.ts#L215)
 
 #### Scenario: Prevent Partial Core Completion Signal [RAE-MANIFEST-FAIL]
 IF core analysis fails before all selected core outputs are finalized, THEN THE spec-check tool SHALL NOT leave a final manifest that implies completed core output.
@@ -2551,7 +2684,7 @@ IF core analysis fails before all selected core outputs are finalized, THEN THE 
 **Postcondition:** Partial core runs cannot be mistaken for completed analyses.
 
 ##### Evidence
-- Implementation: [run-cli.ts:349 runReportingPhase()](/src/cli/run-cli.ts#L349)
+- Implementation: [run-cli.ts:546 runReportingPhase()](/src/cli/run-cli.ts#L546)
 - Test: [coverage-gaps.test.ts:59 manifest absence signals incomplete run](/test/contract/coverage-gaps.test.ts#L59)
 
 #### Scenario: Invalidate Stale Manifest From Prior Run [RAE-MANIFEST-STALE]
@@ -2560,13 +2693,19 @@ IF the output directory already contains a manifest from a previous run WHEN a n
 **Postcondition:** Only a successfully completed core run can leave a current manifest in the output directory.
 
 ##### Evidence
-- Implementation: [manifest.ts:133 invalidateStaleManifest()](/src/domain/reporting/manifest.ts#L133), [run-cli.ts:162 runIngestionPhases()](/src/cli/run-cli.ts#L162)
-- Test: [manifest.test.ts:46 removes stale manifest from prior run](/test/contract/manifest.test.ts#L46), [manifest.test.ts:59 returns false when no stale manifest exists](/test/contract/manifest.test.ts#L59)
+- Implementation: [manifest.ts:158 invalidateStaleManifest()](/src/domain/reporting/manifest.ts#L158), [run-cli.ts:279 runIngestionPhases()](/src/cli/run-cli.ts#L279)
+- Test: [manifest.test.ts:52 removes stale manifest from prior run](/test/contract/manifest.test.ts#L52), [manifest.test.ts:65 returns false when no stale manifest exists](/test/contract/manifest.test.ts#L65)
 
 #### Scenario: Exclude Final Report From Manifest [RAE-MANIFEST-NO-FINAL]
 WHEN `manifest.json` is written or refreshed, THE spec-check tool SHALL NOT include an entry whose path is `report.md`.
 
 **Postcondition:** The report does not attest to itself and remains a post-completion derivative.
+
+##### Evidence
+- Implementation: [manifest.ts:88 validateCoreManifestEntries()](/src/domain/reporting/manifest.ts#L88), [run-cli.ts:656 writeCoreManifest()](/src/cli/run-cli.ts#L656)
+- Test: [safety-liveness.invariant.test.ts:262 SAFE-18: final report never enters core manifest descriptors](/test/invariant/safety-liveness.invariant.test.ts#L262)
+- Test (property): [final-report.property.test.ts:111 an unmanifested report cannot change core entries and warning bytes do](/test/property/final-report.property.test.ts#L111), [final-report.property.test.ts:124 the production core-manifest guard rejects report descriptors](/test/property/final-report.property.test.ts#L124)
+- Test (integration): [merge-pipeline.integration.test.ts:179 persists a nonfatal final-report warning and refreshes the summary checksum](/test/integration/merge-pipeline.integration.test.ts#L179), [merge-pipeline.integration.test.ts:235 removes stale report output before the current final-report attempt](/test/integration/merge-pipeline.integration.test.ts#L235)
 
 #### Requirement model
 
@@ -2875,7 +3014,7 @@ IF a run fails or the process terminates after an attempt-set evidence file is a
 **Postcondition:** Surviving attempt evidence is auditable partial-run output and cannot be mistaken for a successful run.
 
 ##### Evidence
-- Implementation: [run-cli.ts:381 runFormalizationPhaseWithEvidence()](/src/cli/run-cli.ts#L381), [run-cli.ts:400 runFormalizationPhaseWithEvidence()](/src/cli/run-cli.ts#L400)
+- Implementation: [run-cli.ts:435 runFormalizationPhaseWithEvidence()](/src/cli/run-cli.ts#L435)
 - Test (integration): [merge-liveness.integration.test.ts:356 still aborts when every formalization claim fails](/test/integration/merge-liveness.integration.test.ts#L356)
 
 ### Requirement: Manifest Content Schema [RAE-MANIFEST-SCHEMA]
@@ -2890,8 +3029,8 @@ WHEN the manifest is written, every entry SHALL reference a file that exists und
 **Postcondition:** Manifest integrity can be verified mechanically.
 
 ##### Evidence
-- Implementation: [manifest.ts:65 buildManifestEntries()](/src/domain/reporting/manifest.ts#L65)
-- Test: [manifest.test.ts:34 manifest entries match actual file checksums](/test/contract/manifest.test.ts#L34), [global.invariant.test.ts:113 INV-8: manifest entries have correct checksums](/test/invariant/global.invariant.test.ts#L113)
+- Implementation: [manifest.ts:66 buildManifestEntries()](/src/domain/reporting/manifest.ts#L66)
+- Test: [manifest.test.ts:40 manifest entries match actual file checksums](/test/contract/manifest.test.ts#L40), [global.invariant.test.ts:113 INV-8: manifest entries have correct checksums](/test/invariant/global.invariant.test.ts#L113)
 - Test (property): [manifest.property.test.ts:9 every manifest entry has correct checksum](/test/property/manifest.property.test.ts#L9)
 - Example:
 ```typescript
@@ -2909,8 +3048,8 @@ WHEN the manifest computes checksums, THE spec-check tool SHALL use SHA-256 and 
 **Postcondition:** Checksum format is predictable and interoperable.
 
 ##### Evidence
-- Implementation: [fs.ts:96 sha256Hex()](/src/adapters/fs.ts#L96)
-- Test: [fs.test.ts:29 computes sha256 lowercase hex of correct length](/test/contract/fs.test.ts#L29)
+- Implementation: [fs.ts:119 sha256Hex()](/src/adapters/fs.ts#L119)
+- Test: [fs.test.ts:30 computes sha256 lowercase hex of correct length](/test/contract/fs.test.ts#L30)
 - Test (property): [manifest.property.test.ts:9 every manifest entry has correct checksum](/test/property/manifest.property.test.ts#L9)
 - Example:
 ```typescript
@@ -3014,8 +3153,8 @@ WHEN an output path resolves to a location within the configured output director
 **Postcondition:** The artifact is created at the intended location.
 
 ##### Evidence
-- Implementation: [fs.ts:32 resolveConfinedOutputPath()](/src/adapters/fs.ts#L32)
-- Test: [fs.test.ts:11 allows path within output directory](/test/contract/fs.test.ts#L11), [global.invariant.test.ts:102 INV-7: all writes are confined](/test/invariant/global.invariant.test.ts#L102)
+- Implementation: [fs.ts:46 resolveConfinedOutputPath()](/src/adapters/fs.ts#L46)
+- Test: [fs.test.ts:12 allows path within output directory](/test/contract/fs.test.ts#L12), [global.invariant.test.ts:102 INV-7: all writes are confined](/test/invariant/global.invariant.test.ts#L102)
 - Example:
 ```typescript
 const { resolveConfinedOutputPath } = await import("./src/adapters/fs.ts");
@@ -3029,8 +3168,8 @@ IF an output path resolves to a location outside the configured output directory
 **Postcondition:** No file is written outside the declared output boundary.
 
 ##### Evidence
-- Implementation: [fs.ts:32 resolveConfinedOutputPath()](/src/adapters/fs.ts#L32)
-- Test: [fs.test.ts:17 rejects path traversal at branding boundary](/test/contract/fs.test.ts#L17), [fs.test.ts:23 rejects absolute path at branding boundary](/test/contract/fs.test.ts#L23), [global.invariant.test.ts:102 INV-7: all writes are confined](/test/invariant/global.invariant.test.ts#L102)
+- Implementation: [fs.ts:46 resolveConfinedOutputPath()](/src/adapters/fs.ts#L46)
+- Test: [fs.test.ts:18 rejects path traversal at branding boundary](/test/contract/fs.test.ts#L18), [fs.test.ts:24 rejects absolute path at branding boundary](/test/contract/fs.test.ts#L24), [global.invariant.test.ts:102 INV-7: all writes are confined](/test/invariant/global.invariant.test.ts#L102)
 - Example:
 ```typescript
 const { resolveConfinedOutputPath } = await import("./src/adapters/fs.ts");
@@ -3090,8 +3229,8 @@ WHEN an output file write completes successfully, THE spec-check tool SHALL rena
 **Postcondition:** The final path contains complete content.
 
 ##### Evidence
-- Implementation: [fs.ts:66 writeOutputAtomic()](/src/adapters/fs.ts#L66)
-- Test: [fs.test.ts:35 writes atomic output file with correct content](/test/contract/fs.test.ts#L35), [global.invariant.test.ts:197 INV-3: writeOutputAtomic produces correct content via atomic rename](/test/invariant/global.invariant.test.ts#L197)
+- Implementation: [fs.ts:83 writeOutputAtomic()](/src/adapters/fs.ts#L83)
+- Test: [fs.test.ts:36 writes atomic output file with correct content](/test/contract/fs.test.ts#L36), [global.invariant.test.ts:197 INV-3: writeOutputAtomic produces correct content via atomic rename](/test/invariant/global.invariant.test.ts#L197)
 - Example:
 ```typescript
 const { writeOutputAtomic } = await import("./src/adapters/fs.ts");
@@ -3110,7 +3249,7 @@ IF the process is interrupted during an output file write, THEN the final path S
 **Postcondition:** Consumers of the output directory never encounter partially written files at final paths.
 
 ##### Evidence
-- Implementation: [fs.ts:66 writeOutputAtomic()](/src/adapters/fs.ts#L66)
+- Implementation: [fs.ts:83 writeOutputAtomic()](/src/adapters/fs.ts#L83)
 - Test: [coverage-gaps.test.ts:72 writeOutputAtomic uses temp+rename to prevent partial writes](/test/contract/coverage-gaps.test.ts#L72)
 
 #### Requirement model

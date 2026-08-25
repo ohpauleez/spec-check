@@ -669,6 +669,36 @@ WHEN the core evidence manifest is successfully written, THE spec-check tool SHA
 - `openspec/changes/archive/2026-08-24-add-final-evidence-report/proposal.md#Domain-Model`
 - `openspec/changes/archive/2026-08-24-add-final-evidence-report/design.md#System-Model`
 
+#### Scenario: Generate After Core Completion [RAE-FINAL-AFTER-CORE]
+WHEN final-report generation starts, THE spec-check tool SHALL have already finalized the phase reports, `report_summary.md`, and the core `manifest.json`.
+
+**Postcondition:** The report agent can read a completion manifest that describes the complete core evidence bundle.
+
+##### Evidence
+- Implementation: [run-cli.ts:546 runReportingPhase()](/src/cli/run-cli.ts#L546)
+- Test (integration): [merge-pipeline.integration.test.ts:179 persists a nonfatal final-report warning and refreshes the summary checksum](/test/integration/merge-pipeline.integration.test.ts#L179)
+
+#### Scenario: Save Valid Final Report [RAE-FINAL-SAVE]
+WHEN the report agent returns a valid path and Markdown payload, THE spec-check tool SHALL atomically publish and independently validate `report.md`.
+
+**Postcondition:** Exactly one valid final report is available for the current run.
+
+##### Evidence
+- Implementation: [final-report.ts:257 generateFinalReport()](/src/domain/reporting/final-report.ts#L257), [final-report.ts:359 validateFinalReport()](/src/domain/reporting/final-report.ts#L359)
+- Test: [final-report.test.ts:290 uses the acknowledgment only for equality and validates the designated file](/test/contract/final-report.test.ts#L290)
+- Test (integration): [merge-pipeline.integration.test.ts:235 removes stale report output before the current final-report attempt](/test/integration/merge-pipeline.integration.test.ts#L235)
+
+#### Scenario: Final Report Is Optional [RAE-FINAL-OPTIONAL]
+IF final-report generation or validation fails after core completion, THEN THE spec-check tool SHALL preserve the completed analysis and SHALL represent the failure as a warning rather than a fatal pipeline error.
+
+**Postcondition:** Core completion remains true even though no final report is available; the warning may produce the existing findings-present exit code.
+
+##### Evidence
+- Implementation: [run-cli.ts:546 runReportingPhase()](/src/cli/run-cli.ts#L546), [run-cli.ts:673 finalReportFailureFinding()](/src/cli/run-cli.ts#L673), [final-report.ts:157 reduceFinalReportLifecycle()](/src/domain/reporting/final-report.ts#L157)
+- Test: [final-report.test.ts:390 maps terminal OpenCode failures to a nonfatal agent failure](/test/contract/final-report.test.ts#L390), [final-report.test.ts:416 enforces guarded transitions and terminal stuttering](/test/contract/final-report.test.ts#L416)
+- Test (property): [final-report.property.test.ts:29 legal success and failure histories reach exactly one terminal state](/test/property/final-report.property.test.ts#L29), [final-report.property.test.ts:52 generated stuttering and failure-point histories preserve lifecycle invariants](/test/property/final-report.property.test.ts#L52)
+- Test (integration): [merge-pipeline.integration.test.ts:179 persists a nonfatal final-report warning and refreshes the summary checksum](/test/integration/merge-pipeline.integration.test.ts#L179), [merge-pipeline.integration.test.ts:223 persists warning for every final-report degradation kind](/test/integration/merge-pipeline.integration.test.ts#L223)
+
 #### Requirement model
 
 ```alloy
@@ -931,33 +961,7 @@ assert final_report_starts_after_core_completion {
 assert core_completion_monotonic_after_attempt {
   always (Run.coreComplete = True implies Run.coreComplete' = True)
 }
-```
 
-#### Scenario: Generate After Core Completion [RAE-FINAL-AFTER-CORE]
-WHEN final-report generation starts, THE spec-check tool SHALL have already finalized the phase reports, `report_summary.md`, and the core `manifest.json`.
-
-**Postcondition:** The report agent can read a completion manifest that describes the complete core evidence bundle.
-
-##### Evidence
-- Implementation: [run-cli.ts:546 runReportingPhase()](/src/cli/run-cli.ts#L546)
-- Test (integration): [merge-pipeline.integration.test.ts:179 persists a nonfatal final-report warning and refreshes the summary checksum](/test/integration/merge-pipeline.integration.test.ts#L179)
-
-#### Scenario: Save Valid Final Report [RAE-FINAL-SAVE]
-WHEN the report agent returns a valid path and Markdown payload, THE spec-check tool SHALL atomically publish and independently validate `report.md`.
-
-**Postcondition:** Exactly one valid final report is available for the current run.
-
-##### Evidence
-- Implementation: [final-report.ts:257 generateFinalReport()](/src/domain/reporting/final-report.ts#L257), [final-report.ts:359 validateFinalReport()](/src/domain/reporting/final-report.ts#L359)
-- Test: [final-report.test.ts:290 uses the acknowledgment only for equality and validates the designated file](/test/contract/final-report.test.ts#L290)
-- Test (integration): [merge-pipeline.integration.test.ts:235 removes stale report output before the current final-report attempt](/test/integration/merge-pipeline.integration.test.ts#L235)
-
-#### Scenario: Final Report Is Optional [RAE-FINAL-OPTIONAL]
-IF final-report generation or validation fails after core completion, THEN THE spec-check tool SHALL preserve the completed analysis and SHALL represent the failure as a warning rather than a fatal pipeline error.
-
-**Postcondition:** Core completion remains true even though no final report is available; the warning may produce the existing findings-present exit code.
-
-```alloy
 // RAE-FINAL-OPTIONAL: handled failure is observable but nonfatal to core completion.
 assert handled_failure_preserves_core {
   always (Run.finalStage = WarningPersisted implies {
@@ -968,12 +972,6 @@ assert handled_failure_preserves_core {
   })
 }
 ```
-
-##### Evidence
-- Implementation: [run-cli.ts:546 runReportingPhase()](/src/cli/run-cli.ts#L546), [run-cli.ts:673 finalReportFailureFinding()](/src/cli/run-cli.ts#L673), [final-report.ts:157 reduceFinalReportLifecycle()](/src/domain/reporting/final-report.ts#L157)
-- Test: [final-report.test.ts:390 maps terminal OpenCode failures to a nonfatal agent failure](/test/contract/final-report.test.ts#L390), [final-report.test.ts:416 enforces guarded transitions and terminal stuttering](/test/contract/final-report.test.ts#L416)
-- Test (property): [final-report.property.test.ts:29 legal success and failure histories reach exactly one terminal state](/test/property/final-report.property.test.ts#L29), [final-report.property.test.ts:52 generated stuttering and failure-point histories preserve lifecycle invariants](/test/property/final-report.property.test.ts#L52)
-- Test (integration): [merge-pipeline.integration.test.ts:179 persists a nonfatal final-report warning and refreshes the summary checksum](/test/integration/merge-pipeline.integration.test.ts#L179), [merge-pipeline.integration.test.ts:223 persists warning for every final-report degradation kind](/test/integration/merge-pipeline.integration.test.ts#L223)
 
 ### Requirement: Bind Final Report Paths [RAE-FINAL-PATHS]
 THE spec-check tool SHALL resolve the configured output directory to an absolute path and SHALL use one confined absolute `report.md` path for the prompt, payload comparison, atomic publication, and filesystem validation.
@@ -2837,6 +2835,34 @@ WHEN the spec-check tool records attached formalization attempts, THE spec-check
 - `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Data Design`
 - `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Evidence And Artifact Verification`
 
+#### Scenario: Persist Separate Atomic File Per Invocation [RAE-FORMAL-ATTEMPT-ATOMIC]
+WHEN one specs-forward or generated-spec formalization invocation produces attempt evidence, THE spec-check tool SHALL atomically finalize exactly one evidence file containing that invocation's `FormalizationAttemptSet` envelope.
+
+**Postcondition:** A complete evidence file contains attempts from one invocation and one claim-index namespace only.
+
+##### Evidence
+- Implementation: [formalization-evidence.ts:58 buildFormalizationAttemptSet()](/src/domain/reporting/formalization-evidence.ts#L58), [formalization-evidence.ts:159 formalizationAttemptSetPath()](/src/domain/reporting/formalization-evidence.ts#L159), [formalization-evidence.ts:205 writeFormalizationAttemptSet()](/src/domain/reporting/formalization-evidence.ts#L205), [gen-formal.ts:71 formalizeGeneratedSpecs()](/src/domain/code-backwards/gen-formal.ts#L71)
+- Test: [batch-evidence.test.ts:121 records complete pointer-only evidence, cleans up, and persists no claim text](/test/contract/batch-evidence.test.ts#L121), [manifest.test.ts:102 uses deterministic discriminated paths and collision-free generated ordinals](/test/contract/manifest.test.ts#L102)
+- Test (property): [semantic-batching.property.test.ts:414 keeps attempt evidence isolated between two concurrent invocations](/test/property/semantic-batching.property.test.ts#L414)
+- Test (integration): [merge-liveness.integration.test.ts:436 removes stale formalization evidence at run start and checksums the replacement](/test/integration/merge-liveness.integration.test.ts#L436)
+- Example:
+```typescript
+const { buildFormalizationAttemptSet, formalizationAttemptSetPath } = await import("./src/domain/reporting/formalization-evidence.ts");
+const attemptSet = buildFormalizationAttemptSet({ kind: "generated_spec", ordinal: 0, capability: "billing" }, []); //=> type Object
+attemptSet.claimSet.kind; //=> generated_spec
+attemptSet.attempts.length; //=> 0
+formalizationAttemptSetPath(attemptSet.claimSet).includes("generated_spec_000000"); //=> true
+```
+
+#### Scenario: Failed Run May Retain Attempt Evidence [RAE-FORMAL-ATTEMPT-FAILED-RUN]
+IF a run fails or the process terminates after an attempt-set evidence file is atomically finalized, THEN THE file MAY remain while `manifest.json` is absent.
+
+**Postcondition:** Surviving attempt evidence is auditable partial-run output and cannot be mistaken for a successful run.
+
+##### Evidence
+- Implementation: [run-cli.ts:435 runFormalizationPhaseWithEvidence()](/src/cli/run-cli.ts#L435)
+- Test (integration): [merge-liveness.integration.test.ts:356 still aborts when every formalization claim fails](/test/integration/merge-liveness.integration.test.ts#L356)
+
 #### Requirement model
 
 ```alloy
@@ -2988,34 +3014,6 @@ run both_claimset_namespaces {
 } for 3 Finding, 2 Evidence, 2 Provenance, 2 Artifact, 2 Heading,
   8 ManifestEntry, 1 WriteAttempt, 1 OutputFile, 2 AttemptSet, 2 Capability, 2 Ordinal, 8 steps expect 1
 ```
-
-#### Scenario: Persist Separate Atomic File Per Invocation [RAE-FORMAL-ATTEMPT-ATOMIC]
-WHEN one specs-forward or generated-spec formalization invocation produces attempt evidence, THE spec-check tool SHALL atomically finalize exactly one evidence file containing that invocation's `FormalizationAttemptSet` envelope.
-
-**Postcondition:** A complete evidence file contains attempts from one invocation and one claim-index namespace only.
-
-##### Evidence
-- Implementation: [formalization-evidence.ts:58 buildFormalizationAttemptSet()](/src/domain/reporting/formalization-evidence.ts#L58), [formalization-evidence.ts:159 formalizationAttemptSetPath()](/src/domain/reporting/formalization-evidence.ts#L159), [formalization-evidence.ts:205 writeFormalizationAttemptSet()](/src/domain/reporting/formalization-evidence.ts#L205), [gen-formal.ts:71 formalizeGeneratedSpecs()](/src/domain/code-backwards/gen-formal.ts#L71)
-- Test: [batch-evidence.test.ts:121 records complete pointer-only evidence, cleans up, and persists no claim text](/test/contract/batch-evidence.test.ts#L121), [manifest.test.ts:102 uses deterministic discriminated paths and collision-free generated ordinals](/test/contract/manifest.test.ts#L102)
-- Test (property): [semantic-batching.property.test.ts:414 keeps attempt evidence isolated between two concurrent invocations](/test/property/semantic-batching.property.test.ts#L414)
-- Test (integration): [merge-liveness.integration.test.ts:436 removes stale formalization evidence at run start and checksums the replacement](/test/integration/merge-liveness.integration.test.ts#L436)
-- Example:
-```typescript
-const { buildFormalizationAttemptSet, formalizationAttemptSetPath } = await import("./src/domain/reporting/formalization-evidence.ts");
-const attemptSet = buildFormalizationAttemptSet({ kind: "generated_spec", ordinal: 0, capability: "billing" }, []); //=> type Object
-attemptSet.claimSet.kind; //=> generated_spec
-attemptSet.attempts.length; //=> 0
-formalizationAttemptSetPath(attemptSet.claimSet).includes("generated_spec_000000"); //=> true
-```
-
-#### Scenario: Failed Run May Retain Attempt Evidence [RAE-FORMAL-ATTEMPT-FAILED-RUN]
-IF a run fails or the process terminates after an attempt-set evidence file is atomically finalized, THEN THE file MAY remain while `manifest.json` is absent.
-
-**Postcondition:** Surviving attempt evidence is auditable partial-run output and cannot be mistaken for a successful run.
-
-##### Evidence
-- Implementation: [run-cli.ts:435 runFormalizationPhaseWithEvidence()](/src/cli/run-cli.ts#L435)
-- Test (integration): [merge-liveness.integration.test.ts:356 still aborts when every formalization claim fails](/test/integration/merge-liveness.integration.test.ts#L356)
 
 ### Requirement: Manifest Content Schema [RAE-MANIFEST-SCHEMA]
 THE spec-check tool SHALL write the manifest as a UTF-8 JSON file containing an array of output file entries, each with `path` (relative to output directory), `checksum` (SHA-256 hex), and `phase` (originating phase name) fields.
@@ -3297,7 +3295,7 @@ fact no_temp_at_final {
 }
 ```
 
-#### System model: State machine and invariant checks
+### System model: State machine and invariant checks
 
 ```alloy
 // --- Transition system ---

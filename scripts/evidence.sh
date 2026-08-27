@@ -6,6 +6,10 @@ COPROC_SCOPE="file"
 VERBOSE=0
 DEBUG=0
 ALLOY_MODE=""
+EVIDENCE_WARNING_COUNT=0
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
+REPOSITORY_ROOT="$(cd "$SCRIPT_DIR/.." && pwd -P)"
 
 CURRENT_LANG=""
 CURRENT_FILE=""
@@ -47,6 +51,11 @@ usage() {
   printf '  --alloy disabled (unless --alloy is provided)\n'
   printf '  Supported Evidence evaluator languages: java, javascript, typescript, js, ts\n'
   printf '  Unsupported Evidence example languages are skipped.\n'
+  printf '\n'
+  printf 'Evidence links:\n'
+  printf '  Implementation and Test links are checked against repository files.\n'
+  printf '  Label filenames and lines must match link targets. Named symbols and\n'
+  printf '  test descriptions must occur on the exact target line. Mismatches warn.\n'
   printf '\n'
   printf 'Expectation comments:\n'
   printf '  Inside Evidence example code blocks, trailing comments define expectations:\n'
@@ -97,6 +106,185 @@ trim() {
   value="${value#${value%%[![:space:]]*}}"
   value="${value%${value##*[![:space:]]}}"
   printf '%s' "$value"
+}
+
+warn_evidence_link() {
+  local markdown_file="$1"
+  local source_line="$2"
+  local evidence_type="$3"
+  local target="$4"
+  local expected="$5"
+  local actual="$6"
+
+  EVIDENCE_WARNING_COUNT=$((EVIDENCE_WARNING_COUNT + 1))
+  printf 'WARNING: Evidence link does not match target\n' >&2
+  printf 'Spec: %s:%s\n' "$markdown_file" "$source_line" >&2
+  printf 'Type: %s\n' "$evidence_type" >&2
+  printf 'Target: %s\n' "$target" >&2
+  printf 'Expected: %s\n' "$expected" >&2
+  printf 'Actual: %s\n' "$actual" >&2
+}
+
+TARGET_LINE=""
+TARGET_LINE_FOUND=0
+
+read_target_line() {
+  local target_file="$1"
+  local target_line_no="$2"
+  local current_line=""
+  local current_line_no=0
+
+  TARGET_LINE=""
+  TARGET_LINE_FOUND=0
+  while IFS= read -r current_line || [[ -n "$current_line" ]]; do
+    current_line_no=$((current_line_no + 1))
+    if [[ "$current_line_no" == "$target_line_no" ]]; then
+      TARGET_LINE="$current_line"
+      TARGET_LINE_FOUND=1
+      return
+    fi
+  done < "$target_file"
+  return 0
+}
+
+validate_evidence_link() {
+  local markdown_file="$1"
+  local source_line="$2"
+  local evidence_type="$3"
+  local label="$4"
+  local url="$5"
+  local label_file=""
+  local label_line=""
+  local description=""
+  local url_path=""
+  local url_line=""
+
+  if [[ "$label" =~ ^([^:[:space:]]+):([0-9]+)[[:space:]]+(.+)$ ]]; then
+    label_file="${BASH_REMATCH[1]}"
+    label_line="${BASH_REMATCH[2]}"
+    description="${BASH_REMATCH[3]}"
+  else
+    warn_evidence_link "$markdown_file" "$source_line" "$evidence_type" "$url" \
+      '<File>:<Line> <method/function or test description>' "$label"
+    return
+  fi
+
+  if [[ "$url" =~ ^(/[^#]+)#L([0-9]+)$ ]]; then
+    url_path="${BASH_REMATCH[1]}"
+    url_line="${BASH_REMATCH[2]}"
+  else
+    warn_evidence_link "$markdown_file" "$source_line" "$evidence_type" "$url" \
+      '/<relative-path>#L<line>' "$url"
+    return
+  fi
+
+  local target_name="${url_path##*/}"
+  if [[ "$label_file" != "$target_name" ]]; then
+    warn_evidence_link "$markdown_file" "$source_line" "$evidence_type" "$url" \
+      "filename $target_name" "filename $label_file"
+  fi
+  if [[ "$label_line" != "$url_line" ]]; then
+    warn_evidence_link "$markdown_file" "$source_line" "$evidence_type" "$url" \
+      "line $url_line" "line $label_line"
+  fi
+  if [[ "$url_line" == "0" || "$url_path" =~ (^|/)\.\.(/|$) ]]; then
+    warn_evidence_link "$markdown_file" "$source_line" "$evidence_type" "$url" \
+      'a repository-relative file and a positive line number' "$url"
+    return
+  fi
+
+  local target_file="$REPOSITORY_ROOT/${url_path#/}"
+  if [[ ! -f "$target_file" ]]; then
+    warn_evidence_link "$markdown_file" "$source_line" "$evidence_type" "$url" \
+      'an existing repository file' 'file not found'
+    return
+  fi
+
+  local target_dir="${target_file%/*}"
+  local target_base="${target_file##*/}"
+  local resolved_dir=""
+  resolved_dir="$(cd "$target_dir" 2>/dev/null && pwd -P)" || true
+  local resolved_target="$resolved_dir/$target_base"
+  if [[ -z "$resolved_dir" || "$resolved_target" != "$REPOSITORY_ROOT/"* ]]; then
+    warn_evidence_link "$markdown_file" "$source_line" "$evidence_type" "$url" \
+      'a target inside the repository' "$resolved_target"
+    return
+  fi
+
+  read_target_line "$resolved_target" "$url_line"
+  if [[ "$TARGET_LINE_FOUND" != "1" ]]; then
+    warn_evidence_link "$markdown_file" "$source_line" "$evidence_type" "$url" \
+      "line $url_line to exist" 'line not found'
+    return
+  fi
+
+  local expected_text=""
+  if [[ "$evidence_type" == "Implementation" ]]; then
+    if [[ "$description" =~ ^[[:alpha:]_$][[:alnum:]_$.]*(\(\))?$ ]]; then
+      expected_text="${description%\(\)}"
+    else
+      return 0
+    fi
+  else
+    expected_text="$description"
+  fi
+
+  if [[ "$TARGET_LINE" != *"$expected_text"* ]]; then
+    warn_evidence_link "$markdown_file" "$source_line" "$evidence_type" "$url" \
+      "$expected_text" "$TARGET_LINE"
+  fi
+}
+
+validate_evidence_links() {
+  local markdown_file="$1"
+  local source_line="$2"
+  local evidence_type="$3"
+  local remaining="$4"
+  local found_link=0
+
+  while [[ "$remaining" == *"["* ]]; do
+    remaining="${remaining#*\[}"
+    local depth=1
+    local index=0
+    local label_end=-1
+    while (( index < ${#remaining} )); do
+      local character="${remaining:index:1}"
+      if [[ "$character" == "[" ]]; then
+        depth=$((depth + 1))
+      elif [[ "$character" == "]" ]]; then
+        depth=$((depth - 1))
+        if (( depth == 0 )); then
+          label_end=$index
+          break
+        fi
+      fi
+      index=$((index + 1))
+    done
+
+    if (( label_end < 0 )) || [[ "${remaining:label_end + 1:1}" != "(" ]]; then
+      warn_evidence_link "$markdown_file" "$source_line" "$evidence_type" '<unparseable>' \
+        'a Markdown link in [label](target) form' "$remaining"
+      return
+    fi
+
+    local label="${remaining:0:label_end}"
+    local after_label="${remaining:label_end + 2}"
+    if [[ "$after_label" != *")"* ]]; then
+      warn_evidence_link "$markdown_file" "$source_line" "$evidence_type" '<unparseable>' \
+        'a Markdown link in [label](target) form' "$after_label"
+      return
+    fi
+
+    local url="${after_label%%)*}"
+    remaining="${after_label#*)}"
+    found_link=1
+    validate_evidence_link "$markdown_file" "$source_line" "$evidence_type" "$label" "$url"
+  done
+
+  if [[ "$found_link" != "1" ]]; then
+    warn_evidence_link "$markdown_file" "$source_line" "$evidence_type" '<missing>' \
+      'at least one Markdown evidence link' "$4"
+  fi
 }
 
 cleanup_coproc() {
@@ -771,6 +959,22 @@ process_markdown_file() {
       continue
     fi
 
+    if (( in_evidence == 1 )); then
+      if [[ "$line" == "- Implementation:"* ]]; then
+        validate_evidence_links "$markdown_file" "$line_no" "Implementation" "${line#- Implementation:}"
+        continue
+      elif [[ "$line" == "- Test:"* ]]; then
+        validate_evidence_links "$markdown_file" "$line_no" "Test" "${line#- Test:}"
+        continue
+      elif [[ "$line" == "- Test (property):"* ]]; then
+        validate_evidence_links "$markdown_file" "$line_no" "Test (property)" "${line#- Test (property):}"
+        continue
+      elif [[ "$line" == "- Test (integration):"* ]]; then
+        validate_evidence_links "$markdown_file" "$line_no" "Test (integration)" "${line#- Test (integration):}"
+        continue
+      fi
+    fi
+
     if (( expecting_example == 1 )) && [[ "$line" =~ ^\`\`\`([[:alnum:]_+-]+)[[:space:]]*$ ]]; then
       block_language="${BASH_REMATCH[1]}"
       verbose_log "BEGIN Example block ($block_language) at $markdown_file:$line_no"
@@ -889,4 +1093,5 @@ if [[ -n "$ALLOY_MODE" ]]; then
 fi
 run_alloy_phase
 
+printf 'Evidence link warnings: %s\n' "$EVIDENCE_WARNING_COUNT" >&2
 printf 'Evidence checks passed\n'

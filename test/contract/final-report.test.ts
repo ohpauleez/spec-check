@@ -16,10 +16,14 @@ import {
 } from "../../src/domain/reporting/final-report.js";
 import {
   FINAL_REPORT_AGENT_NAME,
-  buildFinalReportAgentConfig,
   buildFinalReportPrompt,
   isPermissionLiteralPath,
 } from "../../src/domain/prompts/final-report.js";
+import { buildFinalReportAgentConfig } from "../../src/adapters/opencode-protocol.js";
+
+vi.mock("../../src/adapters/opencode-runtime.js", () => ({
+  resolveOpencodeRuntime: vi.fn(async () => ({ ok: true, value: { binaryPath: "opencode", version: "1.19.3", major: 1 } })),
+}));
 
 const VALID_REPORT = [
   "# Final spec-check Assessment",
@@ -184,6 +188,28 @@ describe("final-report filesystem boundary", () => {
     expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
   });
 
+  it.each(["analysis-output/report_summary.md", "requirements/spec.md#REQ-ONE", "custom space/évidence.md:12", "README.md", "root-artifact"])("accepts safe custom repository citations: %s", async (citation) => {
+    traceSpec("RAE-FINAL-VALIDATE", "RAE-FINAL-VALID-FILE", "RAE-RELATIVE-CITATIONS", "RAE-CITATION-CUSTOM");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-citations-"));
+    const path = join(root, "report.md");
+    const reference = citation === "root-artifact" ? "[artifact](root-artifact)" : `\`${citation}\``;
+    const content = VALID_REPORT.replaceAll("`spec-check-output/manifest.json`", reference).replace(
+      "## Prioritized Findings", `## Prioritized Findings\n### 1. Custom artifact\n- **Artifacts:** ${reference}`,
+    );
+    await writeFile(path, content);
+    expect(await validateFinalReport(path)).toMatchObject({ ok: true });
+  });
+
+  it.each(["https://example.invalid/requirements/spec.md", "/requirements/spec.md", "C:/requirements/spec.md", "\\\\server\\share\\spec.md", "requirements/../../etc/passwd", "../requirements/spec.md", "requirements/./spec.md"])("rejects unsafe custom citations without accepting a relative suffix: %s", async (citation) => {
+    traceSpec("RAE-FINAL-VALIDATE", "RAE-FINAL-STRUCTURE", "RAE-CITATION-UNSAFE");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-citations-"));
+    const path = join(root, "report.md");
+    await writeFile(path, VALID_REPORT.replace("spec-check-output/manifest.json", citation));
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+    await writeFile(path, VALID_REPORT.replace("## Prioritized Findings", `## Prioritized Findings\n### 1. Invalid artifact\n- **Artifacts:** \`${citation}\``));
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+  });
+
   it("rejects a numbered prioritized finding without its own artifact citation", async () => {
     traceSpec("RAE-FINAL-VALIDATE", "RAE-FINAL-STRUCTURE", "RAE-PRESERVE-EVID");
     const root = await mkdtemp(join(tmpdir(), "spec-check-final-report-"));
@@ -193,6 +219,22 @@ describe("final-report filesystem boundary", () => {
       "## Prioritized Findings\n### 1. Unsupported\n- **Artifacts:** None",
     );
     await writeFile(path, unsupported, "utf8");
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+  });
+
+  it("handles long unmatched link delimiters without treating them as artifact evidence", async () => {
+    traceSpec("RAE-CITATION-UNSAFE");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-citation-delimiters-"));
+    const path = join(root, "report.md");
+    await writeFile(path, VALID_REPORT.replace("`spec-check-output/manifest.json`", "No references") + "[".repeat(100_000));
+    expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
+  });
+
+  it.each(["https://example.invalid/(requirements/spec.md)", "<https://example.invalid/(requirements/spec.md)>", "<https://example.invalid/(requirements/spec.md)", "/external/(requirements/spec.md)", "[artifact](https://example.invalid/(requirements/spec.md))", "requirements/spec.md?query=value"])("does not recover a bare relative suffix inside a non-path token: %s", async (citation) => {
+    traceSpec("RAE-CITATION-UNSAFE");
+    const root = await mkdtemp(join(tmpdir(), "spec-check-citation-tokens-"));
+    const path = join(root, "report.md");
+    await writeFile(path, VALID_REPORT.replace("`spec-check-output/manifest.json`", citation));
     expect(await validateFinalReport(path)).toMatchObject({ ok: false, error: { kind: "report_structure_invalid" } });
   });
 

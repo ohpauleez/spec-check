@@ -26,7 +26,7 @@ vi.mock("../../src/cli/pipeline-helpers.js", async (importOriginal) => {
   const original = await (importOriginal() as Promise<Record<string, unknown>>);
   return {
     ...original,
-    checkDependencies: () => undefined,
+    checkDependencies: async () => ({ ok: true, value: { binaryPath: "opencode", version: "1.19.3", major: 1 } }),
   };
 });
 

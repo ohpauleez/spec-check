@@ -2,7 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 
 import { traceSpec } from "../support/spec-trace.js";
 import { runZ3Query } from "../../src/adapters/z3.js";
-import { callOpencode } from "../../src/adapters/opencode.js";
+import { callOpencode } from "../support/opencode-runtime.js";
 import { writeOutputAtomic } from "../../src/adapters/fs.js";
 import { toOutputDirPath, toRelativePath, toSmtlibContent } from "../../src/domain/branded.js";
 

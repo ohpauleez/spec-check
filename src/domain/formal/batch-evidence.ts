@@ -113,7 +113,8 @@ export function finalizeBatchEvidence(
  *
  * @param kind - the terminal `OpencodeError` kind from the attached call
  * @returns `infrastructure_failure` for local environment defects
- *   (`spawn_error`, `invalid_files`, `invalid_timeout`) and `model_failure`
+ *   (`spawn_error`, `invalid_files`, `invalid_timeout`, `invalid_model`,
+ *   `runtime_error`) and `model_failure`
  *   for model- or payload-attributable defects (`timeout`, `invalid_json`,
  *   `schema_validation_error`, `prompt_too_large`)
  *
@@ -127,6 +128,9 @@ export function classifyAdapterFailure(kind: OpencodeError["kind"]): BatchAttemp
   switch (kind) {
     case "spawn_error":
     case "invalid_files":
+    case "invalid_model":
+    case "runtime_error":
+    case "output_limit":
     case "invalid_timeout":
       return { kind: "infrastructure_failure", errorKind: kind };
     case "timeout":

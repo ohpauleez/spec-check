@@ -140,6 +140,7 @@ function parseConfigError(error: ConfigError): SpecCheckError {
         `config file failed validation: ${error.path}${error.message.length > 0 ? ` (${error.message})` : ""}`,
       );
     case "timeout_validation_error":
+    case "model_validation_error":
       return makeTypedError("ConfigError", error.message);
     case "pair_budget_validation_error":
       return makeTypedError("ConfigError", error.message);

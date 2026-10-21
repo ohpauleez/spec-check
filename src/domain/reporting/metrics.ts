@@ -24,25 +24,24 @@ export async function writeRunMetrics(
   outputDir: OutputDirPath,
   snapshot: RunTelemetrySnapshot,
 ): Promise<MetricsFile> {
+  const buckets = collectMetricBuckets(snapshot);
   const phases = snapshot.phases.map((phase) => ({
     ...phase,
-    llm: aggregateAttempts(snapshot, phase.phase),
+    llm: finishBucket(buckets.phases.get(phase.phase) ?? emptyBucket()),
   }));
-  const knownPhaseNames = new Set(snapshot.phases.map((phase) => phase.phase));
-  const unattributed = snapshot.attempts.filter((attempt) => !knownPhaseNames.has(attempt.pipelinePhase));
-  const scopeNames = [...new Set(snapshot.attempts.map(analysisScope))].sort();
+  const scopeNames = [...buckets.scopes.keys()].sort();
   const content = `${JSON.stringify({
     schemaVersion: 1,
     capturedAt: snapshot.capturedAt,
     elapsedMs: snapshot.elapsedMs,
-    usageComplete: snapshot.attempts.every((attempt) => attempt.usageComplete),
+    usageComplete: buckets.total.metrics.usageComplete,
     phases,
     analysisScopes: scopeNames.map((scope) => ({
       scope,
-      llm: aggregateAttemptList(snapshot.attempts.filter((attempt) => analysisScope(attempt) === scope)),
+      llm: finishBucket(buckets.scopes.get(scope) ?? emptyBucket()),
     })),
-    unattributed: aggregateAttemptList(unattributed),
-    totals: aggregateAttemptList(snapshot.attempts),
+    unattributed: finishBucket(buckets.unattributed),
+    totals: finishBucket(buckets.total),
     attempts: snapshot.attempts,
   }, null, 2)}\n`;
   const path = toRelativePath("metrics.json");
@@ -72,24 +71,57 @@ function analysisScope(attempt: RunTelemetrySnapshot["attempts"][number]): strin
   return `${attempt.pipelinePhase}.${attempt.opencodePhase}`;
 }
 
-function aggregateAttempts(snapshot: RunTelemetrySnapshot, phase: string): PhaseLlmMetrics {
-  return aggregateAttemptList(snapshot.attempts.filter((attempt) => attempt.pipelinePhase === phase));
+/** Owned accumulator for one phase/scope/total, deduplicating logical calls. */
+interface MetricBucket {
+  readonly calls: Set<number>;
+  readonly metrics: MutablePhaseLlmMetrics;
 }
 
-function aggregateAttemptList(attempts: RunTelemetrySnapshot["attempts"]): PhaseLlmMetrics {
-  const calls = new Set<number>();
-  const totals = emptyMetrics();
-  for (const attempt of attempts) {
-    calls.add(attempt.logicalCallId);
-    totals.attempts += 1;
-    totals.attemptDurationMs += attempt.durationMs;
-    totals.usageComplete = totals.usageComplete && attempt.usageComplete;
-    addUsage(totals, attempt.usage);
+/** Accumulate all enabled metrics in one stable attempt-order pass.
+ * No source arrays are mutated; additions retain the prior floating-point order.
+ */
+function collectMetricBuckets(snapshot: RunTelemetrySnapshot) {
+  const phases = new Map<string, MetricBucket>();
+  const scopes = new Map<string, MetricBucket>();
+  const known = new Set(snapshot.phases.map((phase) => phase.phase));
+  const total = emptyBucket();
+  const unattributed = emptyBucket();
+  for (const attempt of snapshot.attempts) {
+    addAttempt(total, attempt);
+    addAttempt(selectBucket(phases, attempt.pipelinePhase), attempt);
+    addAttempt(selectBucket(scopes, analysisScope(attempt)), attempt);
+    if (!known.has(attempt.pipelinePhase)) addAttempt(unattributed, attempt);
   }
-  totals.logicalCalls = calls.size;
-  return Object.freeze(totals);
+  return { phases, scopes, total, unattributed };
 }
 
+/** Create a fresh bucket; no mutable state is shared between groups. */
+function emptyBucket(): MetricBucket { return { calls: new Set(), metrics: emptyMetrics() }; }
+
+/** Select or create one invocation-owned aggregation bucket. */
+function selectBucket(buckets: Map<string, MetricBucket>, key: string): MetricBucket {
+  const existing = buckets.get(key);
+  if (existing !== undefined) return existing;
+  const created = emptyBucket();
+  buckets.set(key, created);
+  return created;
+}
+
+/** Add one attempt exactly once to this bucket, preserving usage completeness. */
+function addAttempt(bucket: MetricBucket, attempt: RunTelemetrySnapshot["attempts"][number]): void {
+  bucket.calls.add(attempt.logicalCallId);
+  bucket.metrics.attempts += 1;
+  bucket.metrics.attemptDurationMs += attempt.durationMs;
+  bucket.metrics.usageComplete = bucket.metrics.usageComplete && attempt.usageComplete;
+  addUsage(bucket.metrics, attempt.usage);
+}
+
+/** Publish an immutable bucket snapshot without exposing accumulator ownership. */
+function finishBucket(bucket: MetricBucket): PhaseLlmMetrics {
+  return Object.freeze({ ...bucket.metrics, logicalCalls: bucket.calls.size });
+}
+
+/** Initialize schema-v1 aggregate fields in their stable serialization order. */
 function emptyMetrics(): MutablePhaseLlmMetrics {
   return {
     logicalCalls: 0,
@@ -112,6 +144,7 @@ type MutablePhaseLlmMetrics = {
   -readonly [Key in keyof PhaseLlmMetrics]: PhaseLlmMetrics[Key];
 };
 
+/** Add validated usage counters/cost in the original attempt order. */
 function addUsage(target: MutablePhaseLlmMetrics, usage: OpencodeUsage): void {
   for (const key of usageKeys) {
     target[key] += usage[key];

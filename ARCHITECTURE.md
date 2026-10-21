@@ -154,6 +154,12 @@ It also owns:
 
 If you need the end-to-end flow of the product, read this file before reading anything else.
 
+`src/cli/final-report-lifecycle.ts` is the production coordinator for the
+post-completion report attempt and warning persistence. It owns effect ordering
+and typed output failures. Generated differential histories call this same
+coordinator with injected effects and compare independently stored bytes with
+the reference lifecycle model.
+
 ### `src/domain/`
 
 `src/domain/` is the analysis core. This is where the typed internal model lives and where most behavior should be expressed as deterministic transformations or explicit phase logic.
@@ -279,14 +285,23 @@ This is the lowest-level subprocess adapter.
 
 Its main job is to keep external execution argv-based rather than shell-based. A large part of the project’s safety story depends on avoiding shell interpolation of user-derived values.
 
+Each POSIX invocation owns a fresh process group. Timeout/output overflow kills
+the owned group, then destroys retained pipe handles after at most a 250-ms
+cleanup allowance so descendant-held pipes cannot keep the result pending.
+Settlement is idempotent across close/error/deadline races. Deliberately escaped
+groups and existing shared services are not OS-contained by this adapter;
+Windows tree termination is bounded best-effort. UTF-8 byte validity uses
+`node:buffer.isUtf8` before one string conversion per stream.
+
 #### `src/adapters/opencode.ts`
 
 This is the LLM boundary.
 
 It owns:
 
-- `opencode run --model ... --format json ...` argv construction
-- ordered `--file <path>` attachments before the instruction prompt
+- validated request handling, runtime resolution, and shared response/retry processing
+- versioned invocation through `opencode-protocol.ts`, with the prompt as one
+  positional argv element and repeated validated `--file <path>` attachments
 - bounded retries and timeout handling
 - prompt-size bound enforcement using UTF-8 byte counts
 - NDJSON-like event parsing
@@ -296,12 +311,33 @@ It owns:
 
 The rest of the system should not know how `opencode` streams events.
 
+`src/adapters/opencode-runtime.ts` detects a supported semantic release with a
+5-second/16-KiB version probe. The CLI binds its immutable descriptor to the
+remaining pipeline with an adapter-owned asynchronous scope. Direct adapter
+calls can supply a descriptor or perform their own bounded detection. Retries
+reuse the selected identity, and concurrent runs do not share mutable detection
+state. Replacing the executable during a run is unsupported.
+
+`src/domain/opencode-model.ts` is the pure model/variant normalizer. Config
+validation, invocation encoding, and telemetry use its semantic selection.
+`src/adapters/opencode-protocol.ts` owns v1/v2 argv and restricted-agent config
+serialization. V1 receives separate model/variant flags; v2 receives a combined
+reference. The final-report policy builder remains version-independent in the
+domain prompt module. V2 uses standalone execution, private cwd/config, and
+explicit `OPENCODE_CONFIG_PROJECT_DISABLE=1` to exclude ambient server-side
+integration sources before module import. Empty plugin arrays and setup-only
+plugin removal are not isolation controls. Terminal-only plugins are outside
+this boundary. The verified release baseline is v1.19.3/v2.0.15.
+
 #### `src/adapters/z3.ts`
 
 This is the solver boundary.
 
 It owns:
 
+- one bounded `--version` readiness probe before analysis (5 seconds, 16 KiB,
+  plus bounded process cleanup); unusable Z3 causes dependency exit 4 before
+  paid model work, with command-specific diagnostics and no model retry/usage
 - piping SMT-LIB over stdin
 - timeout classification
 - result classification into `sat` / `unsat` / `unknown` / `timeout` / `error`

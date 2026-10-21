@@ -34,6 +34,15 @@
     "fast-check": "^3.23.2",
     "typescript": "^5.8.3",
     "typescript-eslint": "^8.60.1",
-    "vitest": "^2.1.9"
+    "vitest": "^4.1.11"
+  },
+  "overrides": {
+    "vitest": {
+      "vite": "^6.4.5"
+    },
+    "brace-expansion@^5.0.0": "^5.0.12",
+    "nanoid@^3.0.0": "^3.3.20",
+    "postcss@^8.0.0": "^8.5.31",
+    "source-map-js@^1.0.0": "^1.2.2"
   }
 }

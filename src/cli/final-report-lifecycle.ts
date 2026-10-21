@@ -128,6 +128,7 @@ export async function coordinateFinalReportLifecycle<TSummary>(
 /** Separate adapter/request failures from post-response validation failures. */
 function isValidationFailure(error: FinalReportError): boolean {
   return error.kind === "path_mismatch"
+    || error.kind === "acknowledgment_invalid"
     || error.kind === "report_missing"
     || error.kind === "report_symlink"
     || error.kind === "report_not_regular"

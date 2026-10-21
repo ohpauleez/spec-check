@@ -14,7 +14,7 @@ vi.mock("../../src/cli/pipeline-helpers.js", async (importOriginal) => {
   const original = await (importOriginal() as Promise<Record<string, unknown>>);
   return {
     ...original,
-    checkDependencies: () => undefined,
+    checkDependencies: async () => ({ ok: true, value: { binaryPath: "opencode", version: "1.19.3", major: 1 } }),
   };
 });
 
@@ -95,6 +95,42 @@ describe("merge pipeline integration", () => {
 
   afterEach(() => {
     delete process.env.SPEC_CHECK_TELEMETRY;
+  });
+
+  it("does not create an implicit collector when telemetry is disabled, but preserves explicit injection", async () => {
+    traceSpec("RAE-RUN-METRICS", "RAE-OC-METRICS-SCHEMA", "RAE-OC-COLLECTION", "RAE-OC-COLLECTION-EXPLICIT");
+    const telemetry = await import("../../src/adapters/telemetry.js");
+    const create = vi.spyOn(telemetry, "createTelemetryCollector");
+    try {
+      const first = await minimalPipelineFixture("no-telemetry");
+      await runCli(makeConfig(first.root, first.outputDir));
+      expect(create).not.toHaveBeenCalled();
+      await expect(access(join(first.outputDir, "metrics.json"))).rejects.toThrow();
+      const collector = telemetry.createTelemetryCollector();
+      const second = await minimalPipelineFixture("explicit-telemetry");
+      await telemetry.runWithTelemetryCollector(collector, async () => {
+        await runCli(makeConfig(second.root, second.outputDir));
+        expect(telemetry.snapshotCurrentTelemetry()?.phases.length).toBeGreaterThan(0);
+      });
+      expect(create).toHaveBeenCalledOnce();
+    } finally { create.mockRestore(); }
+  });
+
+  it.each([false, true])("captures telemetry enablement once at run start (%s)", async (enabled) => {
+    traceSpec("RAE-OC-COLLECTION", "RAE-OC-COLLECTION-EXPLICIT");
+    if (enabled) process.env.SPEC_CHECK_TELEMETRY = "1";
+    const { runQualitativePasses } = await import("../../src/domain/spec-forward/qualitative.js");
+    const original = vi.mocked(runQualitativePasses).getMockImplementation();
+    if (original === undefined) throw new Error("Expected qualitative boundary fixture");
+    vi.mocked(runQualitativePasses).mockImplementationOnce(async (...args) => {
+      if (enabled) delete process.env.SPEC_CHECK_TELEMETRY;
+      else process.env.SPEC_CHECK_TELEMETRY = "1";
+      return await original(...args);
+    });
+    const { root, outputDir } = await minimalPipelineFixture(`telemetry-mode-${String(enabled)}`);
+    await runCli(makeConfig(root, outputDir));
+    if (enabled) await expect(access(join(outputDir, "metrics.json"))).resolves.toBeUndefined();
+    else await expect(access(join(outputDir, "metrics.json"))).rejects.toThrow();
   });
 
   it("keeps merge findings visible and ordered before downstream findings", async () => {

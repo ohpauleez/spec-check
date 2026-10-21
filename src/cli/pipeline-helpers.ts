@@ -16,7 +16,9 @@ import type { PipelineContext } from "./pipeline-types.js";
 import type { CatalogDocument, MergedCapabilitySpec } from "../domain/model.js";
 import { toCapabilityName, toRelativePath, type RelativePath } from "../domain/branded.js";
 import { precondition } from "../domain/assert.js";
-import { isCommandAvailable } from "../adapters/process.js";
+import { probeZ3Dependency } from "../adapters/z3.js";
+import { detectOpencodeRuntime, type OpencodeRuntime } from "../adapters/opencode-runtime.js";
+import { err, ok, type Result } from "../domain/result.js";
 import { writeOutputAtomic } from "../adapters/fs.js";
 import { buildClaimGraph } from "../domain/claim-graph.js";
 import { parseDesign } from "../domain/parser/design.js";
@@ -42,28 +44,25 @@ import { selectClaimLogicalFile } from "../domain/formal/grouping.js";
  * Verify that required external tools are available on the system PATH.
  *
  * @param config - run configuration; uses `config.z3` for the Z3 binary path (falls back to "z3")
- * @returns error message string if a required dependency is missing; `undefined` if all are present
+ * @returns Supported OpenCode runtime, or a bounded dependency diagnostic.
  *
  * @remarks
  * Precondition: none — safe to call at any point.
- * Postcondition: when `undefined` is returned, both `opencode` and `z3` binaries
- * are available on the system PATH (or at the configured path).
+ * Postcondition: success carries the immutable version/protocol descriptor and
+ * confirms the configured Z3 command executes successfully.
  *
  * Failure modes: none — this function does not throw. Missing dependencies are
  * reported via the returned string value.
  *
- * Safety: calls `isCommandAvailable` which may invoke a synchronous subprocess
- * check (e.g., `which`). Safe for single-threaded CLI usage.
+ * Safety: Each dependency uses one argv-only probe bounded to 5s/16KiB, without
+ * model retries, solver queries, telemetry attempts, or caching.
  */
-export function checkDependencies(config: RunConfig): string | undefined {
-  if (!isCommandAvailable("opencode")) {
-    return "opencode binary not found";
-  }
-  const z3Path = config.z3 ?? "z3";
-  if (!isCommandAvailable(z3Path)) {
-    return `z3 binary not found at ${z3Path}`;
-  }
-  return undefined;
+export async function checkDependencies(config: RunConfig): Promise<Result<OpencodeRuntime, string>> {
+  const runtime = await detectOpencodeRuntime();
+  if (!runtime.ok) return err(runtime.error.message);
+  const z3 = await probeZ3Dependency(config.z3 ?? "z3");
+  if (!z3.ok) return err(z3.error.message);
+  return ok(runtime.value);
 }
 
 /**

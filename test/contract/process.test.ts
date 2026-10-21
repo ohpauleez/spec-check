@@ -48,10 +48,10 @@ describe("process adapter — isCommandAvailable", () => {
     expect(isCommandAvailable("bad-binary")).toBe(false);
   });
 
-  it("returns false when command is not found (ENOENT)", async () => {
-    traceSpec("CAT-CLI-ARGS");
+  it.each(["ENOENT", "ENOTDIR", "EACCES", "EPERM", "EIO"])("rejects spawn failure %s even when the file exists", async (code) => {
+    traceSpec("CAT-CLI-DEPS", "CAT-DEPS-Z3");
     const { spawnSync } = await import("node:child_process");
-    const enoentError = Object.assign(new Error("spawn ENOENT"), { code: "ENOENT" });
+    const enoentError = Object.assign(new Error(`spawn ${code}`), { code });
     vi.mocked(spawnSync).mockReturnValue(mockSpawnSyncResult({
       error: enoentError,
       status: null,
@@ -64,6 +64,16 @@ describe("process adapter — isCommandAvailable", () => {
   
     const { isCommandAvailable } = await import("../../src/adapters/process.js");
     expect(isCommandAvailable("nonexistent")).toBe(false);
+  });
+
+  it("rejects a signalled process even with inconsistent zero-exit metadata", async () => {
+    traceSpec("CAT-DEPS-Z3");
+    const { spawnSync } = await import("node:child_process");
+    vi.mocked(spawnSync).mockReturnValue(mockSpawnSyncResult({
+      status: 0, signal: "SIGTERM", stdout: Buffer.from(""), stderr: Buffer.from(""), pid: 123, output: [],
+    }));
+    const { isCommandAvailable } = await import("../../src/adapters/process.js");
+    expect(isCommandAvailable("z3")).toBe(false);
   });
 });
 

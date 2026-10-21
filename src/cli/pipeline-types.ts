@@ -13,6 +13,7 @@ import type { ErrorCategory } from "../domain/errors.js";
 import type { RunState } from "../domain/run-state.js";
 import type { FormalizationError } from "../domain/formal/formalize.js";
 import type { FormalizationEvidenceFile } from "../domain/reporting/formalization-evidence.js";
+import type { OpencodeRuntime } from "../adapters/opencode-runtime.js";
 
 // ---------------------------------------------------------------------------
 // Pipeline abort mechanism
@@ -82,6 +83,7 @@ export interface PipelineContext {
  * Result of the ingestion phases (1-3).
  */
 export interface IngestionResult {
+  readonly runtime: OpencodeRuntime;
   readonly state: RunState;
   readonly catalogResult: { readonly catalog: { readonly documents: readonly { readonly path: string; readonly type: string; readonly source: "final" | "delta"; readonly capability?: string }[] }; readonly findings: readonly Finding[] };
   readonly ctx: PipelineContext;

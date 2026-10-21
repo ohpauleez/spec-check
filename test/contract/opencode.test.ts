@@ -2,7 +2,8 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import fc from "fast-check";
 
 import { traceSpec } from "../support/spec-trace.js";
-import { callOpencode, extractJsonPayload, extractOpencodeUsage, variantForModel } from "../../src/adapters/opencode.js";
+import { extractJsonPayload, extractOpencodeUsage, variantForModel } from "../../src/adapters/opencode.js";
+import { callOpencode } from "../support/opencode-runtime.js";
 import {
   createTelemetryCollector,
   runWithTelemetryCollector,
@@ -194,18 +195,19 @@ describe("opencode adapter contract", () => {
     expect(result).toMatchObject({ ok: false, error: { kind: "invalid_json" } });
   });
 
-  it("rejects final-report event streams that exceed the capture bound", async () => {
-    traceSpec("RAE-FINAL-PROTO-ACK");
+  it.each([false, true])("never retries capture overflow even with a competing timeout flag (%s)", async (timedOut) => {
+    traceSpec("RAE-FINAL-PROTO-ACK", "RAE-OC-OUTPUT-LIMIT", "RAE-OC-OUTPUT-ONCE");
     const { runProcess } = await import("../../src/adapters/process.js");
     vi.mocked(runProcess).mockResolvedValueOnce({
       exitCode: null, signal: "SIGKILL", stdout: "", stderr: "",
-      timedOut: false, outputLimitExceeded: true,
+      timedOut, outputLimitExceeded: true,
     });
     const result = await callOpencode({
       model: "m", phase: "final-report", prompt: "p", workspaceRoot: "/tmp",
-      opencodeConfigContent: "{}", retries: 1,
+      opencodeConfigContent: "{}", retries: 5,
     });
-    expect(result).toMatchObject({ ok: false, error: { kind: "spawn_error", message: expect.stringContaining("capture bound") } });
+    expect(result).toMatchObject({ ok: false, error: { kind: "output_limit", message: expect.stringContaining("capture bound") } });
+    expect(runProcess).toHaveBeenCalledOnce();
   });
 
   it("selects only the preregistered model reasoning variants", async () => {

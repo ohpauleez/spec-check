@@ -1,0 +1,10 @@
+{
+  "release": "2.0.15",
+  "binarySha256": "b8ed44e893a3307cf23b4e0c83a4bb52b2c38d580fff33d3d9ec16477efb6077",
+  "scope": "external-server-integrations",
+  "observations": [
+    { "controls": "normal-sources", "externalPlugins": 3, "mcpServers": 2, "startupMarkers": true },
+    { "controls": "private-global-only", "externalPlugins": 2, "mcpServers": 1, "startupMarkers": true },
+    { "controls": "private-global-and-no-project", "externalPlugins": 0, "mcpServers": 0, "startupMarkers": false, "builtinPlugins": 86, "trustedAgent": true }
+  ]
+}

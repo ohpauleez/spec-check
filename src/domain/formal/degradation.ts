@@ -92,6 +92,9 @@ export function decideBatchDegradation(
         : { kind: "emit_claim_errors" };
     case "spawn_error":
     case "invalid_files":
+    case "invalid_model":
+    case "runtime_error":
+    case "output_limit":
     case "invalid_timeout":
       return { kind: "emit_claim_errors" };
     default:

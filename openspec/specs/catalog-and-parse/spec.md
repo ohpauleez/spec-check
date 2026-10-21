@@ -111,6 +111,197 @@ one sig RunState {
   var lastOutcome : lone Outcome,            // most recent outcome
   var emptyCatalogReason : lone EmptyCatalogReason  // set when catalog is empty
 }
+
+// --- OpenCode and Z3 boundary vocabulary ---
+// Immutable observations refine the existing atomic dependency phase.
+// No additional ingestion state, global facts, or temporal steps are required.
+
+abstract sig OCMajor {}
+one sig OCMajor1, OCMajor2, OCOtherMajor extends OCMajor {}
+abstract sig OCDetectionCause {}
+one sig OCSpawnError, OCTimeout, OCOutputLimit, OCInvalidVersion,
+  OCUnsupportedMajor extends OCDetectionCause {}
+sig OCText {}
+
+// External observations: tests establish UTF-8, grammar and process outcomes.
+sig OCProbe {
+  command : one InputPath,
+  owner : lone OCRun,
+  spawnError : one Bool, // includes ENOENT, EACCES/EPERM and other spawn failures
+  zeroExit : one Bool,
+  signalled : one Bool,
+  timedOut : one Bool,
+  overflow : one Bool, // combined stdout/stderr capture
+  strictUtf8 : one Bool,
+  grammarValid : one Bool,
+  canonicalVersion : one OCText, // complete version, not its bounded preview
+  reportedMajor : one OCMajor
+}
+
+sig OCPreflight {
+  opencodeProbe : one OCProbe,
+  z3Probe : one OCProbe,
+  informationalOnly : one Bool,
+  effectiveModelValid : one Bool,
+  cleanupComplete : one Bool,
+  needsZ3 : one Bool
+}
+abstract sig OCExit {}
+one sig OCExit0, OCExit3, OCExit4 extends OCExit {}
+
+// Runtime identity preserves binary/version evidence, not executable bytes.
+sig OCRun { runtime : one OCRuntime }
+sig OCRuntime { owner : one OCRun, evidence : one OCProbe }
+sig OCCall {
+  owner : one OCRun,
+  explicitRuntime : lone OCRuntime,
+  scopedRuntime : lone OCRuntime,
+  detectedRuntime : one OCRuntime, // potential fallback; unused with a descriptor
+  selectedBinary : lone InputPath,
+  model : one OCModel,
+  requestShapeValid : one Bool,
+  prompt : one OCText,
+  files : set InputPath
+}
+abstract sig OCCallError {}
+one sig OCInvalidModel, OCInvalidRequest, OCRuntimeMismatch,
+  OCRuntimeDetectionFailure extends OCCallError {}
+
+// Lexer outputs preserve case and additional model '/' characters.
+abstract sig OCModelClass {}
+one sig OCLuna, OCTerra, OCOtherModel extends OCModelClass {}
+sig OCVariant {}
+one sig OCMax, OCHigh extends OCVariant {}
+sig OCModel {
+  base : one OCText,
+  modelClass : one OCModelClass,
+  explicitVariant : lone OCVariant,
+  lexicalValid : one Bool
+}
+abstract sig OCVariantEncoding {}
+one sig OCSeparateVariant, OCHashVariant, OCNoVariant extends OCVariantEncoding {}
+sig OCAttempt { call : one OCCall }
+
+// Local cleanup stages are values, not additional pipeline states.
+abstract sig OCCleanupStage {}
+one sig OCExecuting, OCStopRequested, OCSettled extends OCCleanupStage {}
+sig OCCleanupInput {
+  timedOut : one Bool,
+  overflow : one Bool,
+  parentExited : one Bool,
+  ownedPipeHolder : one Bool,
+  escapedPipeHolder : one Bool,
+  posix : one Bool,
+  cleanupCallbackDelivered : one Bool
+}
+
+// --- Boundary projections ---
+// Effects/Frames: none; all functions derive values from immutable inputs.
+
+// Postcondition: timeout, overflow, process, encoding and major failures have priority.
+fun oc_detection_cause[p : OCProbe] : lone OCDetectionCause {
+  p.timedOut = True => OCTimeout else
+  (p.overflow = True => OCOutputLimit else
+  (not oc_process_ok[p] => OCSpawnError else
+  ((p.strictUtf8 = False or p.grammarValid = False) => OCInvalidVersion else
+  (p.reportedMajor = OCOtherMajor => OCUnsupportedMajor else none))))
+}
+
+// Guard: ordinary valid input after cleanup. Postcondition: OpenCode precedes Z3.
+fun oc_preflight_probes[p : OCPreflight] : set OCProbe {
+  (p.informationalOnly = True or p.effectiveModelValid = False or
+    p.cleanupComplete = False) => none else
+      p.opencodeProbe +
+        ((oc_version_ok[p.opencodeProbe] and p.needsZ3 = True) => p.z3Probe else none)
+}
+
+// Postcondition: informational success, model exit 3, or dependency exit 4.
+fun oc_preflight_exit[p : OCPreflight] : lone OCExit {
+  p.informationalOnly = True => OCExit0 else
+  (p.effectiveModelValid = False => OCExit3 else
+  (p.cleanupComplete = False => none else
+  (oc_dependency_admitted[p] => OCExit0 else OCExit4)))
+}
+
+// Postcondition: explicit runtime precedes the scoped descriptor.
+fun oc_supplied_runtime[c : OCCall] : lone OCRuntime {
+  some c.explicitRuntime => c.explicitRuntime else c.scopedRuntime
+}
+// Postcondition: detection is a fallback only when no descriptor is supplied.
+fun oc_proposed_runtime[c : OCCall] : one OCRuntime {
+  some oc_supplied_runtime[c] => oc_supplied_runtime[c] else c.detectedRuntime
+}
+// Postcondition: model/request errors precede runtime mismatch/detection errors.
+fun oc_call_error[c : OCCall] : lone OCCallError {
+  not oc_model_valid[c.model] => OCInvalidModel else
+  (c.requestShapeValid = False => OCInvalidRequest else
+  (oc_runtime_mismatch[c] => OCRuntimeMismatch else
+  (not oc_version_ok[oc_proposed_runtime[c].evidence] => OCRuntimeDetectionFailure else none)))
+}
+// Guard: valid request, no mismatch or descriptor. Postcondition: one direct probe.
+fun oc_call_probes[c : OCCall] : set OCProbe {
+  (oc_model_valid[c.model] and c.requestShapeValid = True and
+    not oc_runtime_mismatch[c] and no oc_supplied_runtime[c]) =>
+      c.detectedRuntime.evidence else none
+}
+// Postcondition: only error-free resolution yields a runtime.
+fun oc_resolved_runtime[c : OCCall] : lone OCRuntime {
+  no oc_call_error[c] => oc_proposed_runtime[c] else none
+}
+
+// Postcondition: fixed Luna/Terra variants; no forced variant for other models.
+fun oc_fixed_variant[m : OCModel] : lone OCVariant {
+  m.modelClass = OCLuna => OCMax else (m.modelClass = OCTerra => OCHigh else none)
+}
+// Postcondition: preserve an explicit variant, otherwise apply the fixed policy.
+fun oc_normalized_variant[m : OCModel] : lone OCVariant {
+  some m.explicitVariant => m.explicitVariant else oc_fixed_variant[m]
+}
+
+// Guard: successful resolution. Postcondition: attempts belong to the same call.
+fun oc_attempts_allowed[c : OCCall] : set OCAttempt {
+  no oc_call_error[c] => call.c else none
+}
+// Postcondition: every attempt reuses the call's resolved runtime.
+fun oc_attempt_runtime[a : OCAttempt] : lone OCRuntime { oc_resolved_runtime[a.call] }
+// Postcondition: absent, separate v1 or combined v2 variant syntax.
+fun oc_attempt_encoding[a : OCAttempt] : lone OCVariantEncoding {
+  no oc_attempt_runtime[a] => none else
+  (no oc_normalized_variant[a.call.model] => OCNoVariant else
+  (oc_attempt_runtime[a].evidence.reportedMajor = OCMajor1 => OCSeparateVariant else OCHashVariant))
+}
+// Postcondition: invocation and telemetry share the normalized base and variant.
+fun oc_attempt_base[a : OCAttempt] : one OCText { a.call.model.base }
+fun oc_attempt_variant[a : OCAttempt] : lone OCVariant { oc_normalized_variant[a.call.model] }
+
+// Guard: local stage and observed callbacks. Effect: derive the next local stage.
+// Frame: inputs and RunState are unchanged. Postcondition: settlement is absorbing.
+fun oc_cleanup_next[p : OCCleanupInput, s : OCCleanupStage] : one OCCleanupStage {
+  s = OCSettled => OCSettled else
+  (s = OCStopRequested =>
+    (p.cleanupCallbackDelivered = True => OCSettled else OCStopRequested) else
+    (oc_stop_required[p] => OCStopRequested else OCExecuting))
+}
+// Postcondition: settlement yields one terminal result, never another event.
+fun oc_cleanup_result[s : OCCleanupStage] : lone OCCleanupStage { s & OCSettled }
+
+// --- Conditional entity invariants ---
+// Guards: the named contract is admitted. Effects/Frames: none (static predicates).
+// These contracts are assertion premises, not global restrictions on ingestion.
+
+pred oc_run_contract[r : OCRun] {
+  // Postcondition: the run owns one supported descriptor and its probe evidence.
+  r.runtime.owner = r
+  r.runtime.evidence.owner = r
+  oc_version_ok[r.runtime.evidence]
+}
+
+pred oc_call_contract[c : OCCall] {
+  // Postcondition: descriptors are run-local; direct evidence matches the command.
+  all r : c.explicitRuntime + c.scopedRuntime + c.detectedRuntime | r.owner = c.owner
+  no oc_supplied_runtime[c] and some c.selectedBinary implies
+    c.detectedRuntime.evidence.command = c.selectedBinary
+}
 ```
 
 ## Requirements
@@ -130,9 +321,9 @@ WHEN the provided input paths yield zero recognized proposal, design, or spec do
 **Postcondition:** The CLI can distinguish irrelevant or incorrect inputs from archive-policy filtering.
 
 ##### Evidence
-- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:68 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L68)
+- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:83 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L83)
 - Test: [catalog.test.ts:101 returns no_recognized_docs for directories without OpenSpec docs](/test/contract/catalog.test.ts#L101), [cli.test.ts:184 formats no_recognized_docs with input count](/test/contract/cli.test.ts#L184)
-- Test (integration): [catalog-abort.integration.test.ts:53 aborts pipeline on no_recognized_docs](/test/integration/catalog-abort.integration.test.ts#L53)
+- Test (integration): [catalog-abort.integration.test.ts:53 aborts pipeline on no_recognized_docs — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L53)
 
 #### Scenario: Archived-Only Recognized Documents [CAT-EMPTY-ARCHIVE]
 WHILE archived inputs are not explicitly allowed, WHEN all recognized documents are archived, THE spec-check tool SHALL classify the empty catalog result as `all_archived`.
@@ -140,9 +331,9 @@ WHILE archived inputs are not explicitly allowed, WHEN all recognized documents 
 **Postcondition:** The CLI can recommend `--allow-archive` as a remediation only when it is actually relevant.
 
 ##### Evidence
-- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:68 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L68)
+- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:83 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L83)
 - Test: [catalog.test.ts:27 excludes archived change specs by default](/test/contract/catalog.test.ts#L27), [cli.test.ts:191 formats all_archived with archived count and --allow-archive guidance](/test/contract/cli.test.ts#L191)
-- Test (integration): [catalog-abort.integration.test.ts:82 aborts pipeline on all_archived](/test/integration/catalog-abort.integration.test.ts#L82)
+- Test (integration): [catalog-abort.integration.test.ts:82 aborts pipeline on all_archived without --allow-archive — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L82)
 
 #### Scenario: Policy-Excluded Recognized Documents [CAT-EMPTY-FILTERED]
 IF recognized documents are present but another admission or filtering policy removes all of them from the active catalog, THEN THE spec-check tool SHALL classify the empty catalog result as `all_filtered` and SHALL preserve the filtering rationale.
@@ -150,9 +341,9 @@ IF recognized documents are present but another admission or filtering policy re
 **Postcondition:** Empty-catalog reporting remains extensible to future filtering policies without collapsing into a generic message.
 
 ##### Evidence
-- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:68 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L68)
+- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:83 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L83)
 - Test: [catalog.test.ts:113 returns all_filtered when all recognized docs are excluded by capability resolution](/test/contract/catalog.test.ts#L113), [catalog.test.ts:134 reports correct filteredCount when inputs contain both archived and unresolvable docs](/test/contract/catalog.test.ts#L134), [cli.test.ts:198 formats all_filtered with count and filter reason](/test/contract/cli.test.ts#L198)
-- Test (integration): [catalog-abort.integration.test.ts:111 aborts pipeline on all_filtered](/test/integration/catalog-abort.integration.test.ts#L111)
+- Test (integration): [catalog-abort.integration.test.ts:111 aborts pipeline on all_filtered — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L111)
 
 ### Requirement: CLI Argument Validation [CAT-CLI-ARGS]
 THE spec-check CLI SHALL accept positional input paths and optional `--output`, `--src`, `--caps`, `--z3`, `--config`, `--timeout-ms`, `--max-batch-size`, `--allow-archive`, `--help`, and `--version` flags, and SHALL reject unrecognized flags or missing required inputs with exit code `2` before any analysis begins.
@@ -169,8 +360,9 @@ WHEN the user invokes `spec-check --help` or `spec-check -h`, THE spec-check CLI
 **Postcondition:** No output directory is created and no analysis phases run.
 
 ##### Evidence
-- Implementation: [index.ts:42 main()](/src/index.ts#L42), [index.ts:163 printHelp()](/src/index.ts#L163)
+- Implementation: [index.ts:42 main()](/src/index.ts#L42), [index.ts:164 printHelp()](/src/index.ts#L164)
 - Test: [cli.test.ts:81 parses help and version flags](/test/contract/cli.test.ts#L81)
+- Test (integration): [opencode-runtime.integration.test.ts:89 rejects unsupported dependencies with exit 4 and performs no analysis, while help/version never probe](/test/integration/opencode-runtime.integration.test.ts#L89)
 - Example:
 ```typescript
 const { parseArgv } = await import("./src/cli/parse-argv.ts");
@@ -188,6 +380,7 @@ WHEN the user invokes `spec-check --version` or `spec-check -v`, THE spec-check 
 ##### Evidence
 - Implementation: [index.ts:42 main()](/src/index.ts#L42), [version.ts:16 SPEC_CHECK_VERSION](/src/version.ts#L16)
 - Test: [cli.test.ts:81 parses help and version flags](/test/contract/cli.test.ts#L81)
+- Test (integration): [opencode-runtime.integration.test.ts:89 rejects unsupported dependencies with exit 4 and performs no analysis, while help/version never probe](/test/integration/opencode-runtime.integration.test.ts#L89)
 - Example:
 ```typescript
 const { parseArgv } = await import("./src/cli/parse-argv.ts");
@@ -203,7 +396,7 @@ IF the user invokes `spec-check` with no positional input paths and no `--help` 
 **Postcondition:** No analysis output is produced.
 
 ##### Evidence
-- Implementation: [config.ts:196 resolveRunConfig()](/src/cli/config.ts#L196), [index.ts:127 parseConfigError()](/src/index.ts#L127)
+- Implementation: [config.ts:198 resolveRunConfig()](/src/cli/config.ts#L198), [index.ts:127 parseConfigError()](/src/index.ts#L127)
 - Test: [cli.test.ts:67 resolveRunConfig rejects empty inputs with missing_inputs error](/test/contract/cli.test.ts#L67)
 
 #### Scenario: Unrecognized Flag Rejected [CAT-CLI-BADFLAG]
@@ -246,7 +439,7 @@ IF the resolved `--output` directory is a descendant of or equal to the resolved
 **Postcondition:** The read-only source guarantee and output confinement constraints cannot conflict.
 
 ##### Evidence
-- Implementation: [config.ts:196 resolveRunConfig()](/src/cli/config.ts#L196)
+- Implementation: [config.ts:198 resolveRunConfig()](/src/cli/config.ts#L198)
 - Test: [cli.test.ts:136 rejects output directory inside source directory](/test/contract/cli.test.ts#L136), [cli.test.ts:152 rejects output directory equal to source directory](/test/contract/cli.test.ts#L152), [cli.test.ts:168 accepts output directory outside source directory](/test/contract/cli.test.ts#L168)
 
 #### Scenario: Timeout Flag Accepted [CAT-CLI-TIMEOUT]
@@ -255,8 +448,8 @@ WHEN the user supplies `--timeout-ms` with an integer value within the configure
 **Postcondition:** A single validated timeout policy is available to every LLM-backed phase.
 
 ##### Evidence
-- Implementation: [config.ts:377 parseTimeoutMs()](/src/cli/config.ts#L377), [config.ts:409 validateTimeoutMs()](/src/cli/config.ts#L409)
-- Test: [config.test.ts:76 rejects timeout below minimum](/test/contract/config.test.ts#L76), [config.test.ts:91 rejects non-integer timeout](/test/contract/config.test.ts#L91), [config.test.ts:125 rejects timeout above maximum](/test/contract/config.test.ts#L125)
+- Implementation: [config.ts:383 parseTimeoutMs()](/src/cli/config.ts#L383), [config.ts:415 validateTimeoutMs()](/src/cli/config.ts#L415)
+- Test: [config.test.ts:26 uses CLI flags over config values](/test/contract/config.test.ts#L26), [config.test.ts:132 rejects timeout below minimum](/test/contract/config.test.ts#L132), [config.test.ts:147 rejects non-integer timeout](/test/contract/config.test.ts#L147), [config.test.ts:181 rejects timeout above maximum](/test/contract/config.test.ts#L181)
 - Example:
 ```typescript
 const { parseArgv } = await import("./src/cli/parse-argv.ts");
@@ -271,8 +464,8 @@ WHEN the user supplies a JSON config file containing a valid numeric `timeoutMs`
 **Postcondition:** Runtime timeout policy can be sourced from either CLI or config file, with CLI taking precedence.
 
 ##### Evidence
-- Implementation: [config.ts:196 resolveRunConfig()](/src/cli/config.ts#L196), [config.ts:377 parseTimeoutMs()](/src/cli/config.ts#L377)
-- Test: [config.test.ts:106 accepts config file timeoutMs without CLI override](/test/contract/config.test.ts#L106)
+- Implementation: [config.ts:198 resolveRunConfig()](/src/cli/config.ts#L198), [config.ts:383 parseTimeoutMs()](/src/cli/config.ts#L383)
+- Test: [config.test.ts:162 accepts config file timeoutMs without CLI override](/test/contract/config.test.ts#L162)
 
 #### Scenario: Archive Admission Flag Accepted [CAT-CLI-ALLOW-ARCH]
 WHEN the user supplies `--allow-archive`, THE spec-check CLI SHALL enable admission of explicitly provided archived documents into the active catalog.
@@ -280,7 +473,7 @@ WHEN the user supplies `--allow-archive`, THE spec-check CLI SHALL enable admiss
 **Postcondition:** Archive admission changes only for explicitly provided archived inputs.
 
 ##### Evidence
-- Implementation: [parse-argv.ts:135 parseArgv()](/src/cli/parse-argv.ts#L135), [config.ts:196 resolveRunConfig()](/src/cli/config.ts#L196)
+- Implementation: [parse-argv.ts:135 parseArgv()](/src/cli/parse-argv.ts#L135), [config.ts:198 resolveRunConfig()](/src/cli/config.ts#L198)
 - Test: [cli.test.ts:128 parses allow-archive as boolean flag](/test/contract/cli.test.ts#L128)
 - Example:
 ```typescript
@@ -426,8 +619,8 @@ WHEN a valid config file is loaded and CLI flags are also present, THE spec-chec
 **Postcondition:** The resolved run configuration reflects CLI precedence.
 
 ##### Evidence
-- Implementation: [config.ts:196 resolveRunConfig()](/src/cli/config.ts#L196)
-- Test: [config.test.ts:11 uses CLI flags over config values](/test/contract/config.test.ts#L11)
+- Implementation: [config.ts:198 resolveRunConfig()](/src/cli/config.ts#L198)
+- Test: [config.test.ts:26 uses CLI flags over config values](/test/contract/config.test.ts#L26)
 
 #### Scenario: Invalid Config Rejected [CAT-CONFIG-FAIL]
 IF the `--config` file exists but contains invalid JSON or violates the expected config structure, THEN THE spec-check CLI SHALL exit with code `2` and a diagnostic message before any analysis begins.
@@ -435,8 +628,8 @@ IF the `--config` file exists but contains invalid JSON or violates the expected
 **Postcondition:** No analysis output is produced from an invalid configuration.
 
 ##### Evidence
-- Implementation: [config.ts:272 loadConfigFile()](/src/cli/config.ts#L272), [config.ts:322 isConfigFileShape()](/src/cli/config.ts#L322)
-- Test: [config.test.ts:54 rejects invalid config JSON](/test/contract/config.test.ts#L54)
+- Implementation: [config.ts:278 loadConfigFile()](/src/cli/config.ts#L278), [config.ts:328 isConfigFileShape()](/src/cli/config.ts#L328)
+- Test: [config.test.ts:110 rejects invalid config JSON](/test/contract/config.test.ts#L110)
 
 #### Requirement model
 
@@ -545,7 +738,7 @@ WHILE archived inputs are not explicitly allowed, WHEN the input set includes ar
 
 ##### Evidence
 - Implementation: [catalog.ts:107 buildCatalog()](/src/domain/parser/catalog.ts#L107)
-- Test: [catalog.test.ts:27 excludes archived change specs](/test/contract/catalog.test.ts#L27)
+- Test: [catalog.test.ts:27 excludes archived change specs by default](/test/contract/catalog.test.ts#L27)
 
 #### Scenario: Allow Explicit Archived Inputs [CAT-DISCOVER-ALLOW-ARCH]
 WHERE archive admission is enabled, WHEN a recognized document comes from an explicitly provided archived input path, THE spec-check tool SHALL treat that document as eligible for the active catalog under the same capability-resolution rules as non-archived inputs.
@@ -562,9 +755,9 @@ IF no active documents survive recognition and catalog admission, THEN THE spec-
 **Postcondition:** No qualitative, formal, or reporting phase runs against a vacuous active catalog.
 
 ##### Evidence
-- Implementation: [run-cli.ts:225 runIngestionPhases()](/src/cli/run-cli.ts#L225), [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:68 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L68)
+- Implementation: [run-cli.ts:284 runIngestionPhases()](/src/cli/run-cli.ts#L284), [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:83 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L83)
 - Test: [cli.test.ts:209 formats each empty-catalog variant with contextual details](/test/contract/cli.test.ts#L209)
-- Test (integration): [catalog-abort.integration.test.ts:53 aborts pipeline on no_recognized_docs](/test/integration/catalog-abort.integration.test.ts#L53), [catalog-abort.integration.test.ts:82 aborts pipeline on all_archived](/test/integration/catalog-abort.integration.test.ts#L82), [catalog-abort.integration.test.ts:111 aborts pipeline on all_filtered](/test/integration/catalog-abort.integration.test.ts#L111)
+- Test (integration): [catalog-abort.integration.test.ts:53 aborts pipeline on no_recognized_docs — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L53), [catalog-abort.integration.test.ts:82 aborts pipeline on all_archived without --allow-archive — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L82), [catalog-abort.integration.test.ts:111 aborts pipeline on all_filtered — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L111)
 
 #### Requirement model
 
@@ -713,27 +906,33 @@ assert delta_conflicts_surfaced {
 ```
 
 ### Requirement: Dependency Availability Check [CAT-CLI-DEPS]
-WHEN analysis begins, THE spec-check tool SHALL verify that required external dependencies (`opencode` for LLM-backed phases, `z3` for solver-backed phases) are available and executable before proceeding to phases that need them.
+WHEN analysis begins after run-start output cleanup, THE spec-check tool SHALL verify that required external dependencies (`opencode` for LLM-backed phases, `z3` for solver-backed phases) are available and executable before proceeding to phases that need them, and SHALL resolve a supported OpenCode release through the bounded version probe before any analysis invocation.
 
 **References:**
+- `openspec/changes/archive/2026-10-21-support-opencode-v2/proposal.md#Constraints`
+- `openspec/changes/archive/2026-10-21-support-opencode-v2/design.md#Runtime-Resolution`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Assumptions and Dependencies`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Failure Modes`
 
 #### Scenario: Missing Opencode Rejected [CAT-DEPS-OPENCODE]
-IF `opencode` is required for the selected analysis mode and is not available or not executable, THEN THE spec-check tool SHALL exit with code `2` and a diagnostic message naming the missing dependency.
+IF `opencode` is required for the selected analysis mode and is not available or not executable, THEN THE spec-check tool SHALL exit with code `4` and a diagnostic message naming the missing dependency.
 
 **Postcondition:** No LLM-backed analysis proceeds without a working `opencode` binary.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:58 checkDependencies()](/src/cli/pipeline-helpers.ts#L58), [process.ts:44 isCommandAvailable()](/src/adapters/process.ts#L44)
+- Implementation: [pipeline-helpers.ts:60 checkDependencies()](/src/cli/pipeline-helpers.ts#L60), [opencode-runtime.ts:88 detectOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L88), [run-cli.ts:284 runIngestionPhases()](/src/cli/run-cli.ts#L284)
+- Test: [opencode-runtime.test.ts:54 normalizes spawn failures into inert bounded diagnostics](/test/contract/opencode-runtime.test.ts#L54)
+- Test (integration): [opencode-runtime.integration.test.ts:21 terminates hanging/verbose probes and rejects malformed bytes and non-executable files](/test/integration/opencode-runtime.integration.test.ts#L21)
 
 #### Scenario: Missing Z3 Rejected [CAT-DEPS-Z3]
-IF `z3` is required for the selected analysis mode and is not available at the default path or the `--z3` path, THEN THE spec-check tool SHALL exit with code `2` and a diagnostic message naming the missing dependency.
+IF `z3` is required for the selected analysis mode and its default PATH command or configured `--z3` command cannot execute successfully, THEN THE spec-check tool SHALL exit with code `4` during the dependency phase, emit a bounded inert diagnostic identifying the command, failure reason, and corrective checks, and SHALL NOT begin any LLM analysis or solver query.
 
-**Postcondition:** No solver-backed analysis proceeds without a working `z3` binary.
+**Postcondition:** Exactly one argv-only `z3 --version` preflight is attempted after successful OpenCode detection, with a fixed `5000` ms timeout and `16384`-byte combined capture limit plus the process adapter's `250` ms cleanup allowance, subject to event-loop scheduling. Only a signal-free zero exit without spawn error, timeout or overflow succeeds. Missing commands, `EACCES`/`EPERM`, other spawn failures, nonzero exit, signal, timeout and overflow are dependency failures, not warnings that permit paid work. No Z3 version policy or SMT query is introduced. Preflight consumes no model retry budget or telemetry attempt. Failed runs publish no new completion manifest; help/version remain dependency-free.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:58 checkDependencies()](/src/cli/pipeline-helpers.ts#L58), [process.ts:44 isCommandAvailable()](/src/adapters/process.ts#L44)
+- Implementation: [pipeline-helpers.ts:60 checkDependencies()](/src/cli/pipeline-helpers.ts#L60), [z3.ts:44 probeZ3Dependency()](/src/adapters/z3.ts#L44), [process.ts:115 runProcess()](/src/adapters/process.ts#L115), [run-cli.ts:284 runIngestionPhases()](/src/cli/run-cli.ts#L284)
+- Test: [z3-preflight.test.ts:14 uses one bounded version command without allocating model work or imposing a version policy](/test/contract/z3-preflight.test.ts#L14), [z3-preflight.test.ts:28 classifies %s without accepting a merely existing file](/test/contract/z3-preflight.test.ts#L28), [z3-preflight.test.ts:48 fails closed for process result %o](/test/contract/z3-preflight.test.ts#L48), [z3-preflight.test.ts:55 bounds and escapes the configured path, and never prints hostile process output or exceptions](/test/contract/z3-preflight.test.ts#L55)
+- Test (integration): [z3-preflight.integration.test.ts:17 accepts a valid executable and rejects a permission-denied file through both availability paths](/test/integration/z3-preflight.integration.test.ts#L17), [z3-preflight.integration.test.ts:32 %s stops before analysis on unusable explicit/PATH Z3 and keeps informational commands dependency-free](/test/integration/z3-preflight.integration.test.ts#L32), [opencode-runtime.integration.test.ts:43 runs compiled and bundled pipelines against major %s with one probe each](/test/integration/opencode-runtime.integration.test.ts#L43)
 
 #### Requirement model
 
@@ -811,6 +1010,40 @@ assert dep_failure_outcome {
 }
 ```
 
+#### Bounded preflight refinement
+
+```alloy
+// --- Atomic dependency admission ---
+// Effects/Frames: none; this refinement leaves RunState unchanged.
+// Tests establish argv, time/capture limits, cleanup and absence of paid work.
+pred oc_dependency_admitted[p : OCPreflight] {
+  // Guards: ordinary valid input, cleanup complete, required probes successful.
+  // Postcondition: dependency admission permits the existing analysis phase.
+  p.informationalOnly = False
+  p.effectiveModelValid = True
+  p.cleanupComplete = True
+  oc_version_ok[p.opencodeProbe]
+  p.needsZ3 = True implies oc_process_ok[p.z3Probe]
+}
+// Safety: a dependency error never admits analysis.
+assert oc_dependency_failure_blocks_admission {
+  all p : OCPreflight | oc_preflight_exit[p] = OCExit4 implies
+    not oc_dependency_admitted[p]
+}
+// Safety: informational commands neither probe dependencies nor admit analysis.
+assert oc_informational_has_no_probes {
+  all p : OCPreflight | p.informationalOnly = True implies
+    no oc_preflight_probes[p] and not oc_dependency_admitted[p]
+}
+// Safety: required Z3 failure maps to dependency exit 4 before analysis.
+assert oc_z3_failure_is_exit4 {
+  all p : OCPreflight | p.informationalOnly = False and
+    p.effectiveModelValid = True and p.cleanupComplete = True and
+    oc_version_ok[p.opencodeProbe] and p.needsZ3 = True and
+    not oc_process_ok[p.z3Probe] implies oc_preflight_exit[p] = OCExit4
+}
+```
+
 ### Requirement: Validate Schema Structure Deterministically [CAT-VALIDATE-STRUCT]
 WHEN the spec-check tool parses an input artifact with recognizable headings, THE spec-check tool SHALL deterministically validate schema-mandated structural rules including heading shape, identifier format, scenario presence, references presence, and delta completeness, and SHALL emit structural findings with provenance for every violation.
 
@@ -825,9 +1058,7 @@ WHEN a requirement or scenario header violates the canonical identifier format o
 **Postcondition:** Reviewers can identify the failing structural rule without re-parsing the document manually.
 
 ##### Evidence
-- Implementation: [spec.ts:141 parseRequirement()](/src/domain/parser/spec.ts#L141), [spec.ts:236 parseScenario()](/src/domain/parser/spec.ts#L236), [pipeline-helpers.ts:196 collectParserFindings()](/src/cli/pipeline-helpers.ts#L196)
-- Test: [parser.test.ts:15 validates heading extraction](/test/contract/parser.test.ts#L15), [parser.test.ts:119 flags non-EARS requirement](/test/contract/parser.test.ts#L119)
-- Test (integration): [pipeline.integration.test.ts:53 structural violations produce expected findings](/test/integration/pipeline.integration.test.ts#L53)
+- Implementation: [spec.ts:141 parseRequirement()](/src/domain/parser/spec.ts#L141), [spec.ts:236 parseScenario()](/src/domain/parser/spec.ts#L236), [pipeline-helpers.ts:195 collectParserFindings()](/src/cli/pipeline-helpers.ts#L195)
 
 #### Scenario: Reject Content With No Headings [CAT-STRUCT-FAIL]
 IF an input file contains no recognizable headings, THEN THE spec-check tool SHALL emit a parse-error finding for that file and SHALL exclude that file from downstream phases unless no parseable inputs remain.
@@ -835,8 +1066,6 @@ IF an input file contains no recognizable headings, THEN THE spec-check tool SHA
 **Postcondition:** Downstream phases receive only inputs with minimally recognizable structure.
 
 ##### Evidence
-- Implementation: [spec.ts:43 parseSpec()](/src/domain/parser/spec.ts#L43)
-- Test (integration): [pipeline.integration.test.ts:53 structural violations produce expected findings](/test/integration/pipeline.integration.test.ts#L53)
 
 #### Scenario: Validate Canonical Identifier Format [CAT-STRUCT-IDFORMAT]
 WHEN a requirement or scenario declares a bracketed identifier, THE spec-check tool SHALL validate that the identifier matches the canonical format: uppercase letters, digits, and hyphens enclosed in square brackets (e.g., `[UPPER-KEBAB-123]`).
@@ -928,7 +1157,7 @@ WHEN a requirement body follows a recognized EARS pattern, THE spec-check tool S
 
 ##### Evidence
 - Implementation: [spec.ts:351 classifyEarsType()](/src/domain/parser/spec.ts#L351)
-- Test: [parser.test.ts:27 recognizes EARS and preserves unparsed lines deterministically](/test/contract/parser.test.ts#L27), [parser.test.ts:142 classifies complex (WHILE+WHEN) pattern](/test/contract/parser.test.ts#L142), [parser.test.ts:160 classifies optional (WHERE) pattern](/test/contract/parser.test.ts#L160), [parser.test.ts:178 still classifies WHILE-only as state-driven](/test/contract/parser.test.ts#L178), [parser.test.ts:196 still classifies WHEN-only as event-driven](/test/contract/parser.test.ts#L196)
+- Test: [parser.test.ts:27 recognizes EARS and preserves unparsed lines deterministically](/test/contract/parser.test.ts#L27), [parser.test.ts:142 classifies complex (WHILE+WHEN) pattern](/test/contract/parser.test.ts#L142), [parser.test.ts:160 classifies optional (WHERE) pattern](/test/contract/parser.test.ts#L160), [parser.test.ts:178 still classifies WHILE-only as state-driven (not complex)](/test/contract/parser.test.ts#L178), [parser.test.ts:196 still classifies WHEN-only as event-driven (not complex)](/test/contract/parser.test.ts#L196)
 
 #### Scenario: Non-EARS Requirement Flagged [CAT-EARS-WARN]
 IF a requirement body does not match any recognized EARS pattern and is not marked as an approved escape-hatch, THEN THE spec-check tool SHALL emit a structural finding recommending EARS conformance.
@@ -1121,7 +1350,7 @@ WHEN a document contains extra content outside recognized fields, THE spec-check
 **Postcondition:** Analysts can inspect every parser loss boundary as part of the evidence set.
 
 ##### Evidence
-- Implementation: [shared.ts:136 collectUnparsedLines()](/src/domain/parser/shared.ts#L136), [pipeline-helpers.ts:196 collectParserFindings()](/src/cli/pipeline-helpers.ts#L196)
+- Implementation: [shared.ts:136 collectUnparsedLines()](/src/domain/parser/shared.ts#L136), [pipeline-helpers.ts:195 collectParserFindings()](/src/cli/pipeline-helpers.ts#L195)
 - Test: [parser.test.ts:27 recognizes EARS and preserves unparsed lines deterministically](/test/contract/parser.test.ts#L27)
 - Test (property): [parser.property.test.ts:12 is deterministic and preserves unmatched lines](/test/property/parser.property.test.ts#L12)
 
@@ -1204,7 +1433,7 @@ WHEN a pipeline phase starts, THE spec-check tool SHALL emit a progress event wi
 **Postcondition:** Operators can observe pipeline progress in real time.
 
 ##### Evidence
-- Implementation: [progress.ts:36 emitProgressEvent()](/src/domain/progress.ts#L36), [progress.ts:55 createProgressEvent()](/src/domain/progress.ts#L55), [phase-runner.ts:41 runPhase()](/src/cli/phase-runner.ts#L41), [phase-runner.ts:84 runPhaseWithResult()](/src/cli/phase-runner.ts#L84)
+- Implementation: [progress.ts:36 emitProgressEvent()](/src/domain/progress.ts#L36), [progress.ts:55 createProgressEvent()](/src/domain/progress.ts#L55), [phase-runner.ts:42 runPhase()](/src/cli/phase-runner.ts#L42), [phase-runner.ts:89 runPhaseWithResult()](/src/cli/phase-runner.ts#L89)
 - Test: [progress.test.ts:6 creates event with phase, status, and ISO timestamp](/test/contract/progress.test.ts#L6), [progress.test.ts:15 includes duration_ms for completed events](/test/contract/progress.test.ts#L15), [progress.test.ts:21 emits JSON line to stdout](/test/contract/progress.test.ts#L21)
 - Example:
 ```typescript
@@ -1222,8 +1451,9 @@ IF a pipeline phase fails fatally, THEN THE spec-check tool SHALL emit a progres
 **Postcondition:** The failing phase is identified in the progress stream.
 
 ##### Evidence
-- Implementation: [phase-runner.ts:41 runPhase()](/src/cli/phase-runner.ts#L41), [phase-runner.ts:84 runPhaseWithResult()](/src/cli/phase-runner.ts#L84)
+- Implementation: [phase-runner.ts:42 runPhase()](/src/cli/phase-runner.ts#L42), [phase-runner.ts:89 runPhaseWithResult()](/src/cli/phase-runner.ts#L89)
 - Test: [progress.test.ts:34 creates failed event for phase failures](/test/contract/progress.test.ts#L34)
+- Test (integration): [z3-preflight.integration.test.ts:32 %s stops before analysis on unusable explicit/PATH Z3 and keeps informational commands dependency-free](/test/integration/z3-preflight.integration.test.ts#L32)
 
 #### Requirement model
 
@@ -1334,6 +1564,330 @@ pred failure_terminates {
 assert no_silent_hang {
   failure_terminates
 }
+```
+
+### Requirement: Detect Supported OpenCode Release [CAT-OC-VERSION]
+WHEN checking OpenCode for an analysis run, THE spec-check tool SHALL invoke the selected binary with `--version` using argv-only execution, a fixed `5000` ms process timeout, and a `16384`-byte combined stdout/stderr capture limit, and SHALL accept only successful strict-UTF-8 stdout matching the release grammar below with major `1` or `2`.
+
+**References:**
+- `openspec/changes/archive/2026-10-21-support-opencode-v2/proposal.md#Constraints`
+- `openspec/changes/archive/2026-10-21-support-opencode-v2/design.md#Release-Encoding`
+
+**Format justification:** A grammar and validity rules express the accepted encoding more precisely than a separate EARS statement for each character constraint.
+
+```text
+VERSION_LINE := ["opencode "] ["v"] CORE ["-" PRERELEASE] ["+" BUILD]
+CORE         := NUMBER "." NUMBER "." NUMBER
+NUMBER       := "0" | [1-9][0-9]*
+PRERELEASE   := IDENTIFIER ("." IDENTIFIER)*
+BUILD        := IDENTIFIER ("." IDENTIFIER)*
+IDENTIFIER   := [0-9A-Za-z-]+
+```
+
+THE spec-check tool SHALL normalize CRLF to LF, trim outer whitespace, require exactly one nonempty stdout line matching the entire grammar, reject numeric prerelease identifiers with leading zeroes and unsafe-integer core components, match prefixes case-sensitively, and store the version without the optional `opencode ` and `v` prefixes. Successful stderr diagnostics SHALL NOT supply the parsed version.
+
+#### Scenario: Accept Supported Release [CAT-OC-VERSION-ACCEPT]
+WHEN a successful probe emits `1.2.3`, `v1.2.3`, `opencode v2.0.15`, or `opencode v2.0.15-rc.1+build.7`, THE spec-check tool SHALL resolve the corresponding canonical semantic version and major and emit one concise detected-version/protocol diagnostic on stderr.
+
+##### Evidence
+- Implementation: [opencode-runtime.ts:66 parseOpencodeVersion()](/src/adapters/opencode-runtime.ts#L66), [opencode-runtime.ts:88 detectOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L88), [run-cli.ts:284 runIngestionPhases()](/src/cli/run-cli.ts#L284)
+- Test: [opencode-runtime.test.ts:22 accepts the complete release grammar: %s](/test/contract/opencode-runtime.test.ts#L22)
+- Test (integration): [opencode-runtime.integration.test.ts:89 rejects unsupported dependencies with exit 4 and performs no analysis, while help/version never probe](/test/integration/opencode-runtime.integration.test.ts#L89)
+- Example:
+```typescript
+const { parseOpencodeVersion } = await import("./src/adapters/opencode-runtime.ts");
+const release = parseOpencodeVersion("opencode v2.0.15-rc.1+build.7\r\n"); //=> type Object
+release.ok; //=> true
+release.value.version; //=> 2.0.15-rc.1+build.7
+release.value.major; //=> 2
+```
+
+#### Scenario: Bound Version Presentation [CAT-OC-VERSION-PREVIEW]
+WHEN a valid semantic version has a long suffix, THE spec-check tool SHALL retain its complete canonical version when minting a supported runtime descriptor and SHALL restrict the version presentation in both success and unsupported-major diagnostics to at most 300 inert characters.
+
+##### Evidence
+- Implementation: [opencode-runtime.ts:42 preview()](/src/adapters/opencode-runtime.ts#L42), [opencode-runtime.ts:55 formatOpencodeVersion()](/src/adapters/opencode-runtime.ts#L55), [opencode-runtime.ts:66 parseOpencodeVersion()](/src/adapters/opencode-runtime.ts#L66), [opencode-runtime.ts:88 detectOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L88), [run-cli.ts:284 runIngestionPhases()](/src/cli/run-cli.ts#L284)
+- Test: [opencode-runtime.test.ts:65 bounds both displayed version forms while preserving full supported identity](/test/contract/opencode-runtime.test.ts#L65)
+- Test (integration): [opencode-runtime.integration.test.ts:89 rejects unsupported dependencies with exit 4 and performs no analysis, while help/version never probe](/test/integration/opencode-runtime.integration.test.ts#L89)
+
+#### Scenario: Reject Invalid Or Unsupported Probe [CAT-OC-VERSION-REJECT]
+IF the probe cannot spawn, exits nonzero, receives a signal, times out, exceeds the capture limit, emits malformed UTF-8 or invalid/multiple stdout lines, or reports an unsupported major, THEN THE spec-check tool SHALL fail with `DependencyError` exit `4`, a bounded inert diagnostic, and zero analysis invocations.
+
+**Postcondition:** Detection causes are classified as `spawn_error`, `timeout`, `output_limit`, `invalid_version`, or `unsupported_major`. A signal or nonzero exit without timeout/output overflow is `spawn_error`. No assumed version or cross-major fallback is used.
+
+##### Evidence
+- Implementation: [opencode-runtime.ts:66 parseOpencodeVersion()](/src/adapters/opencode-runtime.ts#L66), [opencode-runtime.ts:88 detectOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L88), [pipeline-helpers.ts:60 checkDependencies()](/src/cli/pipeline-helpers.ts#L60), [run-cli.ts:284 runIngestionPhases()](/src/cli/run-cli.ts#L284)
+- Test: [opencode-runtime.test.ts:29 rejects invalid release output: %s](/test/contract/opencode-runtime.test.ts#L29), [opencode-runtime.test.ts:34 uses exact dependency bounds and fails closed on unknown majors](/test/contract/opencode-runtime.test.ts#L34), [opencode-runtime.test.ts:47 classifies failed probe %o](/test/contract/opencode-runtime.test.ts#L47), [opencode-runtime.test.ts:54 normalizes spawn failures into inert bounded diagnostics](/test/contract/opencode-runtime.test.ts#L54)
+- Test (integration): [opencode-runtime.integration.test.ts:21 terminates hanging/verbose probes and rejects malformed bytes and non-executable files](/test/integration/opencode-runtime.integration.test.ts#L21), [opencode-runtime.integration.test.ts:89 rejects unsupported dependencies with exit 4 and performs no analysis, while help/version never probe](/test/integration/opencode-runtime.integration.test.ts#L89)
+
+#### Scenario: Preserve Informational Fast Paths [CAT-OC-VERSION-INFO]
+WHEN invoked with `--help` or `--version`, THE spec-check tool SHALL produce its existing informational output without probing OpenCode or contacting other external dependencies.
+
+##### Evidence
+- Implementation: [index.ts:42 main()](/src/index.ts#L42)
+- Test: [cli.test.ts:81 parses help and version flags](/test/contract/cli.test.ts#L81)
+- Test (integration): [opencode-runtime.integration.test.ts:89 rejects unsupported dependencies with exit 4 and performs no analysis, while help/version never probe](/test/integration/opencode-runtime.integration.test.ts#L89), [z3-preflight.integration.test.ts:32 %s stops before analysis on unusable explicit/PATH Z3 and keeps informational commands dependency-free](/test/integration/z3-preflight.integration.test.ts#L32)
+
+#### Requirement model
+
+```alloy
+// --- Supported release admission ---
+// Effects/Frames: none; immutable probe observations leave RunState unchanged.
+// Tests establish grammar/UTF-8 observations; Alloy does not execute the lexer.
+pred oc_process_ok[p : OCProbe] {
+  // Guards: zero exit, no spawn error, signal, timeout or capture overflow.
+  // Postcondition: the observed process completed successfully.
+  p.spawnError = False
+  p.zeroExit = True
+  p.signalled = False
+  p.timedOut = False
+  p.overflow = False
+}
+// Guard: no detection failure. Postcondition: the release is admitted.
+pred oc_version_ok[p : OCProbe] { no oc_detection_cause[p] }
+// Safety: accepted versions have valid transport/grammar and a supported major.
+assert oc_accepted_version_is_supported {
+  all p : OCProbe | oc_version_ok[p] implies
+    oc_process_ok[p] and p.strictUtf8 = True and p.grammarValid = True and
+    p.reportedMajor in OCMajor1 + OCMajor2
+}
+// Safety: a signal is failure unless timeout/overflow classification takes priority.
+assert oc_signal_is_spawn_error {
+  all p : OCProbe | p.signalled = True and p.timedOut = False and
+    p.overflow = False implies oc_detection_cause[p] = OCSpawnError
+}
+```
+
+### Requirement: Preserve Run Protocol Identity [CAT-OC-RUNTIME]
+WHILE an analysis run is active, THE spec-check tool SHALL use its single immutable resolved OpenCode runtime for every model invocation, retry, and optional final-report call, without sharing that runtime with concurrent runs or persisting it between CLI invocations.
+
+**References:**
+- `openspec/changes/archive/2026-10-21-support-opencode-v2/proposal.md#Invariants`
+- `openspec/changes/archive/2026-10-21-support-opencode-v2/design.md#Runtime-Resolution`
+
+#### Scenario: Reuse Run Runtime [CAT-OC-RUNTIME-REUSE]
+WHEN a valid run executes multiple phases and retries, THE spec-check tool SHALL perform exactly one OpenCode version probe for that run and retain the same binary/version/major descriptor through final reporting.
+
+##### Evidence
+- Implementation: [run-cli.ts:170 runCliPipeline()](/src/cli/run-cli.ts#L170), [opencode-runtime.ts:114 runWithOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L114), [opencode-runtime.ts:125 resolveOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L125), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443)
+- Test: [opencode-runtime.test.ts:108 detects once per direct logical call and retains the protocol across retries](/test/contract/opencode-runtime.test.ts#L108)
+- Test (property): [opencode-runtime.test.ts:88 isolates nested and interleaved scopes under generated schedules](/test/contract/opencode-runtime.test.ts#L88)
+- Test (integration): [opencode-runtime.integration.test.ts:43 runs compiled and bundled pipelines against major %s with one probe each](/test/integration/opencode-runtime.integration.test.ts#L43)
+
+#### Scenario: Isolate Concurrent Runs [CAT-OC-RUNTIME-ISOLATE]
+WHEN two analysis runs with different resolved binaries execute concurrently, THE spec-check tool SHALL encode each run's invocations using only its own runtime descriptor.
+
+##### Evidence
+- Implementation: [opencode-runtime.ts:114 runWithOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L114), [opencode-runtime.ts:125 resolveOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L125), [opencode-protocol.ts:17 buildOpencodeArgs()](/src/adapters/opencode-protocol.ts#L17)
+- Test (property): [opencode-runtime.test.ts:88 isolates nested and interleaved scopes under generated schedules](/test/contract/opencode-runtime.test.ts#L88)
+
+#### Scenario: Resolve Direct Adapter Call [CAT-OC-RUNTIME-DIRECT]
+WHEN a valid direct adapter call executes, THE OpenCode adapter SHALL select an explicit runtime override first, otherwise a matching scoped runtime, otherwise one bounded detection outside a scope, and SHALL resolve that selection before the retry loop.
+
+##### Evidence
+- Implementation: [opencode-runtime.ts:125 resolveOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L125), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443)
+- Test: [opencode-runtime.test.ts:78 prioritizes an explicit runtime and rejects selected-binary mismatch before probing](/test/contract/opencode-runtime.test.ts#L78), [opencode-runtime.test.ts:108 detects once per direct logical call and retains the protocol across retries](/test/contract/opencode-runtime.test.ts#L108)
+
+#### Scenario: Reject Mismatched Runtime [CAT-OC-RUNTIME-MISMATCH]
+IF a selected binary conflicts with its explicit descriptor or a call without an explicit override conflicts with the scoped descriptor, THEN THE OpenCode adapter SHALL return a non-retryable `runtime_error` before any probe or analysis spawn.
+
+##### Evidence
+- Implementation: [opencode-runtime.ts:125 resolveOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L125), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443)
+- Test: [opencode-runtime.test.ts:78 prioritizes an explicit runtime and rejects selected-binary mismatch before probing](/test/contract/opencode-runtime.test.ts#L78)
+
+#### Scenario: Reject Direct Detection Failure [CAT-OC-RUNTIME-FAIL]
+IF direct-call runtime detection fails, THEN THE OpenCode adapter SHALL return a non-retryable `runtime_error` containing the detection cause without consuming model retries or triggering formalization model-response degradation.
+
+**Postcondition:** Runtime resolution does not pin executable bytes. Executable replacement during a run has no compatibility guarantee.
+
+##### Evidence
+- Implementation: [opencode-runtime.ts:125 resolveOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L125), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443), [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80)
+- Test: [opencode-runtime.test.ts:124 returns terminal runtime failure without response degradation](/test/contract/opencode-runtime.test.ts#L124)
+
+#### Requirement model
+
+```alloy
+// --- Run-local runtime resolution ---
+// Effects/Frames: none; descriptor selection is immutable and precedes retries.
+pred oc_runtime_mismatch[c : OCCall] {
+  // Guards: a supplied descriptor and an explicitly selected binary disagree.
+  // Postcondition: reject the mismatch before probing or analysis.
+  some oc_supplied_runtime[c]
+  some c.selectedBinary
+  c.selectedBinary != oc_supplied_runtime[c].evidence.command
+}
+// Safety: admitted concurrent runs own distinct descriptors and probe evidence.
+assert oc_concurrent_runs_do_not_share_descriptors {
+  all disj a, b : OCRun | oc_run_contract[a] and oc_run_contract[b] implies
+    a.runtime != b.runtime and a.runtime.evidence != b.runtime.evidence
+}
+// Safety: invalid requests and descriptor mismatches cause no probe or resolution.
+assert oc_resolution_failure_is_pre_spawn {
+  all c : OCCall | oc_call_error[c] in OCInvalidModel + OCInvalidRequest + OCRuntimeMismatch and
+    some oc_call_error[c] implies no oc_call_probes[c] and no oc_resolved_runtime[c]
+}
+```
+
+### Requirement: Normalize OpenCode Model Selection [CAT-OC-MODEL]
+WHEN resolving an effective model setting, THE spec-check tool SHALL normalize it into a base model and optional variant, enforce Luna=`max` and Terra=`high` for the existing `github-copilot/gpt-5.6-*` fixed-policy models, and use that same semantic selection for invocation and telemetry.
+
+**References:**
+- `openspec/changes/archive/2026-10-21-support-opencode-v2/proposal.md#Invariants`
+- `openspec/changes/archive/2026-10-21-support-opencode-v2/design.md#Model-Encoding`
+
+#### Scenario: Preserve Bare Model Selection [CAT-OC-MODEL-BARE]
+WHEN the effective model contains no `#` and satisfies existing nonempty-model validation, THE spec-check tool SHALL preserve its base value, apply the fixed variant for Luna/Terra, and leave other models without a forced variant.
+
+##### Evidence
+- Implementation: [opencode-model.ts:31 normalizeOpencodeModel()](/src/domain/opencode-model.ts#L31), [opencode-model.ts:17 variantForModel()](/src/domain/opencode-model.ts#L17)
+- Test: [opencode.test.ts:213 selects only the preregistered model reasoning variants](/test/contract/opencode.test.ts#L213), [opencode.test.ts:219 passes the Luna max and Terra high variants to OpenCode](/test/contract/opencode.test.ts#L219)
+- Test (property): [opencode-runtime.test.ts:139 preserves bare models and round-trips generated explicit selections](/test/contract/opencode-runtime.test.ts#L139)
+
+#### Scenario: Accept Explicit Variant [CAT-OC-MODEL-EXPLICIT]
+WHEN the effective model has exactly one `#`, no whitespace, a nonempty provider before the first `/`, a nonempty model after it, and a nonempty variant, THE spec-check tool SHALL preserve component case and additional model `/` characters and accept the explicit variant unless it conflicts with the fixed policy.
+
+**Postcondition:** A matching fixed suffix is accepted. OpenCode, not `spec-check`, validates catalog availability for other models and variants.
+
+##### Evidence
+- Implementation: [opencode-model.ts:31 normalizeOpencodeModel()](/src/domain/opencode-model.ts#L31)
+- Test (property): [opencode-runtime.test.ts:139 preserves bare models and round-trips generated explicit selections](/test/contract/opencode-runtime.test.ts#L139)
+- Example:
+```typescript
+const { normalizeOpencodeModel } = await import("./src/domain/opencode-model.ts");
+const selection = normalizeOpencodeModel("Provider/Family/Model#High"); //=> type Object
+selection.ok; //=> true
+selection.value.model; //=> Provider/Family/Model
+selection.value.variant; //=> High
+normalizeOpencodeModel("github-copilot/gpt-5.6-terra#high").ok; //=> true
+```
+
+#### Scenario: Reject Invalid Model Selection [CAT-OC-MODEL-INVALID]
+IF the effective model is malformed or its explicit suffix conflicts case-sensitively with a fixed variant, THEN THE spec-check tool SHALL return `ConfigError` exit `3` before dependency work, and THE adapter for an equivalent invalid direct call SHALL return non-retryable `invalid_model` before any probe or analysis spawn.
+
+**Postcondition:** Empty/whitespace-only components, an empty suffix, extra `#` separators, and whitespace in explicit references are rejected without silently trimming or changing case. Existing prompt/file/timeout request-shape failures likewise remain pre-spawn failures.
+
+##### Evidence
+- Implementation: [opencode-model.ts:31 normalizeOpencodeModel()](/src/domain/opencode-model.ts#L31), [config.ts:198 resolveRunConfig()](/src/cli/config.ts#L198), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443)
+- Test: [opencode-runtime.test.ts:132 rejects invalid model before any process: %s](/test/contract/opencode-runtime.test.ts#L132), [opencode-compatibility.test.ts:116 rejects invalid effective model settings as ConfigError before dependencies](/test/contract/opencode-compatibility.test.ts#L116), [opencode.test.ts:367 rejects oversized instruction prompt before spawn](/test/contract/opencode.test.ts#L367), [opencode.test.ts:880 rejects invalid timeout below minimum (defense-in-depth)](/test/contract/opencode.test.ts#L880), [opencode.test.ts:970 rejects symlink files](/test/contract/opencode.test.ts#L970)
+- Test (integration): [opencode-runtime.integration.test.ts:89 rejects unsupported dependencies with exit 4 and performs no analysis, while help/version never probe](/test/integration/opencode-runtime.integration.test.ts#L89)
+
+#### Requirement model
+
+```alloy
+// --- Fixed model selection policy ---
+// Effects/Frames: none; lexical validity is an external parser-test boundary.
+pred oc_model_valid[m : OCModel] {
+  // Guards: valid syntax and no conflict with a fixed reasoning variant.
+  // Postcondition: normalized selection is admissible before subprocess work.
+  m.lexicalValid = True
+  (some m.explicitVariant and some oc_fixed_variant[m]) implies
+    m.explicitVariant = oc_fixed_variant[m]
+}
+// Safety: accepted Luna/Terra selections preserve their fixed reasoning variants.
+assert oc_fixed_variant_is_enforced {
+  all m : OCModel | oc_model_valid[m] and some oc_fixed_variant[m] implies
+    oc_normalized_variant[m] = oc_fixed_variant[m]
+}
+// Safety: an invalid model resolves neither a probe nor a runtime.
+assert oc_invalid_model_never_probes {
+  all c : OCCall | not oc_model_valid[c.model] implies
+    oc_call_error[c] = OCInvalidModel and no oc_call_probes[c] and no oc_resolved_runtime[c]
+}
+```
+
+### Requirement: Encode Version Appropriate Model Calls [CAT-OC-INVOKE]
+WHEN invoking OpenCode with a normalized model selection, THE OpenCode adapter SHALL encode the selected variant as separate `--model <base> --variant <variant>` arguments for v1 and as `--model <base>#<variant>` for v2, omit variant syntax when absent, and retain argv-only prompts, JSON output, validated attachments, and existing per-call timeout/retry budgets.
+
+**References:**
+- `openspec/changes/archive/2026-10-21-support-opencode-v2/proposal.md#Scope`
+- `openspec/changes/archive/2026-10-21-support-opencode-v2/design.md#Invocation-Protocol`
+
+#### Scenario: Invoke Both Protocol Families [CAT-OC-INVOKE-FAMILY]
+WHEN the same Terra model selection is invoked against v1 and v2 fixtures, THE adapter SHALL respectively pass `--model github-copilot/gpt-5.6-terra --variant high` and `--model github-copilot/gpt-5.6-terra#high`, preserving prompt and repeated-file identities under each verified argument ordering.
+
+##### Evidence
+- Implementation: [opencode-protocol.ts:17 buildOpencodeArgs()](/src/adapters/opencode-protocol.ts#L17), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443)
+- Test: [opencode-compatibility.test.ts:20 encodes major %s with exact validated attachment identity](/test/contract/opencode-compatibility.test.ts#L20)
+- Test (integration): [opencode-runtime.integration.test.ts:43 runs compiled and bundled pipelines against major %s with one probe each](/test/integration/opencode-runtime.integration.test.ts#L43)
+
+#### Scenario: Preserve Protocol Across Retries [CAT-OC-INVOKE-RETRY]
+IF an invocation fails and existing policy permits a retry, THEN THE adapter SHALL reuse the same resolved runtime and normalized model selection without re-probing or trying another major's arguments.
+
+##### Evidence
+- Implementation: [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443), [opencode-protocol.ts:17 buildOpencodeArgs()](/src/adapters/opencode-protocol.ts#L17)
+- Test: [opencode-runtime.test.ts:108 detects once per direct logical call and retains the protocol across retries](/test/contract/opencode-runtime.test.ts#L108)
+
+#### Requirement model
+
+```alloy
+// --- Stable versioned invocation ---
+// Effects/Frames: none; attempts project one already-resolved immutable call.
+// Tests establish argv order, attachment identity, JSON and timeout/retry budgets.
+// Safety: retries preserve runtime, wire protocol, base model and variant.
+assert oc_retries_keep_protocol_and_model {
+  all a, b : OCAttempt | a.call = b.call implies
+    oc_attempt_runtime[a] = oc_attempt_runtime[b] and
+    oc_attempt_encoding[a] = oc_attempt_encoding[b] and
+    oc_attempt_base[a] = oc_attempt_base[b] and oc_attempt_variant[a] = oc_attempt_variant[b]
+}
+// Safety: resolution failure admits no model attempt.
+assert oc_resolution_errors_consume_no_attempts {
+  all c : OCCall | some oc_call_error[c] implies no oc_attempts_allowed[c]
+}
+```
+
+### Requirement: Bound Owned Subprocess Termination [CAT-PROCESS-BOUND]
+WHEN an external call reaches its timeout or capture limit, THE process adapter SHALL request termination of its owned process tree and SHALL finalize its own streams/result exactly once within a fixed 250 ms cleanup allowance after that request, without waiting indefinitely for descendant-held pipes, subject to Node event-loop scheduling.
+
+**References:**
+- `openspec/changes/archive/2026-10-21-support-opencode-v2/design.md#Review-Correction-Contracts`
+
+**Ownership:** POSIX invocations own a newly created process group. Timeout/overflow terminates descendants that remain in that group, including when the immediate parent has already exited. Deliberately detached process groups and existing shared OpenCode services are outside this ownership. Windows uses bounded best-effort tree termination; Linux evidence does not establish Windows cleanup success.
+
+#### Scenario: Terminate Owned Descendants [CAT-PROCESS-DESCENDANTS]
+IF an owned descendant retains inherited stdout/stderr after timeout or capture overflow, THEN THE process adapter SHALL terminate the owned group and return the corresponding failure flags within the cleanup bound, including after immediate-parent exit.
+
+##### Evidence
+- Implementation: [process.ts:115 runProcess()](/src/adapters/process.ts#L115), [process.ts:167 killOwnedProcess()](/src/adapters/process.ts#L167), [process.ts:187 stopProcess()](/src/adapters/process.ts#L187), [process.ts:199 settleProcess()](/src/adapters/process.ts#L199)
+- Test: [process-tree.test.ts:25 bounds %s while inherited pipes are held, and kills owned descendants](/test/contract/process-tree.test.ts#L25), [process-settlement.test.ts:22 settles overflow once despite competing stream errors (%s)](/test/contract/process-settlement.test.ts#L22)
+
+#### Scenario: Bound Escaped Pipe Holders [CAT-PROCESS-PIPE-CLEANUP]
+IF an out-of-group descendant retains a pipe after termination is requested, THEN THE process adapter SHALL destroy its own stream handles and settle within the cleanup allowance without claiming that the escaped process was contained or terminated.
+
+##### Evidence
+- Implementation: [process.ts:187 stopProcess()](/src/adapters/process.ts#L187), [process.ts:199 settleProcess()](/src/adapters/process.ts#L199)
+- Test: [process-tree.test.ts:51 settles after bounded pipe cleanup even if a descendant deliberately escapes ownership](/test/contract/process-tree.test.ts#L51), [process-settlement.test.ts:40 retains the first termination cause and releases pipes when close never arrives](/test/contract/process-settlement.test.ts#L40)
+
+#### Requirement model
+
+```alloy
+// --- Local process cleanup contract ---
+// Effects/Frames: predicates classify values; RunState and inputs are unchanged.
+// Tests establish OS termination and delivery of the 250ms cleanup callback.
+// Guard: timeout or overflow. Postcondition: owned work requires termination.
+pred oc_stop_required[p : OCCleanupInput] { p.timedOut = True or p.overflow = True }
+// Guard: POSIX and required stop. Postcondition: request owned-group termination.
+pred oc_requests_owned_group[p : OCCleanupInput] { oc_stop_required[p] and p.posix = True }
+// Guard/Postcondition: settlement closes the adapter's own streams.
+pred oc_own_streams_closed[s : OCCleanupStage] { s = OCSettled }
+// Safety: settlement is absorbing and yields exactly one terminal result.
+assert oc_settlement_is_absorbing {
+  all p : OCCleanupInput | oc_cleanup_next[p, OCSettled] = OCSettled and
+    one oc_cleanup_result[OCSettled] and oc_own_streams_closed[OCSettled]
+}
+// Local liveness: a delivered deadline callback settles despite pipe holders.
+// Assumption: event-loop scheduling delivers the callback; no wall-clock proof.
+assert oc_cleanup_callback_cannot_be_blocked_by_pipes {
+  all p : OCCleanupInput | p.cleanupCallbackDelivered = True implies
+    oc_cleanup_next[p, OCStopRequested] = OCSettled
+}
+// Safety: immediate-parent exit does not suppress required group termination.
+assert oc_parent_exit_does_not_suppress_group_request {
+  all p : OCCleanupInput | oc_stop_required[p] and p.posix = True and
+    p.parentExited = True implies oc_requests_owned_group[p]
+}
+// No predicate claims escaped groups or shared services are terminated.
+// Windows requests remain bounded best effort, without POSIX kill guarantees.
 ```
 
 ### State machine and invariant checks
@@ -1470,4 +2024,43 @@ check fatal_outcome_freezes_pipeline for 3 InputPath, 3 Artifact, 2 Capability, 
 check success_requires_all_phases for 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 15 steps expect 0
 check no_silent_hang for 3 InputPath, 4 Artifact, 2 Capability, 5 Finding, 3 ParsedDoc, 3 Requirement, 15 steps expect 0
 check pipeline_progress_liveness for 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 20 steps expect 0
+
+// --- Compatibility boundary witnesses ---
+// Structural checks use one state; existing pipeline bounds are unchanged.
+
+run oc_supported_release_witness {
+  some p : OCProbe | oc_version_ok[p] and p.reportedMajor = OCMajor2
+} for 3 but 1 steps expect 1
+
+run oc_v2_variant_witness {
+  some a : OCAttempt | a in oc_attempts_allowed[a.call] and
+    a.call.model.modelClass = OCTerra and oc_attempt_encoding[a] = OCHashVariant
+} for 3 but 1 steps expect 1
+
+run oc_escaped_pipe_cleanup_witness {
+  some p : OCCleanupInput | oc_stop_required[p] and p.escapedPipeHolder = True and
+    p.cleanupCallbackDelivered = True and
+    oc_cleanup_next[p, oc_cleanup_next[p, OCExecuting]] = OCSettled
+} for 3 but 1 steps expect 1
+
+// --- Compatibility safety checks ---
+
+check oc_dependency_failure_blocks_admission for 3 but 1 steps expect 0
+check oc_informational_has_no_probes for 3 but 1 steps expect 0
+check oc_z3_failure_is_exit4 for 3 but 1 steps expect 0
+check oc_accepted_version_is_supported for 3 but 1 steps expect 0
+check oc_signal_is_spawn_error for 3 but 1 steps expect 0
+check oc_concurrent_runs_do_not_share_descriptors for 3 but 1 steps expect 0
+check oc_resolution_failure_is_pre_spawn for 3 but 1 steps expect 0
+check oc_fixed_variant_is_enforced for 3 but 1 steps expect 0
+check oc_invalid_model_never_probes for 3 but 1 steps expect 0
+check oc_retries_keep_protocol_and_model for 3 but 1 steps expect 0
+check oc_resolution_errors_consume_no_attempts for 3 but 1 steps expect 0
+check oc_settlement_is_absorbing for 3 but 1 steps expect 0
+check oc_parent_exit_does_not_suppress_group_request for 3 but 1 steps expect 0
+
+// --- Local liveness check ---
+// Conditional on callback delivery; no additional pipeline fairness assumption.
+
+check oc_cleanup_callback_cannot_be_blocked_by_pipes for 3 but 1 steps expect 0
 ```

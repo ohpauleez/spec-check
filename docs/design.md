@@ -316,7 +316,7 @@ This split matters for assurance. The more the decision logic is isolated from t
 | **Manifest** ([`src/domain/reporting/manifest.ts`](src/domain/reporting/manifest.ts)) | Build entries with SHA-256 checksums, including separate formalization attempt-set evidence files; write atomically; invalidate stale manifests at run start | Manifest is the final core-evidence write and sole core success marker; optional unmanifested `report.md` may physically follow |
 | **Final report** ([`src/domain/reporting/final-report.ts`](src/domain/reporting/final-report.ts)) | Build the evaluated prompt and read-only agent policy; validate strict event transport, required sections, and citations; atomically publish and read back `report.md`; model legal lifecycle transitions | Report is optional, <=1 MiB, strict UTF-8, non-symlink, structurally cited, and excluded from the core manifest; handled failure persists a checksummed warning |
 | **Filesystem adapter** ([`src/adapters/fs.ts`](src/adapters/fs.ts)) | Path confinement, atomic writes (temp + rename), SHA-256 checksums | All writes confined to configured output directory; `precondition` throws on traversal |
-| **Process adapter** ([`src/adapters/process.ts`](src/adapters/process.ts)) | Generic `execFile` wrapper with argv arrays, timeout handling, stdin piping | No shell interpolation; `shell: false`; ENOENT on spawn rejects the promise |
+| **Process adapter** ([`src/adapters/process.ts`](src/adapters/process.ts)) | Argv-only spawn with owned process-group termination, stdin/capture handling, and bounded pipe cleanup | No shell interpolation; first termination cause and exactly-once settlement; 250-ms cleanup allowance; ENOENT rejects |
 | **`opencode` adapter** ([`src/adapters/opencode.ts`](src/adapters/opencode.ts)) | `opencode` subprocess with NDJSON event stream parsing, optional `--file` attachments, bounded retries | Bounded retries (default 3); invalid responses consume a retry; universal timeout comes from run config (default 300s) |
 | **`z3` adapter** ([`src/adapters/z3.ts`](src/adapters/z3.ts)) | SMT-LIB piped via stdin, stdout/stderr capture, exit classification | Results classified as sat/unsat/timeout/unknown/error; error lines override any verdict; default 30s timeout |
 | **Concurrency adapter** ([`src/adapters/concurrency.ts`](src/adapters/concurrency.ts)) | Bounded-concurrency parallel map with deterministic output ordering | `precondition(concurrency >= 1)`; first-error semantics; results preserve input order |
@@ -557,16 +557,18 @@ Relevant code: [`src/domain/findings.ts`](src/domain/findings.ts)
 | **I-5** | Findings are never silently erased by later phases | `addFindings()` in `RunState` with monotonic length postcondition |
 | **I-6** | Re-running with identical inputs and fixed/cached LLM responses produces identical outputs | Deterministic core between nondeterministic boundaries; deterministic extraction order |
 | **I-7** | All writes remain confined to the configured output directory | `resolveConfinedOutputPath()` with `precondition` assertion in filesystem adapter |
-| **I-8** | No shell interpolation in subprocess calls | `shell: false` in `process.ts`; argv-based `execFile`, never `exec` |
+| **I-8** | No shell interpolation in subprocess calls | `shell: false` and argv-based `spawn`/`spawnSync` in `process.ts`, never shell-string `exec` |
 | **I-9** | Prompt construction keeps analyzed content in data position; attached batch JSON and every claim-text field are untrusted data, never instructions, and attached claim bodies do not appear in the prompt body | `sanitizeForCodeFence()` for inline content; dedicated attached-context prompt and file transport for multi-claim formalization |
 | **I-10** | The resolved run configuration is immutable once analysis begins | CLI layer freezes `RunConfig` before pipeline starts |
+| **I-11** | A normal run uses one supported OpenCode runtime through retries and optional reporting; concurrent runs do not share that identity | Bounded dependency resolution followed by immutable adapter-owned asynchronous scope |
+| **I-12** | Invocation and telemetry use the same semantic model/variant selection on both supported OpenCode majors | Shared pure model normalization and version-specific adapter encoding |
 
 ### 5.2 Per-Phase Contracts
 
 | Phase | Preconditions | Postconditions | Error Outcomes |
 |-------|---------------|----------------|----------------|
 | CLI validation | Process can read argv | Valid args produce resolved `RunConfig`; invalid args exit with code `2` | `ArgumentError`, `ConfigError` |
-| Dependency check | Resolved config available | `opencode` and `z3` confirmed on PATH | `DependencyError` |
+| Dependency check | Resolved config available; run-start cleanup complete | Supported OpenCode v1/v2 release resolved; Z3 `--version` executes successfully; both probes bounded | `DependencyError` (exit 4), before any paid analysis |
 | Catalog | At least one input path resolves to readable artifacts | Catalog identifies every document and its classification; archived specs excluded; delta conflicts surfaced as findings | `CatalogError` |
 | Structured parsing | Cataloged documents are readable UTF-8 | Each document produces a typed model; all lines classified or preserved as unparsed evidence | Structural findings with provenance |
 | Per-capability merge | Parsed specs available; catalog identifies finalized and delta documents per capability | Merged capability specs produced with deterministic output; merge findings emitted for skipped operations and structural issues; no capability has more than one delta | `PipelineAbortError` on sanitized artifact-key collisions or internal merge exceptions |
@@ -940,7 +942,7 @@ stateDiagram-v2
 
 | ID | Invariant |
 |---|---|
-| AD-1 | All subprocess calls use argv arrays via `execFile` with `shell: false` |
+| AD-1 | All subprocess calls use argv arrays with `shell: false` |
 | AD-2 | `opencode` retries are bounded (default 3); each invalid response consumes one retry |
 | AD-3 | `z3` error-line detection overrides any subsequent verdict (errors make verdicts unreliable) |
 | AD-4 | Path confinement in the filesystem adapter uses `precondition()` assertion |
@@ -1167,7 +1169,14 @@ Relevant code: [`src/adapters/opencode.ts`](src/adapters/opencode.ts)
 Protocol rules:
 
 - prompts are fenced so analyzed content is not promoted to instruction position
-- the `opencode` adapter builds argv (`opencode run <prompt> --model <name> --format json`) and parses newline-delimited JSON event output; the prompt must be the first positional argument after `run`, because `opencode` interprets trailing positional arguments as file paths
+- dependency checking probes `opencode --version` once per analysis run with a 5s process timeout and 16-KiB combined capture bound; strict UTF-8 single-line semantic versions with supported major 1 or 2 select the protocol, and failures use `DependencyError` exit 4
+- after OpenCode detection, `probeZ3Dependency` runs the configured `--z3` command (default `z3` on PATH) once with `--version`, a 5s timeout and 16-KiB combined capture bound; only signal-free zero exit without spawn/timeout/overflow failure succeeds. Missing/non-executable commands (including `EACCES`/`EPERM`), other spawn failures, nonzero exits, signals, timeouts and overflow abort before any LLM analysis or SMT query with actionable bounded diagnostics and dependency exit 4. There is no Z3 version policy, retry, or telemetry attempt allocation; process cleanup retains its 250-ms allowance
+- the immutable runtime descriptor is adapter-scoped through all subsequent calls and optional reporting; retries never re-probe or fall back to another major, and direct calls outside a scope resolve once per call unless explicitly supplied a matching runtime
+- the adapter parses newline-delimited JSON output and keeps the instruction prompt as one positional argv element; model and attachment ordering is verified against pinned releases v1.19.3 and v2.0.15
+- model normalization accepts explicit `provider/model#variant` references and retains the existing fixed Luna=`max` and Terra=`high` policy; malformed or conflicting effective references use `ConfigError` exit 3, while direct invalid requests return terminal `invalid_model` before any process work
+- v1 receives `--model <base> --variant <variant>`; v2 receives `--model <base>#<variant>`; telemetry records the same normalized base and variant, with additive optional `opencodeMajor` metadata under schema version 1
+- final reporting uses verified v1 `--pure`/`--dir` controls or v2 standalone execution with private subprocess cwd/config and explicit `OPENCODE_CONFIG_PROJECT_DISABLE=1`; the native setting overrides inherited values and excludes project/ancestor server-plugin and MCP sources before startup, while private `OPENCODE_CONFIG_DIR` replaces the server-global source
+- final-report policy intent remains version-independent; adapter serialization emits v1 permission maps or native ordered v2 rules. Required built-ins remain available, terminal-only plugins are outside the exclusion requirement, and credentials are not copied into generated config
 - source evidence is passed as file attachments via repeated `--file <path>` arguments appended after the prompt; attachments are validated before transport — symlinks are rejected and each path must resolve to a readable regular file, otherwise the call fails with `invalid_files`
 - because the prompt travels as an argv positional, prompts exceeding 32,768 UTF-8 bytes (`PROMPT_ARG_MAX_BYTES`) fail immediately with `prompt_too_large` and are never retried
 - the per-call timeout defaults to 300s and is validated to the range [30s, 15min]; an out-of-range value fails with `invalid_timeout`
@@ -1175,7 +1184,10 @@ Protocol rules:
 - `type: "error"` events are treated as failures
 - `opencode` responses must be schema-valid before entering the core model
 - invalid responses consume bounded retries (default 3); retries are sequential, with no concurrent subprocess overlap within a single call
-- terminal failures are classified into a closed taxonomy: `spawn_error`, `timeout`, `invalid_json`, `invalid_timeout`, `schema_validation_error`, `prompt_too_large`, `invalid_files`
+- terminal failures are classified into a closed taxonomy: `spawn_error`, `timeout`, `invalid_json`, `invalid_timeout`, `schema_validation_error`, `prompt_too_large`, `invalid_files`, `invalid_model`, `runtime_error`, `output_limit`; capture-limit/request/runtime failures are non-retryable and do not trigger formalization model-response degradation
+- timeout and capture overflow terminate the owned POSIX process group, including pipe-holding descendants after parent exit; a 250-ms cleanup allowance bounds pending stream close, subject to Node event-loop scheduling. Escaped groups/shared services are outside group ownership; Windows cleanup is bounded best-effort. UTF-8 validity uses allocation-free byte validation before decoding
+- both supported and unsupported version presentations are bounded/inert while the runtime retains its complete semantic version
+- production telemetry collection is opt-in; enabled metrics aggregate all phases/scopes/totals in one attempt-order pass without changing schema-v1 reconciliation or snapshot completion semantics
 - all valid and invalid samples are preserved as evidence
 
 ### 7.5 Core to `z3` Boundary
@@ -1190,7 +1202,7 @@ Protocol rules:
 - the adapter always resolves and never rejects; spawn failures surface as `error` with `exitCode: null`
 - error lines (`(error ...)`) override any verdict (verdicts after errors are unreliable); `errorCount` reports how many `(error ...)` lines were observed
 - solver stdout/stderr, timeout, unknown, and error diagnostics are persisted verbatim
-- per-query timeout default is 30s, enforced by killing the child process with SIGKILL
+- per-query timeout default is 30s, enforced through owned-group termination and bounded pipe cleanup
 
 ---
 
@@ -1345,7 +1357,7 @@ Relevant code: [`src/domain/result.ts`](src/domain/result.ts), [`src/domain/erro
 | **No prior tool-owned output enters a new run** | Ordered run-start cleanup invalidates the stale manifest, then removes prior reports, metrics, and evidence trees before pipeline work | Run-start ordering and recursive-removal integration tests |
 | **No unsupported final assessment is accepted** | Strict UTF-8 event transport plus required headings, repository citation, and per-numbered-finding artifact citations before and after publication | Adapter, validator, and integration tests |
 | **No unsupported verdict reaches final report** | Report rendering replaces malformed findings with `reporting.unsupported_verdict` defects | Contract tests |
-| **No shell injection** | Argv-based `execFile` only with `shell: false`; no `exec` in codebase | Codebase invariant |
+| **No shell injection** | Argv-based subprocesses with `shell: false`; no shell-string `exec` | Codebase invariant |
 | **No writes outside output directory** | `resolveConfinedOutputPath()` with `precondition` assertion | Contract tests |
 | **Solver inputs/outputs always persisted** | Adapter-level persistence via `writeOutputAtomic()` | Integration tests |
 | **Findings never silently removed** | Monotonic `addFindings()` in `RunState` with length postcondition | Property tests |
@@ -1498,7 +1510,7 @@ The tool has no end-user authentication or authorization model because it is a l
 
 | Concern | Design Constraint | Implementation |
 |---|---|---|
-| subprocess invocation | argv-based execution via `execFile`; no shell interpolation | `shell: false` in [`src/adapters/process.ts`](src/adapters/process.ts) |
+| subprocess invocation | argv-based execution; no shell interpolation; explicit process-group ownership and bounded pipe cleanup | `shell: false` in [`src/adapters/process.ts`](src/adapters/process.ts) |
 | prompt injection | inline document content is fenced; attached batch JSON and claim text are explicitly untrusted data, never instructions; multi-claim prompt bodies contain no claim text | `sanitizeForCodeFence()` in [`src/domain/fence.ts`](src/domain/fence.ts); dedicated attached-context prompt and transport in formalization modules |
 | attached formalization context | full claim text exists temporarily outside `--output`; it must be owner-only and auditable after deletion, but process termination can prevent cleanup | fresh `spec-check-batch-` temp directory; exclusive `0600` `batch-context.json`; cleanup in `finally` on handled paths; invocation `claimSet` plus local pointers and SHA-256 persisted |
 | formalization attempt evidence | atomic evidence may survive a failed or terminated current run until the next run, and local indexes can collide across invocations | one `FormalizationAttemptSet` file per invocation; `claimSet` scopes reconstruction; only the core manifest marks success and lists/checksums current-run evidence |
@@ -1555,6 +1567,7 @@ src/
   version.ts                    version constant
   cli/
     run-cli.ts                  phase-group orchestration
+    final-report-lifecycle.ts   production report/warning coordination, injected-effect verification
     parse-argv.ts               hand-rolled argument parser
     config.ts                   three-tier config resolution
     phase-runner.ts             progress event decoration
@@ -1572,6 +1585,7 @@ src/
     progress.ts                 progress event protocol
     run-state.ts                immutable append-only run state
     fence.ts                    prompt fencing utility
+    opencode-model.ts           pure model-reference normalization and fixed variant policy
     tasks-analysis.ts           task analysis utilities
     parser/
       catalog.ts                input discovery and classification
@@ -1616,8 +1630,10 @@ src/
       qualitative-review.ts     qualitative review prompt
   adapters/
     fs.ts                       confined writes, atomic temp+rename, checksums
-    process.ts                  safe execFile wrapper, no shell
+    process.ts                  argv-only spawn, owned groups, bounded stream cleanup, strict UTF-8 flags
     opencode.ts                 LLM subprocess with NDJSON parsing, retries
+    opencode-runtime.ts         bounded release detection and immutable run-scoped protocol identity
+    opencode-protocol.ts        v1/v2 argv, execution environment, and report-policy serialization
     z3.ts                       solver subprocess with stdin piping, classification
     concurrency.ts              bounded parallel map with deterministic ordering
 test/

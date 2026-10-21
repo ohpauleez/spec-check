@@ -16,7 +16,7 @@ import {
 import type { ParsedSpec } from "../../src/domain/model.js";
 import { toCapabilityName, toClaimId, toOutputDirPath, toRelativePath } from "../../src/domain/branded.js";
 import { buildManifestEntries } from "../../src/domain/reporting/manifest.js";
-import { buildFinalReportAgentConfig } from "../../src/domain/prompts/final-report.js";
+import { buildFinalReportAgentConfig } from "../../src/adapters/opencode-protocol.js";
 import { INITIAL_FINAL_REPORT_LIFECYCLE, reduceFinalReportLifecycle } from "../../src/domain/reporting/final-report.js";
 
 import type * as FsAdapter from "../../src/adapters/fs.js";

@@ -27,7 +27,7 @@ vi.mock("../../src/cli/pipeline-helpers.js", async (importOriginal) => {
   const runCodeBackwardsWork = original.runCodeBackwardsWork as (...args: readonly unknown[]) => unknown;
   return {
     ...original,
-    checkDependencies: () => undefined,
+    checkDependencies: async () => ({ ok: true, value: { binaryPath: "opencode", version: "1.19.3", major: 1 } }),
     groupRepresentativesBySpec: vi.fn((...args: readonly unknown[]) => groupRepresentativesBySpec(...args)),
     runCodeBackwardsWork: vi.fn((...args: readonly unknown[]) => runCodeBackwardsWork(...args)),
     runClusteringPhase: async (

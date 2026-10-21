@@ -4,11 +4,13 @@ import { tmpdir } from "node:os";
 import { isAbsolute, join } from "node:path";
 
 import { callOpencode, type OpencodeError } from "../../adapters/opencode.js";
+import { resolveOpencodeRuntime } from "../../adapters/opencode-runtime.js";
+import { serializeFinalReportPolicy } from "../../adapters/opencode-protocol.js";
 import { removeOutputTree, resolveConfinedOutputPath, writeOutputAtomic } from "../../adapters/fs.js";
 import { assertNever, postcondition, precondition } from "../assert.js";
 import { toRelativePath, type ModelName, type OutputDirPath, type RelativePath } from "../branded.js";
 import {
-  buildFinalReportAgentConfig,
+  buildFinalReportAgentPolicy,
   buildFinalReportPrompt,
   isPermissionLiteralPath,
 } from "../prompts/final-report.js";
@@ -33,7 +35,10 @@ export const FINAL_REPORT_REQUIRED_HEADINGS = Object.freeze([
   "## Residual Uncertainty And Rerun Criteria",
 ] as const);
 
-const REPOSITORY_CITATION_PATTERN = /(?:^|[\s`([])((?:openspec|docs|src|test|spec-check-output)\/[A-Za-z0-9_./#:-]+)(?=$|[\s`),.;])/gu;
+// Extract complete references before checking path syntax; never recover a
+// plausible relative suffix from an absolute path or URL.
+const REPOSITORY_CITATION_PATTERN = /`([^`\r\n]+)`|\[[^\x5b\x5d\r\n]*\]\(([^()\x5b\x5d\r\n]+)\)|(?:^|[\s([])([^\s`\x5b]+)/gu;
+const BARE_RELATIVE_PATH = /^[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+(?:#[A-Za-z0-9_.:/-]+|:\d+(?::\d+)?)?$/u;
 
 /** Closed expected failure domain for one final-report attempt. */
 export type FinalReportErrorKind =
@@ -63,6 +68,7 @@ export interface FinalReportFile {
 
 /** Dependencies isolated for deterministic and fault-injection tests. */
 export interface FinalReportDependencies {
+  readonly resolveRuntime?: typeof resolveOpencodeRuntime;
   readonly invoke: typeof callOpencode;
   readonly inspect: typeof lstat;
   readonly read: typeof readFile;
@@ -70,6 +76,7 @@ export interface FinalReportDependencies {
 }
 
 const productionDependencies: FinalReportDependencies = {
+  resolveRuntime: resolveOpencodeRuntime,
   invoke: callOpencode,
   inspect: lstat,
   read: readFile,
@@ -278,15 +285,18 @@ export async function generateFinalReport(
   if (readPaths.some((path) => !isAbsolute(path) || !isPermissionLiteralPath(path))) {
     return err({ kind: "path_unsupported", message: "final-report read paths must be absolute and contain no `*` or `?`" });
   }
+  const runtime = await (dependencies.resolveRuntime ?? resolveOpencodeRuntime)();
+  if (!runtime.ok) return err({ kind: "agent_failed", message: runtime.error.message });
   let isolatedRoot: string;
   try {
     isolatedRoot = await mkdtemp(join(tmpdir(), "spec-check-final-report-"));
   } catch {
     return err({ kind: "agent_failed", message: "unable to create isolated final-report workspace" });
   }
-  const configContent = buildFinalReportAgentConfig(
+  const policy = buildFinalReportAgentPolicy(
     isolatedRoot, input.outputDir, reportPath, [input.workspaceRoot, ...readPaths],
   );
+  const configContent = serializeFinalReportPolicy(policy, runtime.value.major);
   const configPath = join(isolatedRoot, "opencode.json");
   try {
     await writeFile(configPath, configContent, { encoding: "utf8", mode: 0o600, flag: "wx" });
@@ -298,6 +308,7 @@ export async function generateFinalReport(
   try {
     invoked = await dependencies.invoke({
       model: input.model,
+      runtime: runtime.value,
       phase: "final-report",
       prompt,
       timeoutMs: input.timeoutMs,
@@ -484,17 +495,17 @@ function validateFinalReportContent(content: string): Result<string, FinalReport
 /** Return Markdown lines while excluding fenced code content from structure. */
 function markdownLinesOutsideFences(content: string): readonly string[] {
   const lines: string[] = [];
-  let fence: { readonly marker: "`" | "~"; readonly length: number } | undefined;
+  let fence: { readonly closing: RegExp } | undefined;
   const visibleContent = content.replace(/<!--[\s\S]*?(?:-->|$)/gu, "");
+  const openingPattern = /^ {0,3}(`{3,}|~{3,})/u;
   for (const line of visibleContent.split(/\r?\n/u)) {
-    const opening = /^ {0,3}(`{3,}|~{3,})/u.exec(line)?.[1];
+    const opening = openingPattern.exec(line)?.[1];
     if (fence === undefined && opening !== undefined) {
-      fence = { marker: opening[0] as "`" | "~", length: opening.length };
+      fence = { closing: new RegExp(`^ {0,3}${opening[0]}{${String(opening.length)},}\\s*$`, "u") };
       continue;
     }
     if (fence !== undefined) {
-      const closing = new RegExp(`^ {0,3}${fence.marker}{${String(fence.length)},}\\s*$`, "u");
-      if (closing.test(line)) fence = undefined;
+      if (fence.closing.test(line)) fence = undefined;
     } else {
       lines.push(line);
     }
@@ -505,12 +516,34 @@ function markdownLinesOutsideFences(content: string): readonly string[] {
 /** Require at least one confined repository-relative path citation. */
 function hasRepositoryCitation(content: string): boolean {
   for (const match of content.matchAll(REPOSITORY_CITATION_PATTERN)) {
-    const citation = match[1];
+    const bare = match[3]?.replace(/[),.;]+$/u, "");
+    if (bare !== undefined && !BARE_RELATIVE_PATH.test(bare)) continue;
+    const citation = match[1] ?? match[2] ?? bare;
     if (citation === undefined) continue;
-    const path = citation.split(/[#:]/u, 1)[0]!;
-    if (!path.split("/").includes("..")) return true;
+    if (isRepositoryRelativeCitation(citation, match[2] !== undefined)) return true;
   }
   return false;
+}
+
+/** Validate citation syntax without restricting repository directory names.
+ * @param citation - One complete code-span, link target or bare path candidate.
+ * @param linkTarget - True for an explicit Markdown link target, including an
+ * extensionless root file; bare inline code words are not artifact evidence.
+ * @returns Whether it is a relative artifact reference; no filesystem access.
+ * @remarks Schemes, absolute/drive/UNC/home paths, control characters, query
+ * strings and dot traversal are rejected before line/heading suffix handling.
+ */
+function isRepositoryRelativeCitation(citation: string, linkTarget: boolean): boolean {
+  if (/^[A-Za-z][A-Za-z0-9+.-]*:/u.test(citation) || citation.startsWith("/") || citation.startsWith("~") || citation.includes("\\") || citation.includes("?")) return false;
+  if (Array.from(citation).some((character) => {
+    const code = character.charCodeAt(0);
+    return code < 32 || (code >= 127 && code <= 159) || code === 0x2028 || code === 0x2029;
+  })) return false;
+  const path = citation.split("#", 1)[0]?.replace(/:\d+(?::\d+)?$/u, "") ?? "";
+  if (/[<>:]/u.test(path)) return false;
+  const parts = path.split("/");
+  if (path.trim() !== path || parts.some((part) => part.length === 0 || part === "." || part === "..")) return false;
+  return parts.length > 1 || /\.[A-Za-z0-9]+$/u.test(path) || linkTarget;
 }
 
 /** Map the adapter taxonomy into the stable final-report boundary. */

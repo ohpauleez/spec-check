@@ -34,7 +34,7 @@ export default class SpecTraceReporter implements Reporter {
   /**
    * Fail the run when coverage mode is enabled and canonical identifiers remain uncovered.
    */
-  onFinished(): void {
+  onTestRunEnd(): void {
     if (!isTraceCoverageEnabled()) {
       return;
     }

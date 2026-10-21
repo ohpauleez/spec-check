@@ -16,6 +16,8 @@ export interface OpencodeAttemptTelemetry {
   readonly opencodePhase: OpencodePhase;
   readonly model: string;
   readonly variant: string | null;
+  /** Additive schema-v1 metadata; absent in historical snapshots. */
+  readonly opencodeMajor?: 1 | 2;
   readonly startedAt: string;
   readonly durationMs: number;
   readonly promptBytes: number;

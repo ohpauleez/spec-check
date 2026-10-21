@@ -3,7 +3,7 @@
  * for each verification phase and parsing structured JSON responses.
  *
  * Adapter layer — translates domain phase requests into OpenCode CLI calls.
- * Exports: OpencodePhase, OpencodeInvocation, invokeOpencode.
+ * Exports: OpencodePhase, OpencodeCallOptions, callOpencode, usage/payload helpers.
  */
 import { lstat, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
@@ -11,11 +11,15 @@ import { isAbsolute } from "node:path";
 import { PROMPT_ARG_MAX_BYTES } from "./opencode-limits.js";
 import { runProcess, type ProcessResult } from "./process.js";
 import { allocateOpencodeCallId, recordOpencodeAttempt } from "./telemetry.js";
+import { resolveOpencodeRuntime, type OpencodeRuntime, type OpencodeResolutionError } from "./opencode-runtime.js";
+import { buildOpencodeArgs, buildOpencodeEnvironment } from "./opencode-protocol.js";
+import { normalizeOpencodeModel, type OpencodeModelSelection } from "../domain/opencode-model.js";
 import { postcondition } from "../domain/assert.js";
 import { err, ok, type Result } from "../domain/result.js";
 import { DEFAULT_TIMEOUT_MS, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS } from "../domain/timeout.js";
 
 export { PROMPT_ARG_MAX_BYTES } from "./opencode-limits.js";
+export { variantForModel } from "../domain/opencode-model.js";
 
 /**
  * First backoff delay between adapter retry attempts, in milliseconds.
@@ -69,6 +73,7 @@ export interface OpencodeCallOptions {
   readonly prompt: string;
   readonly phase: OpencodePhase;
   readonly binaryPath?: string;
+  readonly runtime?: OpencodeRuntime;
   readonly timeoutMs?: number;
   readonly retries?: number;
   readonly files?: readonly string[];
@@ -100,7 +105,7 @@ export interface OpencodeUsage {
 }
 
 /**
- * Discriminated error produced when an opencode invocation fails after exhausting retries.
+ * Closed failure domain for request validation, runtime resolution, or model attempts.
  *
  * @remarks
  * Invariant: `kind` discriminates the failure mode — spawn failures, timeouts, malformed JSON,
@@ -108,10 +113,11 @@ export interface OpencodeUsage {
  * the verification step that produced it.
  */
 export interface OpencodeError {
-  readonly kind: "spawn_error" | "timeout" | "invalid_json" | "invalid_timeout" | "schema_validation_error" | "prompt_too_large" | "invalid_files";
+  readonly kind: "spawn_error" | "timeout" | "invalid_json" | "invalid_timeout" | "schema_validation_error" | "prompt_too_large" | "invalid_files" | "invalid_model" | "runtime_error" | "output_limit";
   readonly phase: OpencodePhase;
   readonly message: string;
   readonly stderr?: string;
+  readonly cause?: OpencodeResolutionError;
 }
 
 /**
@@ -179,10 +185,12 @@ function defaultBackoffDelay(delayMs: number): Promise<void> {
  * @remarks
  * Precondition: `options.model` and `options.prompt` are non-empty strings.
  * Postcondition: on `ok: true`, the value is a non-null object that passed phase schema
- * validation. On `ok: false`, all retry attempts have been exhausted.
+ * validation. On `ok: false`, preflight failed, a terminal failure occurred, or
+ * the bounded retry budget ended.
  *
  * Failure modes:
- * - Binary not found or not executable → `kind: "spawn_error"` after all retries.
+ * - Runtime resolution fails → non-retryable `kind: "runtime_error"` before model work.
+ * - Model reference is malformed → non-retryable `kind: "invalid_model"` before probing.
  * - Process exceeds timeout on every attempt → `kind: "timeout"`.
  * - Model returns non-JSON output → `kind: "invalid_json"`.
  * - Model returns JSON that fails phase schema validation → `kind: "schema_validation_error"`.
@@ -207,7 +215,7 @@ function defaultBackoffDelay(delayMs: number): Promise<void> {
  * passed, so the retry loop can treat every field as authoritative.
  */
 interface ResolvedCallOptions {
-  readonly command: string;
+  readonly selection: OpencodeModelSelection;
   readonly retries: number;
   readonly timeoutMs: number;
   readonly backoffDelay: (delayMs: number) => Promise<void>;
@@ -231,6 +239,8 @@ interface ResolvedCallOptions {
 async function validateCallOptions(
   options: OpencodeCallOptions,
 ): Promise<Result<ResolvedCallOptions, OpencodeError>> {
+  const selection = normalizeOpencodeModel(options.model);
+  if (!selection.ok) return err({ kind: "invalid_model", phase: options.phase, message: selection.error });
   const promptBytes = Buffer.byteLength(options.prompt, "utf8");
   if (promptBytes > PROMPT_ARG_MAX_BYTES) {
     return err({
@@ -272,53 +282,11 @@ async function validateCallOptions(
   }
 
   return ok({
-    command: options.binaryPath ?? "opencode",
+    selection: selection.value,
     retries: options.retries ?? 3,
     timeoutMs,
     backoffDelay: options.backoffDelay ?? defaultBackoffDelay,
   });
-}
-
-/**
- * Build the argv array for one `opencode run` invocation.
- *
- * @param options - invocation options supplying the prompt, model, and files
- * @returns argument vector with the prompt as the first positional argument
- *
- * @remarks
- * The prompt must be the first positional argument after the "run" subcommand:
- * opencode interprets trailing positional arguments as file paths, not prompt
- * text. Pure and total; no element is mutated after construction.
- */
-function buildOpencodeArgs(options: OpencodeCallOptions): string[] {
-  const args: string[] = ["run"];
-  if (options.phase === "final-report") {
-    args.push("--pure");
-  }
-  args.push(options.prompt, "--model", options.model, "--format", "json");
-  const variant = variantForModel(options.model);
-  if (variant !== undefined) {
-    args.push("--variant", variant);
-  }
-  for (const filePath of options.files ?? []) {
-    args.push("--file", filePath);
-  }
-  if (options.phase === "final-report") {
-    postcondition(options.workspaceRoot !== undefined, "validated final-report call has a workspace root");
-    args.push("--agent", "spec-check-final-report", "--dir", options.workspaceRoot);
-  }
-  return args;
-}
-
-/** Resolve provider reasoning variants for the preregistered comparison models. */
-export function variantForModel(model: string): string | undefined {
-  if (model === "github-copilot/gpt-5.6-luna") {
-    return "max";
-  }
-  if (model === "github-copilot/gpt-5.6-terra") {
-    return "high";
-  }
-  return undefined;
 }
 
 /**
@@ -330,8 +298,8 @@ export function variantForModel(model: string): string | undefined {
  *   attempt; the caller decides whether the kind is worth retrying
  *
  * @remarks
- * Failure classification order is load-bearing: timeout first (stdout is
- * unreliable after a kill), then non-zero exit with unusable stdout (surfaced
+ * Failure classification order is load-bearing: terminal capture overflow,
+ * then timeout (stdout is unreliable after a kill), then non-zero exit (surfaced
  * with a bounded stderr preview), then JSON parse, then phase schema. Pure
  * classification of an already-captured result; performs no I/O.
  */
@@ -340,19 +308,15 @@ function classifyProcessResult(
   options: OpencodeCallOptions,
   timeoutMs: number,
 ): Result<unknown, OpencodeError> {
+  if (processResult.outputLimitExceeded === true) {
+    return err({ kind: "output_limit", phase: options.phase, message: "opencode output exceeded the configured capture bound" });
+  }
   if (processResult.timedOut) {
     return err({
       kind: "timeout",
       phase: options.phase,
       message: `opencode timed out after ${String(timeoutMs)}ms`,
       stderr: processResult.stderr,
-    });
-  }
-  if (processResult.outputLimitExceeded === true) {
-    return err({
-      kind: "spawn_error",
-      phase: options.phase,
-      message: "opencode output exceeded the configured capture bound",
     });
   }
   // Process failure is authoritative even when a partial payload was emitted.
@@ -406,7 +370,7 @@ function classifyProcessResult(
 /**
  * Run one spawn-and-classify attempt against the opencode subprocess.
  *
- * @param command - resolved binary path
+ * @param runtime - immutable descriptor identifying the resolved binary/protocol
  * @param args - argv built by {@link buildOpencodeArgs}
  * @param options - invocation options supplying phase and files
  * @param timeoutMs - resolved per-attempt timeout
@@ -419,27 +383,18 @@ function classifyProcessResult(
  * failures and are returned as data.
  */
 async function attemptOpencodeOnce(
-  command: string,
+  runtime: OpencodeRuntime,
   args: readonly string[],
   options: OpencodeCallOptions,
   timeoutMs: number,
 ): Promise<{ readonly result: Result<unknown, OpencodeError>; readonly processResult?: ProcessResult }> {
   let processResult: ProcessResult;
   try {
-    processResult = await runProcess(command, [...args], {
+    const envOverrides = buildOpencodeEnvironment(options, runtime);
+    processResult = await runProcess(runtime.binaryPath, [...args], {
       timeoutMs,
-      ...(options.opencodeConfigContent === undefined
-        ? {}
-        : { envOverrides: {
-          OPENCODE_CONFIG_CONTENT: options.opencodeConfigContent,
-          ...(options.opencodeConfigDir === undefined ? {} : {
-            OPENCODE_CONFIG_DIR: options.opencodeConfigDir,
-            XDG_CONFIG_HOME: options.opencodeConfigDir,
-          }),
-          ...(options.opencodeConfigPath === undefined ? {} : {
-            OPENCODE_CONFIG: options.opencodeConfigPath,
-          }),
-        } }),
+      ...(Object.keys(envOverrides).length === 0 ? {} : { envOverrides }),
+      ...(options.phase === "final-report" && runtime.major === 2 ? { cwd: options.workspaceRoot } : {}),
       ...(options.phase === "final-report" ? { maxOutputBytes: FINAL_REPORT_OUTPUT_MAX_BYTES } : {}),
     });
   } catch (error) {
@@ -463,10 +418,12 @@ async function attemptOpencodeOnce(
  * @remarks
  * Precondition: `options.model` and `options.prompt` are non-empty strings.
  * Postcondition: on `ok: true`, the value is a non-null object that passed phase schema
- * validation. On `ok: false`, all retry attempts have been exhausted.
+ * validation. On `ok: false`, preflight failed, a terminal failure occurred, or
+ * the bounded retry budget ended.
  *
  * Failure modes:
- * - Binary not found or not executable → `kind: "spawn_error"` after all retries.
+ * - Runtime resolution fails → non-retryable `kind: "runtime_error"` before model work.
+ * - Model reference is malformed → non-retryable `kind: "invalid_model"` before probing.
  * - Process exceeds timeout on every attempt → `kind: "timeout"`.
  * - Model returns non-JSON output → `kind: "invalid_json"`.
  * - Model returns JSON that fails phase schema validation → `kind: "schema_validation_error"`.
@@ -490,8 +447,11 @@ export async function callOpencode(
   if (!validated.ok) {
     return validated;
   }
-  const { command, retries, timeoutMs, backoffDelay } = validated.value;
-  const args = buildOpencodeArgs(options);
+  const { selection, retries, timeoutMs, backoffDelay } = validated.value;
+  const resolved = await resolveOpencodeRuntime(options);
+  if (!resolved.ok) return err({ kind: "runtime_error", phase: options.phase, message: resolved.error.message, cause: resolved.error });
+  const runtime = resolved.value;
+  const args = buildOpencodeArgs(options, runtime, selection);
   const logicalCallId = allocateOpencodeCallId();
 
   let lastError: OpencodeError | undefined;
@@ -504,7 +464,7 @@ export async function callOpencode(
 
     const startedAt = new Date().toISOString();
     const startedNs = process.hrtime.bigint();
-    const attempted = await attemptOpencodeOnce(command, args, options, timeoutMs);
+    const attempted = await attemptOpencodeOnce(runtime, args, options, timeoutMs);
     const durationMs = Number((process.hrtime.bigint() - startedNs) / 1_000_000n);
     if (logicalCallId !== undefined) {
       const usage = extractOpencodeUsage(attempted.processResult?.stdout ?? "");
@@ -512,8 +472,9 @@ export async function callOpencode(
         logicalCallId,
         attempt,
         opencodePhase: options.phase,
-        model: options.model,
-        variant: variantForModel(options.model) ?? null,
+        model: selection.model,
+        variant: selection.variant ?? null,
+        opencodeMajor: runtime.major,
         startedAt,
         durationMs,
         promptBytes: Buffer.byteLength(options.prompt, "utf8"),
@@ -709,10 +670,12 @@ function parseOpencodePayload(stdout: string, strictPayload = false): unknown {
     if (eventPayload !== undefined) {
       return strictPayload ? parseStrictJsonPayload(eventPayload) : extractJsonPayload(eventPayload);
     }
-    if (strictPayload) {
-      throw new Error("missing final-report payload text event");
+    if (strictPayload || singleEvents.some((event) => typeof asRecord(event)?.type === "string")) {
+      // A single status/unknown event is still transport, not a legacy raw
+      // model payload. Otherwise an event-only stream could falsely succeed.
+      throw new Error(strictPayload ? "missing final-report payload text event" : "missing payload text event");
     }
-    return strictPayload ? parseStrictJsonPayload(trimmed) : extractJsonPayload(trimmed);
+    return extractJsonPayload(trimmed);
   }
 
   const events = trimmed

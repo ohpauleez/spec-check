@@ -3,10 +3,63 @@
  * parses its output, and classifies results into a closed set of outcomes.
  *
  * Adapter layer — bridges domain SMT-LIB content to the Z3 binary.
- * Exports: Z3ResultKind, Z3Result, Z3Options, runZ3.
+ * Exports: solver query execution and bounded dependency preflight.
  */
 import type { SmtlibContent } from "../domain/branded.js";
 import { runProcess } from "./process.js";
+import { err, ok, type Result } from "../domain/result.js";
+
+/** Independent preflight execution budget, in milliseconds. */
+export const Z3_PREFLIGHT_TIMEOUT_MS = 5_000;
+/** Combined stdout/stderr preflight capture budget, in bytes. */
+export const Z3_PREFLIGHT_MAX_BYTES = 16_384;
+
+/** Closed failure causes for a single local Z3 readiness probe. */
+export interface Z3DependencyError {
+  readonly kind: "not_found" | "not_executable" | "spawn_error" | "timeout" | "output_limit" | "exit_error";
+  readonly message: string;
+}
+
+/** Build an actionable diagnostic without including untrusted process output.
+ * @param command - Configured command or path, escaped and bounded for display.
+ * @param kind - Classified local dependency failure.
+ * @param reason - Trusted failure description, never raw stdout/stderr.
+ * @returns Structured failure; no I/O or mutation.
+ */
+function preflightFailure(command: string, kind: Z3DependencyError["kind"], reason: string): Result<never, Z3DependencyError> {
+  const label = JSON.stringify(command.slice(0, 300))
+    .replace(/[\u007f-\u009f\u2028\u2029]/gu, (character) => `\\u${character.charCodeAt(0).toString(16).padStart(4, "0")}`)
+    .slice(0, 300);
+  return err({ kind, message: `Z3 pre-flight failed at ${label}: ${reason}. Check --z3/PATH, execute permissions, and filesystem restrictions.` });
+}
+
+/** Verify Z3 can execute before any paid analysis begins.
+ * @param command - Selected executable, defaulting to z3 on PATH.
+ * @returns Success only for one signal-free, zero-exit version probe; otherwise
+ * an actionable, bounded dependency error. Expected process failures never throw.
+ * @remarks Argv-only, no retries, solver query, version policy, or model telemetry.
+ * Uses owned-process termination and the process adapter's 250-ms cleanup allowance.
+ * @example await probeZ3Dependency("/opt/z3/bin/z3");
+ */
+export async function probeZ3Dependency(command = "z3"): Promise<Result<void, Z3DependencyError>> {
+  try {
+    const result = await runProcess(command, ["--version"], {
+      timeoutMs: Z3_PREFLIGHT_TIMEOUT_MS,
+      maxOutputBytes: Z3_PREFLIGHT_MAX_BYTES,
+    });
+    if (result.outputLimitExceeded === true) return preflightFailure(command, "output_limit", "version check exceeded 16384 captured bytes");
+    if (result.timedOut) return preflightFailure(command, "timeout", "version check timed out after 5000ms");
+    if (result.signal !== null || result.exitCode !== 0) {
+      return preflightFailure(command, "exit_error", `version check failed (${result.signal ?? `exit ${String(result.exitCode)}`})`);
+    }
+    return ok(undefined);
+  } catch (error: unknown) {
+    const code = error instanceof Error ? (error as NodeJS.ErrnoException).code : undefined;
+    if (code === "ENOENT" || code === "ENOTDIR") return preflightFailure(command, "not_found", `binary not found (${code})`);
+    if (code === "EACCES" || code === "EPERM") return preflightFailure(command, "not_executable", `cannot execute the binary (${code})`);
+    return preflightFailure(command, "spawn_error", "could not execute the binary");
+  }
+}
 
 /**
  * Closed domain of possible Z3 solver outcomes.

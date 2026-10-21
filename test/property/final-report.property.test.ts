@@ -11,6 +11,9 @@ import {
   type FinalReportLifecycleState,
 } from "../../src/domain/reporting/final-report.js";
 import { buildFinalReportPrompt } from "../../src/domain/prompts/final-report.js";
+import { coordinateFinalReportLifecycle, type FinalReportCoordinationResult } from "../../src/cli/final-report-lifecycle.js";
+import { addFindings, createInitialRunState } from "../../src/domain/run-state.js";
+import { toRelativePath } from "../../src/domain/branded.js";
 
 describe("final-report properties", () => {
   it("preserves generated literal paths exactly", () => {
@@ -79,33 +82,23 @@ describe("final-report properties", () => {
     }), { numRuns: 100 });
   });
 
-  it("differentially matches generated histories to an independent fake boundary", () => {
-    traceSpec("RAE-FINAL-OPTIONAL", "RAE-FINAL-WARN-HASH", "RAE-MANIFEST-NO-FINAL");
-    const branch = fc.constantFrom("success", "warning", "output-failure");
-    fc.assert(fc.property(branch, (kind) => {
-      const events: FinalReportLifecycleEvent[] = ["begin_core_reporting", "complete_core", "start_report"];
-      if (kind === "success") events.push("generation_returns", "validation_succeeds");
-      if (kind === "warning") events.push(
-        "generation_fails", "cleanup_succeeds", "marker_invalidation_succeeds",
-        "summary_rewrite_succeeds", "begin_manifest_refresh", "manifest_refresh_succeeds",
-      );
-      if (kind === "output-failure") events.push(
-        "generation_fails", "cleanup_succeeds", "marker_invalidation_succeeds",
-        "summary_rewrite_succeeds", "begin_manifest_refresh", "output_fails",
-      );
+  it("executes production coordination against independent filesystem observations and reference histories", async () => {
+    traceSpec("RAE-FINAL-OPTIONAL", "RAE-FINAL-WARN-HASH", "RAE-MANIFEST-NO-FINAL", "RAE-LIFECYCLE-PRODUCTION", "RAE-LIFECYCLE-EFFECTS");
+    await fc.assert(fc.asyncProperty(fc.constantFrom<HistoryKind>("success", "validation", "generation", "cleanup", "marker", "summary", "manifest"), async (kind) => {
+      const executed = await runCoordinatorHistory(kind);
+      const expected = expectedHistory(kind);
+      expect(executed.events).toEqual(expected);
       let model = INITIAL_FINAL_REPORT_LIFECYCLE;
-      const fake = {
-        reportPresent: false, warningPresent: false, summaryCurrent: false,
-        manifestCurrent: false, reportManifested: false,
-      };
-      for (const event of events) {
+      for (const event of expected) {
         const next = reduceFinalReportLifecycle(model, event);
         expect(next.ok).toBe(true);
         if (next.ok) model = next.value;
-        applyFakeBoundaryEvent(fake, event);
-        expect(model).toMatchObject(fake);
       }
-    }), { numRuns: 60 });
+      const lifecycle = executed.result.ok ? executed.result.lifecycle : executed.result.error.lifecycle;
+      expect(lifecycle).toEqual(model);
+      expect(model).toMatchObject(executed.observed);
+      expect(executed.result.ok).toBe(!["cleanup", "marker", "summary", "manifest"].includes(kind));
+    }), { numRuns: 100 });
   });
 
   it("an unmanifested report cannot change core entries and warning bytes do", () => {
@@ -134,27 +127,65 @@ describe("final-report properties", () => {
   });
 });
 
-function applyFakeBoundaryEvent(
-  fake: {
-    reportPresent: boolean; warningPresent: boolean; summaryCurrent: boolean;
-    manifestCurrent: boolean; reportManifested: boolean;
-  },
-  event: FinalReportLifecycleEvent,
-): void {
-  if (event === "complete_core") {
-    fake.summaryCurrent = true;
-    fake.manifestCurrent = true;
-  } else if (event === "validation_succeeds") {
-    fake.reportPresent = true;
-  } else if (event === "cleanup_succeeds") {
-    fake.reportPresent = false;
-    fake.warningPresent = true;
-  } else if (event === "marker_invalidation_succeeds") {
-    fake.summaryCurrent = false;
-    fake.manifestCurrent = false;
-  } else if (event === "summary_rewrite_succeeds") {
-    fake.summaryCurrent = true;
-  } else if (event === "manifest_refresh_succeeds") {
-    fake.manifestCurrent = true;
+/** Generated outcome, including every independently injected persistence failure. */
+type HistoryKind = "success" | "validation" | "generation" | "cleanup" | "marker" | "summary" | "manifest";
+
+/** Independent expected protocol history; does not execute production effects. */
+function expectedHistory(kind: HistoryKind): readonly FinalReportLifecycleEvent[] {
+  const events: FinalReportLifecycleEvent[] = ["begin_core_reporting", "complete_core", "start_report"];
+  if (kind === "success") return [...events, "generation_returns", "validation_succeeds"];
+  events.push(...(kind === "validation" ? ["generation_returns", "validation_fails"] as const : ["generation_fails"] as const));
+  const steps = [["cleanup", "cleanup_succeeds"], ["marker", "marker_invalidation_succeeds"], ["summary", "summary_rewrite_succeeds"], ["manifest", "manifest_refresh_succeeds"]] as const;
+  for (const [operation, event] of steps) {
+    if (operation === "manifest") events.push("begin_manifest_refresh");
+    if (kind === operation) return [...events, "output_fails"];
+    events.push(event);
   }
+  return events;
+}
+
+/** Run the coordinator imported by run-cli against a byte-oriented fake FS.
+ * Observations derive from stored bytes/effects, never from reducer events.
+ */
+async function runCoordinatorHistory(kind: HistoryKind): Promise<{
+  readonly result: FinalReportCoordinationResult;
+  readonly events: readonly FinalReportLifecycleEvent[];
+  readonly observed: { readonly reportPresent: boolean; readonly warningPresent: boolean; readonly summaryCurrent: boolean; readonly manifestCurrent: boolean; readonly reportManifested: boolean };
+}> {
+  const state = createInitialRunState();
+  const files = new Map([["summary", "core"], ["manifest", sha256Hex("core")]]);
+  const events: FinalReportLifecycleEvent[] = [];
+  let warning = false;
+  const fail = (operation: HistoryKind): void => { if (kind === operation) throw new Error(`injected ${operation}`); };
+  const result = await coordinateFinalReportLifecycle<string>(state, {
+    attempt: async () => {
+      if (kind === "success") {
+        files.set("report", "validated report");
+        return { state, result: { ok: true, value: { path: toRelativePath("report.md"), content: "validated report" } } };
+      }
+      return { state, result: { ok: false, error: { kind: kind === "validation" ? "report_missing" : "agent_failed", message: "injected report failure" } } };
+    },
+    cleanup: async () => { fail("cleanup"); files.delete("report"); },
+    addWarning: (current, error) => {
+      warning = true;
+      return addFindings(current, [{ severity: "warning", category: "reporting.final_report_failed", provenance: { file: "<report>" }, description: error.message, rationale: "optional report failure", evidence: [{ kind: "failure", value: error.kind }] }]);
+    },
+    invalidateMarker: async () => { fail("marker"); files.delete("manifest"); },
+    rewriteSummary: async () => { fail("summary"); files.set("summary", "warning"); return "warning"; },
+    refreshManifest: async (summary) => {
+      fail("manifest");
+      expect(files.has("manifest")).toBe(false);
+      expect(files.get("summary")).toBe(summary);
+      files.set("manifest", sha256Hex(summary));
+    },
+    observeTransition: (event) => { events.push(event); },
+  });
+  // A failed marker invalidation leaves the original core bundle authoritative.
+  const expectedSummary = warning && files.get("manifest") !== sha256Hex("core") ? "warning" : "core";
+  return { result, events, observed: {
+    reportPresent: files.has("report"), warningPresent: warning,
+    summaryCurrent: files.get("summary") === expectedSummary,
+    manifestCurrent: files.get("manifest") === sha256Hex(files.get("summary") ?? ""),
+    reportManifested: false,
+  } };
 }

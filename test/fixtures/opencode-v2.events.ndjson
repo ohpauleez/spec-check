@@ -1,0 +1,2 @@
+{"type":"step_finish","part":{"type":"step-finish","reason":"tool-calls","cost":0.00258,"tokens":{"input":840,"output":39,"reasoning":36,"cache":{"read":0,"write":0}}}}
+{"type":"text","part":{"text":"{\"read_token\":\"<REDACTED_RANDOM_TOKEN>\",\"restricted_tools\":\"Only read/search file tools are available; no overwrite, shell execution, delegation, or web-fetch tools are available.\"}"}}

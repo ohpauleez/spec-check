@@ -12,6 +12,7 @@ import { toModelName, toOutputDirPath, type ModelName, type OutputDirPath } from
 import { err, ok, type Result } from "../domain/result.js";
 import { DEFAULT_TIMEOUT_MS, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS } from "../domain/timeout.js";
 import type { CliArgs } from "./parse-argv.js";
+import { normalizeOpencodeModel } from "../domain/opencode-model.js";
 
 /**
  * Fully resolved run configuration with all required fields populated.
@@ -100,6 +101,7 @@ type TimeoutParseResult = Result<number, string>;
  * ```
  */
 export type ConfigError =
+  | { readonly kind: "model_validation_error"; readonly message: string }
   | { readonly kind: "config_read_error"; readonly path: string }
   | { readonly kind: "config_parse_error"; readonly path: string }
   | { readonly kind: "config_validation_error"; readonly path: string; readonly message: string }
@@ -232,13 +234,17 @@ export async function resolveRunConfig(args: CliArgs): Promise<Result<RunConfig,
     return maxBatchSizeResult;
   }
 
+  const model = args.model ?? fromFile.value.model ?? DEFAULT_MODEL;
+  const selection = normalizeOpencodeModel(model);
+  if (!selection.ok) return err({ kind: "model_validation_error", message: selection.error });
+
   return ok({
     inputs: mergedInputs,
     output: toOutputDirPath(resolvedOutput),
     src: resolvedSrc,
     caps: args.caps ?? fromFile.value.caps,
     z3: args.z3 ?? fromFile.value.z3,
-    model: toModelName(args.model ?? fromFile.value.model ?? DEFAULT_MODEL),
+    model: toModelName(model),
     pairBudget: pairBudgetResult.value,
     timeoutMs: timeoutMsResult.value,
     maxBatchSize: maxBatchSizeResult.value,

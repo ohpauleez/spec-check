@@ -13,6 +13,10 @@ import {
 } from "../branded.js";
 import type { Finding } from "../findings.js";
 import type { LogicIrClaim } from "../logic-ir.js";
+import { analyzeStaticGroup } from "./static-analysis.js";
+import { QueryExecutor } from "./query-executor.js";
+import { DEFAULT_ANALYSIS, type AnalysisConfig } from "./analysis-config.js";
+import type { EvidenceRecorder } from "./evidence.js";
 import { buildSharedCheckInputs, runCompletenessCheck, runPairwiseContradictionChecks } from "./logic-analysis-checks.js";
 import { deriveSeverityFromClaims } from "./logic-analysis-sexpr.js";
 import {
@@ -148,12 +152,17 @@ export async function runLogicAnalysis(input: {
   readonly outputDir: OutputDirPath;
   readonly z3Path?: string;
   readonly concurrency?: number;
+  readonly analysis?: AnalysisConfig;
+  readonly evidence?: EvidenceRecorder;
+  readonly pairBudget?: number;
+  readonly executor?: QueryExecutor;
 }): Promise<LogicAnalysisOutput> {
-  const concurrency = input.concurrency ?? LOGIC_ANALYSIS_CONCURRENCY_DEFAULT;
+  const concurrency = input.groups.some((group) => group.claims.some((claim) => claim.signature !== undefined)) ? 1 : input.concurrency ?? LOGIC_ANALYSIS_CONCURRENCY_DEFAULT;
+  const executor = input.executor ?? new QueryExecutor((input.analysis ?? DEFAULT_ANALYSIS).limits, input.evidence, input.z3Path);
   const reportLines = ["# report_1.logic.md", "", "## Solver Findings", ""];
 
   const results = await mapBounded(input.groups, concurrency, async (group) => {
-    return analyzeSpecGroup(group, input.outputDir, input.z3Path);
+    return analyzeSpecGroup(group, input.outputDir, input.z3Path, executor, input.pairBudget ?? 200);
   });
 
   const findings: Finding[] = [];
@@ -381,6 +390,8 @@ async function analyzeSpecGroup(
   group: SpecClaimGroup,
   outputDir: OutputDirPath,
   z3Path: string | undefined,
+  executor?: QueryExecutor,
+  pairBudget = 200,
 ): Promise<SpecAnalysisResult> {
   const findings: Finding[] = [];
   const reportLines: string[] = [];
@@ -398,7 +409,12 @@ async function analyzeSpecGroup(
     return { findings, reportLines };
   }
 
+  if (group.claims.some((claim) => claim.signature !== undefined) && executor !== undefined) return await analyzeStaticGroup(group.specFile, group.claims, executor, pairBudget);
   const compiled = compileSpecSmtlib(group.specFile, group.claims);
+  if (compiled.invalidReason !== undefined) {
+    return { findings: [{ severity: "error", category: "logic.invalid_group", provenance: { file: group.specFile }, description: compiled.invalidReason,
+      rationale: "Incompatible typed signature or assumptions cannot support a solver conclusion.", evidence: [{ kind: "validation", value: compiled.invalidReason }] }], reportLines: [`- ${group.specFile}: invalid typed group`] };
+  }
 
   for (const conflict of compiled.conflicts) {
     const finding = conflictToFinding(group.specFile, conflict);

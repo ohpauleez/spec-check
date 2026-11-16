@@ -213,10 +213,11 @@ describe("opencode adapter contract", () => {
   it("selects only the preregistered model reasoning variants", async () => {
     expect(variantForModel("github-copilot/gpt-5.6-luna")).toBe("max");
     expect(variantForModel("github-copilot/gpt-5.6-terra")).toBe("high");
+    expect(variantForModel("github-copilot/gpt-6.1-sol")).toBe("high");
     expect(variantForModel("github-copilot/gpt-5.4")).toBeUndefined();
   });
 
-  it("passes the Luna max and Terra high variants to OpenCode", async () => {
+  it("passes the fixed Luna, Terra and Sol variants to OpenCode", async () => {
     const { runProcess } = await import("../../src/adapters/process.js");
     const mocked = vi.mocked(runProcess);
     mocked.mockResolvedValue({
@@ -229,12 +230,16 @@ describe("opencode adapter contract", () => {
 
     await callOpencode({ model: "github-copilot/gpt-5.6-luna", phase: "formalization", prompt: "luna", retries: 1 });
     await callOpencode({ model: "github-copilot/gpt-5.6-terra", phase: "formalization", prompt: "terra", retries: 1 });
+    await callOpencode({ model: "github-copilot/gpt-6.1-sol", phase: "formalization", prompt: "sol", retries: 1 });
 
     expect(mocked.mock.calls[0]?.[1]).toEqual([
       "run", "luna", "--model", "github-copilot/gpt-5.6-luna", "--format", "json", "--variant", "max",
     ]);
     expect(mocked.mock.calls[1]?.[1]).toEqual([
       "run", "terra", "--model", "github-copilot/gpt-5.6-terra", "--format", "json", "--variant", "high",
+    ]);
+    expect(mocked.mock.calls[2]?.[1]).toEqual([
+      "run", "sol", "--model", "github-copilot/gpt-6.1-sol", "--format", "json", "--variant", "high",
     ]);
   });
 

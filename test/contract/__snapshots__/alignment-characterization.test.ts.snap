@@ -1,0 +1,139 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`boundary-remediated orchestration characterization > formalization capacity preserves attribution, recovery and evidence 1`] = `
+{
+  "calls": 0,
+  "outputHash": "96be931c519dbc522f6671111cfaa7e1073f02c0640d35f7bd46ffa1443ac6ed",
+  "protocolHash": "56966f11a5fec92aa62f120300830e7dbb8595667e6d95b60981b0c8dfe97cdb",
+}
+`;
+
+exports[`boundary-remediated orchestration characterization > formalization invalid preserves attribution, recovery and evidence 1`] = `
+{
+  "calls": 7,
+  "outputHash": "174a6490e986e23b74721da72e14f611b047dfbbeadcb43a34b1cb1595eb6039",
+  "protocolHash": "48fb4ee05e172f95d612e4d7e74a874ecc9829031e467ed97219bdddfc80724e",
+}
+`;
+
+exports[`boundary-remediated orchestration characterization > formalization recovery preserves attribution, recovery and evidence 1`] = `
+{
+  "calls": 3,
+  "outputHash": "9674d3b17a5b83e798c71cf83ca2d11a58f26758f863c1b46cbfd5382be86f23",
+  "protocolHash": "44b2364ee4c7f838733c6d276c56dd3f6ac0d5b7115f18eccdaab249f3e8e7b1",
+}
+`;
+
+exports[`boundary-remediated orchestration characterization > formalization shortfall preserves attribution, recovery and evidence 1`] = `
+{
+  "calls": 3,
+  "outputHash": "6a277a2067a72bc1ada6f9932939af9b6635f61c0a3050db8baf851f7329a033",
+  "protocolHash": "8ec73b05ffd771be474e90a8ddf7aa8859227f1176f0dc4ec251747ad02c0960",
+}
+`;
+
+exports[`boundary-remediated orchestration characterization > formalization success preserves attribution, recovery and evidence 1`] = `
+{
+  "calls": 1,
+  "outputHash": "aea8af55812c62f3aae60d8c6c3d4721838b99afef4fb7c6c24e620890ba223e",
+  "protocolHash": "fd81029692f2f64287a0bf3c4427504fd3dc4a7f67795918d6a5c3f9ac20e49b",
+}
+`;
+
+exports[`boundary-remediated orchestration characterization > formalization write-failure preserves attribution, recovery and evidence 1`] = `
+{
+  "calls": 1,
+  "outputHash": "bae1589cd58953adb33b5406f3c95a376b4ef29a69984c9a75f6371a4c74eada",
+  "protocolHash": "fb7eaeae9a5cd4295b16d5e8d4ba43875d92a2e55b98e2c3224d80ebc5990313",
+}
+`;
+
+exports[`boundary-remediated orchestration characterization > static background-unsat preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 2,
+  "ledgerEntries": 17,
+  "protocolHash": "8e6d30bf5b0a06218e6b3a2b83f2b1c02e11b8f5acb9f9d9acdd5218c62a4872",
+  "queries": "background",
+}
+`;
+
+exports[`boundary-remediated orchestration characterization > static baseline-unsat preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 6,
+  "ledgerEntries": 19,
+  "protocolHash": "7629f99a4ad75649dd7c2352a35dc3820ec39ccbd1fad943cade17ec570a6c6d",
+  "queries": "background, global, global:core",
+}
+`;
+
+exports[`boundary-remediated orchestration characterization > static capacity preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 0,
+  "ledgerEntries": 17,
+  "protocolHash": "006ada5f9cdcd7f93c84d781442681530ac969b1e1bf7ef045f5a0e8819e2455",
+  "queries": "",
+}
+`;
+
+exports[`boundary-remediated orchestration characterization > static conflicts preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 45,
+  "ledgerEntries": 24,
+  "protocolHash": "3f5199e8174b8865f707de84a701817317ec576681eb26066088b7fd5f0e7e1f",
+  "queries": "background, global, guard:CHAR-0, mandatory-response:CHAR-0, activation:CHAR-0, activation:CHAR-0:core, guard:CHAR-1, mandatory-response:CHAR-1, activation:CHAR-1, activation:CHAR-1:core, guard:CHAR-2, advisory-response:CHAR-2, guard:CHAR-3, advisory-response:CHAR-3, guard:CHAR-4, permission-response:CHAR-4, coactivation:0:1, example:5, coverage:family, coverage:family:witness, advisory-combination, advisory-coactivation:0:1",
+}
+`;
+
+exports[`boundary-remediated orchestration characterization > static pair-limit preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 37,
+  "ledgerEntries": 20,
+  "protocolHash": "c6ba8556f59ab205329d122d17d6501a5db83b5c59bb26a3cb8a0f62de767ec5",
+  "queries": "background, global, guard:CHAR-0, mandatory-response:CHAR-0, activation:CHAR-0, guard:CHAR-1, mandatory-response:CHAR-1, activation:CHAR-1, guard:CHAR-2, advisory-response:CHAR-2, guard:CHAR-3, advisory-response:CHAR-3, guard:CHAR-4, permission-response:CHAR-4, example:5, coverage:family, coverage:family:witness, advisory-combination",
+}
+`;
+
+exports[`boundary-remediated orchestration characterization > static script-limit preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 8,
+  "ledgerEntries": 20,
+  "protocolHash": "09faf24cb9693b890206a6c0415b0ae462feaaac83f13f05dcf63c2a80bd52f3",
+  "queries": "background, global, guard:CHAR-0, mandatory-response:CHAR-0",
+}
+`;
+
+exports[`boundary-remediated orchestration characterization > static success preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 45,
+  "ledgerEntries": 22,
+  "protocolHash": "c24793bfae2339cb0ec88d5b645101999dd4e5356b048f45b327170c4d2e5725",
+  "queries": "background, global, guard:CHAR-0, mandatory-response:CHAR-0, activation:CHAR-0, guard:CHAR-1, mandatory-response:CHAR-1, activation:CHAR-1, guard:CHAR-2, advisory-response:CHAR-2, guard:CHAR-3, advisory-response:CHAR-3, guard:CHAR-4, permission-response:CHAR-4, coactivation:0:1, pair-conflict:0:1, example:5, coverage:family, coverage:family:witness, advisory-combination, advisory-coactivation:0:1, advisory-pair:0:1",
+}
+`;
+
+exports[`boundary-remediated orchestration characterization > static timeout preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 45,
+  "ledgerEntries": 22,
+  "protocolHash": "2bd424b4c4a2aebd38ef1ede74b2a201df5179575eb68a21f5c5cda63f0e3821",
+  "queries": "background, global, guard:CHAR-0, mandatory-response:CHAR-0, activation:CHAR-0, guard:CHAR-1, mandatory-response:CHAR-1, activation:CHAR-1, guard:CHAR-2, advisory-response:CHAR-2, guard:CHAR-3, advisory-response:CHAR-3, guard:CHAR-4, permission-response:CHAR-4, coactivation:0:1, pair-conflict:0:1, example:5, coverage:family, coverage:family:witness, advisory-combination, advisory-coactivation:0:1, advisory-pair:0:1",
+}
+`;
+
+exports[`boundary-remediated orchestration characterization > static unknown preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 27,
+  "ledgerEntries": 21,
+  "protocolHash": "661b5d83332b464dbf6aa3eed178bc81bec66c6fb4a9afc6dd2cdea45f9f2be4",
+  "queries": "background, global, guard:CHAR-0, guard:CHAR-1, guard:CHAR-2, guard:CHAR-3, guard:CHAR-4, example:5, coverage:family, coverage:family:witness, advisory-combination, advisory-coactivation:0:1, advisory-pair:0:1",
+}
+`;
+
+exports[`boundary-remediated orchestration characterization > static write-failure preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 0,
+  "ledgerEntries": 0,
+  "protocolHash": "09c8fdffeb803ca64ee9fede9ddfc41d4cffffa3db42a69b7e023997c4d31ba9",
+  "queries": "",
+}
+`;

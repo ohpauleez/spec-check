@@ -1,8 +1,10 @@
 /**
  * Translate requirement and scenario claims into validated Logic IR samples.
  *
- * Semantic grouping and physical batching are deterministic. Single-claim
- * batches use inline prompts; multi-claim batches use an attached JSON context.
+ * Source-produced claims use deterministic admission/grouping and a frozen
+ * predicate registry through `source-formalize.ts`, with private attached contexts
+ * for batches and singleton recovery. Raw domain fixtures exercise the existing
+ * inline/attached adapter boundaries independently of that source contract.
  *
  * @remarks
  * Orchestration lives here; shared types live in `formalization-types.ts`,
@@ -24,6 +26,7 @@ import {
   FORMALIZATION_SANDBOXING,
 } from "../prompts/formalization.js";
 import { err, ok, type Result } from "../result.js";
+import { formalizeSourceClaims, type SourceFormalizationInput } from "./source-formalize.js";
 import {
   buildBatchEvidenceDraft,
   buildBatchEvidenceMetadata,
@@ -134,6 +137,13 @@ export async function formalizeClaims(input: {
   readonly logicalFileByCapability: ReadonlyMap<string, string>;
   readonly concurrency?: number;
   readonly maxBatchSize?: number;
+  readonly analysis?: NonNullable<SourceFormalizationInput["analysis"]>;
+  readonly evidence?: NonNullable<SourceFormalizationInput["evidence"]>;
+  readonly side?: NonNullable<SourceFormalizationInput["side"]>;
+  readonly ordinal?: number;
+  readonly configSource?: string;
+  readonly discover?: NonNullable<SourceFormalizationInput["discover"]>;
+  readonly invoke?: NonNullable<SourceFormalizationInput["invoke"]>;
 }): Promise<Result<FormalizationOutput, readonly FormalizationError[]>> {
   const concurrency = input.concurrency ?? FORMALIZATION_CONCURRENCY_DEFAULT;
   const maxBatchSize = input.maxBatchSize ?? MAX_BATCH_SIZE_DEFAULT;
@@ -146,6 +156,11 @@ export async function formalizeClaims(input: {
   if (!validated.ok) {
     return validated;
   }
+
+  // Source parsing is authoritative in CLI runs. Raw IR-domain fixtures remain
+  // usable as boundary/oracle inputs, while every parser-produced statement
+  // follows the registry/predicate contract instead of prose rediscovery.
+  if (input.claims.some((claim) => claim.surface !== undefined)) return await formalizeSourceClaims({ ...input, maxBatchSize });
 
   const batches = groupFormalizationClaims(input.claims, input.logicalFileByCapability)
     .flatMap((group) => splitPhysicalBatches(group, maxBatchSize));

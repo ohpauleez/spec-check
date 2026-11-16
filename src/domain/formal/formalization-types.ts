@@ -12,6 +12,8 @@ import type { Claim } from "../claim-graph.js";
 import type { Finding } from "../findings.js";
 import type { LogicIrClaim } from "../logic-ir.js";
 import type { BatchAttemptEvidence } from "./batch-transport.js";
+import type { FrozenRegistry } from "./concepts.js";
+import type { SemanticEvidenceFile } from "./evidence.js";
 
 /** A claim and all structurally valid and rejected formalization samples. */
 export interface FormalizationCandidate {
@@ -20,6 +22,7 @@ export interface FormalizationCandidate {
   readonly eligibleIndex: number;
   readonly samples: readonly LogicIrClaim[];
   readonly invalidSamples: readonly { readonly raw: unknown; readonly reason: string }[];
+  readonly registry?: FrozenRegistry;
 }
 
 /** A terminal claim-level formalization failure. */
@@ -37,6 +40,8 @@ export interface FormalizationOutput {
   readonly findings: readonly Finding[];
   readonly errors: readonly FormalizationError[];
   readonly batchAttempts: readonly BatchAttemptEvidence[];
+  readonly evidenceFiles?: readonly SemanticEvidenceFile[];
+  readonly allModelsSkipped?: boolean;
 }
 
 /** Per-physical-batch result threaded through the bounded worker pool. */

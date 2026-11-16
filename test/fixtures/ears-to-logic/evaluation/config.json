@@ -1,0 +1,12 @@
+{
+  "analysis": {
+    "models": {
+      "evaluation": {
+        "concepts": [
+          { "name": "RequestSubmitted", "definition": "A request is submitted", "role": "event", "sort": "Bool" },
+          { "name": "RequestAccepted", "definition": "The service accepts the request", "role": "output", "sort": "Bool" }
+        ]
+      }
+    }
+  }
+}

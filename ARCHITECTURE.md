@@ -239,6 +239,33 @@ Prompt text can also be overridden in the config.
 - `formal/logic-analysis-checks.ts`: bounded pairwise contradiction and completeness helper checks
 - `formal/logic-analysis-sexpr.ts`: implication parsing and declaration preamble helpers
 
+The source-based static engine additionally uses:
+
+- `parser/source.ts`, `parser/ears.ts`, `parser/surface-block.ts`: half-open original source spans, strict structural clauses, explicit eligibility, and separated scenario/metadata/fenced evidence
+- `formal/analysis-config.ts`, `concepts.ts`, `concept-discovery.ts`: bounded explicit per-side context, deterministic reconciliation, source/configuration authority, and frozen registries
+- `formal/expression-types.ts`, `expression-parser.ts`, `expressions.ts`, `rational.ts`: typed scalar/static IR, literal-safe syntax, arity/sort/unit validation, and exact numbers
+- `formal/signature.ts`, `expression-render.ts`, `typed-smtlib.ts`, `fragment.ts`: checked namespaced shared declarations and canonical admitted-fragment rendering
+- `formal/predicate-lowering.ts`, `source-formalize.ts`: source-owned clause slots, modality/negation/scenario meaning, bounded samples, and durable typed acceptance
+- `formal/query-executor.ts`, `static-analysis.ts`, `static-context.ts`, `dependencies.ts`, `model-values.ts`, `typed-clustering.ts`: counted exact queries, ordered valuation phases, group-local attribution/evidence services, conservative dependency closure, witnesses, and nonvacuous equivalence
+- `formal/evidence.ts`: run-local admission reservations and injected exact persistence; capacity limits are scope, required write failures are fatal
+- `code-backwards/alignment.ts`, `semantic-comparison.ts`: post-derivation identity maps, compatible assumptions, scoped obligation relations, and separate permission-set verdicts
+- `adapters/concept-discovery.ts`, `predicate-formalization.ts`, `core-artifacts.ts`, `semantic-identity.ts`: private attached transport, completed-artifact enumeration, and runtime code identity
+
+Evidence-producing typed model/query work currently uses fixed sequential admission
+order to make capacity-limited outcomes independent of worker completion order.
+The configured solver concurrency value is a ceiling, not a promise to saturate
+that many processes. Physical sub-batches and all retry, byte, and script bounds
+still apply.
+
+Composed standalone analyses must share one `QueryExecutor` to obtain the same
+shared process/script ceiling as the CLI. Scope ledgers count planned checks as
+executed, blocked, or skipped; only executed non-SAT/non-UNSAT results count as
+inconclusive. Compact unissued records retain multiplicity and prerequisite reasons.
+Core completion reconciles semantic recorder descriptors against regular on-disk
+files and rejects duplicates, missing/changed/unexpected files, temporaries and
+symlinks. The recorder owns phase provenance; semantic evidence is not enumerated
+again as a second manifest descriptor source.
+
 This area is the formal core of the product.
 
 The key architectural choice is that ambiguity is not hidden. Multiple candidate formalizations are sampled, clustered, and either reduced to a stable representative or surfaced as ambiguity.

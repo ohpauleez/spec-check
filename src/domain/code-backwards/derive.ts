@@ -8,7 +8,8 @@
 import { readdir, readFile, stat } from "node:fs/promises";
 import { extname, join, relative } from "node:path";
 
-import { callOpencode } from "../../adapters/opencode.js";
+import { invokeSourceGeneration, type SourceAttachment } from "../../adapters/source-generation.js";
+import type { EvidenceRecorder } from "../formal/evidence.js";
 import { writeOutputAtomic } from "../../adapters/fs.js";
 import { toRelativePath, type OutputDirPath } from "../branded.js";
 import type { Finding } from "../findings.js";
@@ -100,6 +101,7 @@ export async function deriveSpecsFromSource(input: {
   readonly timeoutMs: number;
   readonly traces: readonly SourceTrace[];
   readonly suggestedCapabilities?: readonly string[];
+  readonly evidence?: EvidenceRecorder;
 }): Promise<DerivedSpecOutput> {
   const findings: Finding[] = [];
 
@@ -122,14 +124,17 @@ export async function deriveSpecsFromSource(input: {
   const prompt = buildInformalizationPrompt(sourceContext, input.suggestedCapabilities);
 
   // Call LLM with extended timeout for large codebases.
-  const response = await callOpencode({
+  const invoked = await invokeSourceGeneration({
     model: input.model,
-    phase: "code-derived-generation",
     prompt,
-    files: sourceContext.attachedFiles.map((file) => file.absolutePath),
-    retries: 2,
+    attachments: sourceContext.attachedFiles,
+    suggestedCapabilities: input.suggestedCapabilities ?? [],
     timeoutMs: input.timeoutMs,
+    ...(input.evidence === undefined ? {} : { evidence: input.evidence }),
   });
+  const response = invoked.result;
+  if (invoked.cleanup !== undefined) findings.push({ severity: "warning", category: "code_derived.attachment_cleanup_failed",
+    provenance: { file: input.srcDir }, description: invoked.cleanup, rationale: "Private generation attachment cleanup failed after the recorded attempt.", evidence: [] });
 
   if (!response.ok) {
     findings.push({
@@ -182,7 +187,7 @@ export async function deriveSpecsFromSource(input: {
  */
 interface SourceContext {
   readonly fileList: readonly string[];
-  readonly attachedFiles: readonly { readonly relativePath: string; readonly absolutePath: string }[];
+  readonly attachedFiles: readonly SourceAttachment[];
 }
 
 /**
@@ -205,7 +210,7 @@ async function buildSourceContext(srcDir: string): Promise<SourceContext> {
   allFiles.sort();
 
   // Select files for attachment inclusion within budget.
-  const attachedFiles: { relativePath: string; absolutePath: string }[] = [];
+  const attachedFiles: SourceAttachment[] = [];
   let totalBytes = 0;
 
   for (const filePath of allFiles) {
@@ -219,14 +224,15 @@ async function buildSourceContext(srcDir: string): Promise<SourceContext> {
       if (fileStat.size > SOURCE_FILE_MAX_BYTES) continue;
       if (totalBytes + fileStat.size > SOURCE_CONTENT_BUDGET_BYTES) continue;
 
-      const content = await readFile(join(srcDir, filePath), "utf-8");
-      const contentBytes = Buffer.byteLength(content, "utf8");
+      const content = await readFile(join(srcDir, filePath));
+      const contentBytes = content.byteLength;
       if (contentBytes > SOURCE_FILE_MAX_BYTES) continue;
       if (totalBytes + contentBytes > SOURCE_CONTENT_BUDGET_BYTES) continue;
 
       attachedFiles.push({
         relativePath: filePath,
         absolutePath: join(srcDir, filePath),
+        bytes: content,
       });
       totalBytes += contentBytes;
     } catch {
@@ -553,7 +559,8 @@ function formatCapabilityMarkdown(cap: ParsedCapability): string {
     const evidenceNote = req.evidence.length > 0
       ? `\n<!-- Evidence: ${req.evidence.join(", ")} -->`
       : "";
-    return `### Requirement: ${req.id}\n${req.text}${evidenceNote}`;
+    const references = req.evidence.length > 0 ? `\n\n**References:**\n${req.evidence.map((value) => `- ${value}`).join("\n")}` : "";
+    return `### Requirement: ${req.id} [${req.id}]\n${req.text}${references}${evidenceNote}`;
   });
 
   return [

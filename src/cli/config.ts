@@ -13,6 +13,7 @@ import { err, ok, type Result } from "../domain/result.js";
 import { DEFAULT_TIMEOUT_MS, TIMEOUT_MIN_MS, TIMEOUT_MAX_MS } from "../domain/timeout.js";
 import type { CliArgs } from "./parse-argv.js";
 import { normalizeOpencodeModel } from "../domain/opencode-model.js";
+import { resolveAnalysisConfig, type AnalysisConfig } from "../domain/formal/analysis-config.js";
 
 /**
  * Fully resolved run configuration with all required fields populated.
@@ -34,6 +35,8 @@ export interface RunConfig {
   readonly timeoutMs: number;
   readonly maxBatchSize: number;
   readonly allowArchive: boolean;
+  readonly analysis?: AnalysisConfig;
+  readonly configPath?: string;
 }
 
 interface ConfigFileShape {
@@ -47,6 +50,7 @@ interface ConfigFileShape {
   readonly timeoutMs?: number;
   readonly maxBatchSize?: number;
   readonly allowArchive?: boolean;
+  readonly analysis?: unknown;
 }
 
 /**
@@ -127,7 +131,7 @@ const DEFAULT_PAIR_BUDGET = 200;
 const DEFAULT_MAX_BATCH_SIZE = 32;
 
 /** Default LLM model used when no --model flag or config is provided. */
-const DEFAULT_MODEL = "github-copilot/gpt-5.6-terra";
+const DEFAULT_MODEL = "github-copilot/gpt-6.1-sol";
 
 /**
  * Resolve a complete {@link RunConfig} by merging CLI flags, an optional JSON
@@ -165,7 +169,7 @@ const DEFAULT_MODEL = "github-copilot/gpt-5.6-terra";
  * Postcondition — merge priority (highest wins):
  *   1. CLI flags (`args.*`)
  *   2. Config file values (`args.config` JSON contents)
- *   3. Built-in defaults (`"spec-check-output"`, `"github-copilot/gpt-5.6-terra"`,
+ *   3. Built-in defaults (`"spec-check-output"`, `"github-copilot/gpt-6.1-sol"`,
  *      pair budget of 200)
  *
  * For every field in the returned {@link RunConfig}, the value is taken from
@@ -237,6 +241,8 @@ export async function resolveRunConfig(args: CliArgs): Promise<Result<RunConfig,
   const model = args.model ?? fromFile.value.model ?? DEFAULT_MODEL;
   const selection = normalizeOpencodeModel(model);
   if (!selection.ok) return err({ kind: "model_validation_error", message: selection.error });
+  const analysis = resolveAnalysisConfig(fromFile.value.analysis);
+  if (!analysis.ok) return err({ kind: "config_validation_error", path: args.config ?? "<analysis>", message: analysis.error });
 
   return ok({
     inputs: mergedInputs,
@@ -252,6 +258,8 @@ export async function resolveRunConfig(args: CliArgs): Promise<Result<RunConfig,
     // allowArchive: true activates admission. This differs from other flags where CLI
     // overrides config — for a boolean opt-in, both sources contribute.
     allowArchive: args.allowArchive || fromFile.value.allowArchive === true,
+    analysis: analysis.value,
+    ...(args.config === undefined ? {} : { configPath: args.config }),
   });
 }
 

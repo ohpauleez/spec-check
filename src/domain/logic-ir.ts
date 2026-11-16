@@ -6,6 +6,10 @@
  * Exports: LogicSort, LogicVariable, LogicIrClaim, LogicIrDocument.
  */
 import type { ClaimId } from "./branded.js";
+import type { ExpressionSignature, LogicExpression, StaticCoverage, StaticRule, StaticScenario } from "./formal/expression-types.js";
+import type { FrozenRegistry } from "./formal/concepts.js";
+
+export type { LogicExpression, ExpressionSignature, ExpressionSort, StaticRule, StaticScenario, StaticCoverage, StaticModel } from "./formal/expression-types.js";
 
 /**
  * Closed domain of SMT-LIB–compatible sort identifiers for logic IR expressions.
@@ -58,6 +62,7 @@ export interface LogicFunctionSymbol {
 export interface LogicAssertion {
   readonly id: string;
   readonly expr: string;
+  readonly node?: LogicExpression;
 }
 
 /**
@@ -69,6 +74,14 @@ export interface LogicAssertion {
  * - `"informational"` — for tracking only; no finding on violation.
  */
 export type LogicObligation = "mandatory" | "advisory" | "informational";
+
+/** Recorded selection evidence, distinct from concept-identity dependence or mapping scope. */
+export interface InterpretationAssessment {
+  readonly stability: "single" | "stable" | "unstable";
+  readonly sampleCount: number;
+  readonly selectedSample: number;
+  readonly clusters: readonly (readonly number[])[];
+}
 
 /**
  * A single claim translated into logic IR form for formal analysis.
@@ -83,4 +96,13 @@ export interface LogicIrClaim {
   readonly variables: readonly LogicVariableDeclaration[];
   readonly functions: readonly LogicFunctionSymbol[];
   readonly assertions: readonly LogicAssertion[];
+  readonly signature?: ExpressionSignature;
+  readonly registryHash?: string;
+  readonly registry?: FrozenRegistry;
+  readonly background?: readonly LogicExpression[];
+  readonly coverage?: readonly StaticCoverage[];
+  readonly staticRule?: StaticRule;
+  readonly staticScenario?: StaticScenario;
+  readonly interpretationQuality?: { readonly explicit: number; readonly proposed: number; readonly slots: number };
+  readonly interpretationAssessment?: InterpretationAssessment;
 }

@@ -41,7 +41,10 @@ if (report) {
     ].join("\n"),
   };
 } else if (batch) {
-  payload = { formalizations: batch.claims.map((claim) => ({ index: claim.index, sample: sample(claim.id) })) };
+  payload = batch.registry ? { formalizations: batch.claims.map((claim) => ({ index: claim.index, registryHash: batch.registry.hash,
+    predicates: Object.fromEntries(Object.keys(claim.predicates).map((key) => [key, "true"])) })) }
+    : batch.authored ? { concepts: [], proposedAssumptions: [] }
+    : { formalizations: batch.claims.map((claim) => ({ index: claim.index, sample: sample(claim.id) })) };
 } else {
   const claim = /<claim id="([^"]+)"/.exec(prompt);
   if (claim) payload = { sample: sample(claim[1]) };

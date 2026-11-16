@@ -13,7 +13,11 @@ import type {
   ParsedScenario,
   ParsedSpec,
   ParsedTaskDocument,
+  SurfaceStatement,
+  EarsModal,
 } from "./model.js";
+import { parseEars } from "./parser/ears.js";
+import { normalizeSource, sourceLines } from "./parser/source.js";
 import type { Finding, FindingSeverity } from "./findings.js";
 import { toClaimId, type CapabilityName, type ClaimId } from "./branded.js";
 
@@ -99,6 +103,8 @@ export interface Claim {
   };
   readonly references: readonly string[];
   readonly capability?: CapabilityName;
+  /** Source-owned structure and eligibility for specification-derived statements. */
+  readonly surface?: SurfaceStatement;
 }
 
 /**
@@ -271,10 +277,11 @@ function claimFromRequirement(requirement: ParsedRequirement, capability?: Capab
     ...(requirement.identifier === undefined ? {} : { id: toClaimId(requirement.identifier) }),
     kind: "requirement",
     text: requirement.body,
-    obligation: deriveObligation(requirement.body),
+    obligation: deriveObligation(requirement.body, requirement.surface?.clauses?.modal),
     provenance: requirement.provenance,
     references: requirement.references,
     ...(capability === undefined ? {} : { capability }),
+    ...(requirement.surface === undefined ? {} : { surface: requirement.surface }),
   };
 }
 
@@ -293,10 +300,11 @@ function claimFromScenario(scenario: ParsedScenario, capability?: CapabilityName
     ...(scenario.identifier === undefined ? {} : { id: toClaimId(scenario.identifier) }),
     kind: "scenario",
     text: scenario.body,
-    obligation: deriveObligation(scenario.body),
+    obligation: deriveObligation(scenario.body, scenario.surface?.clauses?.modal),
     provenance: scenario.provenance,
     references: [],
     ...(capability === undefined ? {} : { capability }),
+    ...(scenario.surface === undefined ? {} : { surface: scenario.surface }),
   };
 }
 
@@ -430,18 +438,21 @@ function extractTaskClaims(tasks: ParsedTaskDocument): readonly Claim[] {
  * Derive the obligation level from claim text using RFC 2119 keyword detection.
  *
  * @param text - The claim body text to analyze.
- * @returns `"mandatory"` if text contains "SHALL", `"advisory"` if "SHOULD",
- *   otherwise `"informational"`.
+ * @returns Source-derived mandatory SHALL/MUST, advisory SHOULD, or informational MAY.
  *
  * @remarks
- * The comparison is case-insensitive. First match wins (SHALL takes precedence over SHOULD).
+ * Source clauses are authoritative. Externally constructed parsed models use
+ * the same complete-statement recognizer; substring occurrence is not authority.
  */
-function deriveObligation(text: string): ObligationLevel {
-  const normalized = text.toUpperCase();
-  if (normalized.includes("SHALL")) {
+function deriveObligation(text: string, sourceModal?: EarsModal): ObligationLevel {
+  // Externally constructed parsed models may lack a surface object. Recognize
+  // their complete statement with the same parser, never substring heuristics.
+  const lines = sourceLines(text);
+  const modal = sourceModal ?? parseEars(normalizeSource("<claim-text>", lines, lines[0]!)).clauses?.modal;
+  if (modal === "SHALL" || modal === "MUST") {
     return "mandatory";
   }
-  if (normalized.includes("SHOULD")) {
+  if (modal === "SHOULD") {
     return "advisory";
   }
   return "informational";

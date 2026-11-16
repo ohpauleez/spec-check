@@ -6,293 +6,217 @@ title: FormalizationAndLogicAnalysis
 
 Define the formalization and solver-backed logic analysis behavior for the spec-check tool: translating claims into formal artifacts, clustering alternate interpretations, and using solver-backed analysis to detect conflicts, gaps, and surprising behaviors.
 
+All Alloy fences below form one Alloy 6 module in document order. Source bytes, lexical correctness, OS effects, and concrete serialization are explicit implementation-test boundaries; the model checks relational preservation and analyzer control. Safety assertions permit stuttering. Liveness is conditional on the stated action scheduling and resource premises.
+
 ```alloy
 module FormalizationAndLogicAnalysis
 open util/boolean
+open util/ordering[Claim] as inputOrder
 
-// --- Domain vocabulary ---
-
-// A Claim is a requirement or scenario from a spec file. `claimId` is the
-// sanitized claim identity used for compile-group preflight; two claims
-// sharing one `claimId` are a duplicate-identity collision [FLA-SPEC-DUPLICATE-CLAIM-ID].
+// --- Domain vocabulary: source-local identities, keys and structural modals ---
+sig Key {}
+sig Capability { fallback : one Key }
+sig Index {}
+sig Label {}
+sig Registry {}
+sig Concept {}
+sig SourcePayload {}
+abstract sig Modal {}
+one sig Mandatory, Advisory, Permission extends Modal {}
+abstract sig Form {}
+one sig Refinement, Example, ProhibitedExample extends Form {}
+sig Valuation {}
 sig Claim {
-  obligation : one Obligation,
-  spec : one Spec,
-  claimId : one ClaimId
+  index : one Index, displayId : lone Label, cap : lone Capability,
+  compileLabel : one Label, sanitizedLabel : one Label, dependencies : set Claim,
+  provenance : one Key, payload : one SourcePayload,
+  sourceEligible : one Bool, modal : one Modal, form : one Form,
+  negated : one Bool, guard : set Valuation, positiveResponse : set Valuation,
+  input : set Valuation, outcome : set Valuation, postcondition : set Valuation
 }
-
-// Obligation levels (strict total order: Mandatory > Advisory > Informational)
-abstract sig Obligation {}
-one sig Mandatory, Advisory, Informational extends Obligation {}
-
-// Ordering on obligation levels
-fun higherObligation : Obligation -> Obligation {
-  Advisory -> Mandatory +
-  Informational -> Mandatory +
-  Informational -> Advisory
+one sig Config {
+  mapping : Capability -> lone Key, thresholdNumerator : one Int,
+  thresholdDenominator : one Int, batchLimit : one Int,
+  pairBudget : one Int,
+  controlsValid : one Bool, artifactKeyCollision : one Bool
 }
-
-fun maxObligation [claims : set Claim] : lone Obligation {
-  { o : claims.obligation | no (claims.obligation & o.higherObligation) }
+fact input_identity {
+  all disj a,b : Capability | a.fallback != b.fallback
+  all disj a, b : Claim | a.index != b.index
+  Config.thresholdNumerator > 0
+  Config.thresholdDenominator >= Config.thresholdNumerator
+  Config.thresholdDenominator <= 3
+  Config.batchLimit >= 0
+  Config.pairBudget >= 0
 }
-
-// Obligation level fixes finding severity: mandatory claims escalate to error,
-// advisory to warning, informational to info. Shared by the global solver
-// contradiction check and the pairwise guard-activation check, so it lives with
-// the domain vocabulary rather than in one requirement model.
-fun obligationToSeverity [o : Obligation] : one Severity {
-  (o = Mandatory) implies ErrorSev
-  else (o = Advisory) implies WarningSev
-  else InfoSev
+fun eligible : set Claim { { c : Claim | c.sourceEligible = True } }
+fun key[c : Claim] : one Key {
+  no c.cap => c.provenance else
+    (some Config.mapping[c.cap] => Config.mapping[c.cap] else c.cap.fallback)
 }
-
-// A Spec is a single spec file being analyzed
-sig Spec {}
-
-// A Sample is one formalization attempt for a claim
-// Validity is an inherent property (determined by schema), not mutable
-sig Sample {
-  claim : one Claim,
-  schemaValid : one Bool      // whether it passes schema validation
+sig Group { key : one Key, registry : one Registry, concepts : set Concept, background : set Valuation }
+fun members[g : Group] : set Claim { { c : eligible | key[c] = g.key } }
+fact group_partition {
+  all g : Group | some members[g]
+  all disj g, h : Group | g.key != h.key
+  all c : eligible | one g : Group | c in members[g]
 }
-
-// An equivalence cluster groups semantically equivalent samples
-sig Cluster {
-  members : set Sample,
-  representative : lone Sample
+sig Batch { group : one Group, claims : some Claim }
+fact stable_batch_partition {
+  all b : Batch | b.claims in members[b.group]
+  all c : eligible | one b : Batch | c in b.claims
+  all b : Batch | all a, c : b.claims | all middle : members[b.group] |
+    middle in inputOrder/nexts[a] & inputOrder/prevs[c] implies middle in b.claims
+  all b : Batch | Config.batchLimit > 0 implies #b.claims <= Config.batchLimit
+  all g : Group | Config.batchLimit = 0 implies one b : Batch | b.group = g
 }
-
-// Implication check result between two samples
-sig ImplicationResult {
-  from : one Sample,
-  to : one Sample,
-  result : one SolverResult
+abstract sig Transport {}
+one sig Attached, Inline extends Transport {}
+abstract sig ErrorKind {}
+one sig GoodResponse, ModelFailure, InfrastructureFailure, PromptTooLarge, CaptureOverflow extends ErrorKind {}
+abstract sig TempFailure {}
+one sig NoTransportFailure, DirectoryFailure, WriteFailure extends TempFailure {}
+sig Attempt {
+  batch : one Batch, claims : some Claim, transport : one Transport,
+  registry : one Registry, boundIndexes : Claim -> lone Index,
+  jsonRecoverable : one Bool,
+  shapeValid : one Bool, expressionsValid : one Bool, fragmentValid : one Bool,
+  result : one ErrorKind, transportFailure : one TempFailure,
+  fallbackFits : one Bool, cleanupFails : one Bool,
+  recoveryOf : lone Attempt, earlier : set Attempt
 }
-
-// Solver result classifications
-abstract sig SolverResult {}
-one sig Sat, Unsat, Timeout, Unknown, SolverError extends SolverResult {}
-
-// Finding types produced by analysis
-abstract sig FindingType {}
-one sig Contradiction, ConditionalContradiction, CompletenessGap,
-       Ambiguity, Inconclusive, MergeConflict, SolverErrType,
-       InvalidGroup extends FindingType {}
-
-// Finding severity levels
-abstract sig Severity {}
-one sig ErrorSev, WarningSev, InfoSev extends Severity {}
-
-sig Finding {
-  findingType : one FindingType,
-  severity : one Severity,
-  involvedClaims : set Claim
-}
-
-// Identifier safety classification for SMT-LIB compilation
-abstract sig IdSafety {}
-one sig Safe, Unsafe extends IdSafety {}
-
-sig ClaimId {
-  safety : one IdSafety
-}
-
-// Assertion structure for conditional analysis
-abstract sig AssertionKind {}
-one sig Conditional, Unconditional extends AssertionKind {}
-
-sig Assertion {
-  kind : one AssertionKind,
-  sourceClaim : one Claim
-}
-
-// Declaration identity (for deduplication and conflict detection)
-sig DeclName {}
-sig DeclSignature {}
-// Symbol type: a sanitized symbol is bound either as a variable
-// (declare-const) or a function (declare-fun). This is the declaration
-// KIND, distinct from its signature/sort (declSig).
-abstract sig DeclKind {}
-one sig VarDecl, FunDecl extends DeclKind {}
-sig Declaration {
-  declName : one DeclName,
-  declKind : one DeclKind,
-  declSig : one DeclSignature,
-  declClaim : one Claim
-}
-
-// --- Pipeline phase state ---
-
-abstract sig Phase {}
-one sig FormalizationPh, ValidationPh, ClusteringPh, CompilationPh,
-       AnalysisPh, ReportingPh, AbortedPh extends Phase {}
-
-one sig Pipeline {
-  var phase : one Phase,
-  var candidates : set Sample,                // validated samples
-  var representatives : Claim -> lone Sample, // selected reps per claim
-  var findings : set Finding,                 // accumulated findings
-  var evidence : set Spec,                    // specs with persisted evidence
-  var attemptEvidence : set PhysicalBatch,    // attached attempts with persisted evidence
-  var exitCode : lone Int                     // exit code (2 = abort)
-}
-
-// --- Structural facts (non-temporal invariants) ---
-
-// Cluster well-formedness: respects equivalence, representative is a member
-fact cluster_wellformed {
-  all cl : Cluster | cl.representative in cl.members or no cl.representative
-  all disj cl1, cl2 : Cluster | no (cl1.members & cl2.members)
-  // A cluster always groups at least one sample (empty clusters are not
-  // materialized). Together with pairwise disjointness this makes distinct
-  // clusters have distinct member sets.
-  all cl : Cluster | some cl.members
-}
-
-// Implication results are between distinct samples of the same claim
-fact implication_wellformed {
-  all ir : ImplicationResult | ir.from != ir.to
-  all ir : ImplicationResult | ir.from.claim = ir.to.claim
-  // Each ordered (from, to) pair resolves to exactly one solver result:
-  // a single query is issued per direction, so a pair cannot simultaneously
-  // carry (e.g.) an Unsat and a Timeout result.
-  all disj ir1, ir2 : ImplicationResult |
-    not (ir1.from = ir2.from and ir1.to = ir2.to)
-}
-
-// Cluster membership respects equivalence: equivalent samples always co-occur
-// in the same cluster. Equivalence itself (samples_equivalent) is defined in the
-// clustering requirement model; this fact is part of what a Cluster IS.
-fact clusters_respect_equivalence {
-  all disj a, b : Sample, cl : Cluster |
-    (samples_equivalent[a, b] and a in cl.members) implies b in cl.members
-}
-
-// --- Semantic batching: shared key helper, grouping, physical batches ---
-// Cross-cutting vocabulary for the semantic-batching requirements
-// [FLA-SEMANTIC-GROUPING, FLA-SUBBATCH, FLA-ATTACH-TRANSPORT, FLA-CLAIM-PARTITION,
-// FLA-BATCH-EVIDENCE, FLA-TEMP-LIFECYCLE, FLA-DEGRADE-KIND]: the semantic key
-// space, logical groups, and the PhysicalBatch carrier with its lifecycle enums.
-// Each requirement's own facts, invariants, and assertions live in that
-// requirement's model; the batch lifecycle events live in the transition system.
-
-// Whether a merged spec has requirements / scenarios.
-abstract sig Presence {}
-one sig NoneP, SomeP extends Presence {}
-
-sig Capability {}
-sig ProvFile {}
-sig LogicalFile {}
-sig SyntheticKey { cap : one Capability }
-
-// Semantic key space: provenance files, mapped logical files, and synthetic
-// fallback keys all inhabit one space.
-sig SemanticKey {
-  fromProv  : lone ProvFile,
-  fromMap   : lone LogicalFile,
-  fromSynth : lone SyntheticKey
-} {
-  one (fromProv + fromMap + fromSynth)
-}
-
-// Key construction is injective across sources and total over source values:
-// distinct provenance files, mapped logical files, and synthetic keys yield
-// distinct semantic keys, and every source value produces one. This is an axiom
-// of the key space, not a pipeline condition.
-fact key_sources_injective {
-  all disj k1, k2 : SemanticKey |
-    k1.fromProv != k2.fromProv
-    and k1.fromMap != k2.fromMap
-    and k1.fromSynth != k2.fromSynth
-  SemanticKey.fromProv = ProvFile
-  SemanticKey.fromMap = LogicalFile
-  SemanticKey.fromSynth = SyntheticKey
-}
-
-// A claim carries zero or one capability and exactly one provenance file.
-sig ClaimProvenance {
-  claim : one Claim,
-  cap : lone Capability,
-  provFile : one ProvFile
-}
-
-// The logical-file map built by the pipeline: capability -> logical file
-// (partial; may be empty).
-sig GroupingMap {
-  mapping : Capability -> lone LogicalFile
-}
-
-// The shared key helper [FLA-SEMGRP-MAPPED/PROVENANCE/FALLBACK].
-// Total: every claim gets exactly one key under any map.
-fun keyFor [c : Claim, m : GroupingMap] : one SemanticKey {
-  { k : SemanticKey |
-    some cp : ClaimProvenance | cp.claim = c and
-    ((no cp.cap and k.fromProv = cp.provFile)
-     or (some cp.cap and some m.mapping[cp.cap]
-         and k.fromMap = m.mapping[cp.cap])
-     or (some cp.cap and no m.mapping[cp.cap]
-         and k.fromSynth.cap = cp.cap))
+fact attempt_shape {
+  no iden & ^earlier
+  earlier.earlier in earlier
+  all disj a,b : Attempt | some a.claims & b.claims implies a in b.earlier or b in a.earlier
+  all c : eligible | some a : Attempt | c in a.claims
+  all a : Attempt | {
+    a.claims in a.batch.claims
+    (a.transport = Attached iff #a.claims >= 2)
+    some a.recoveryOf implies {
+      a.transport = Inline
+      a.recoveryOf in a.earlier
+      a.claims in a.recoveryOf.claims
+      a.batch = a.recoveryOf.batch
+      degradable[a.recoveryOf]
+    }
+    a.transport = Attached and degradable[a] implies all c : a.claims |
+      one retry : Attempt | retry.recoveryOf = a and retry.claims = c
   }
 }
-
-// A logical group: claims partitioned by semantic key.
-sig SemanticLogicalGroup {
-  groupKey : one SemanticKey,
-  groupMembers : set Claim
+sig Sample { attempt : one Attempt, claim : one Claim, positiveMeaning : set Valuation, confidence : one Int }
+fact sample_ownership {
+  all s : Sample | s.claim in s.attempt.claims
+  all disj s, t : Sample | s.attempt != t.attempt or s.claim != t.claim
+  all a : Attempt, c : a.claims | one s : Sample | s.attempt = a and s.claim = c
 }
-
-// Logical groups partition the claim set by semantic key: every group is
-// non-empty, all its members share the group's key, distinct groups carry
-// distinct keys, and every claim belongs to exactly one group.
-fact groups_partition_by_key {
-  all g : SemanticLogicalGroup | some g.groupMembers
-  all g : SemanticLogicalGroup | all c : g.groupMembers |
-    g.groupKey = keyFor[c, GroupingMap]
-  all disj g1, g2 : SemanticLogicalGroup | g1.groupKey != g2.groupKey
-  all c : Claim | one g : SemanticLogicalGroup | c in g.groupMembers
+abstract sig TempStage {}
+one sig NotCreated, DirCreated, FileWritten, ProcessSettled, CleanupSucceeded, CleanupFailed extends TempStage {}
+abstract sig Phase {}
+one sig Discover, Sampling, Selecting, Analyzing, Complete, Aborted extends Phase {}
+abstract sig QueryKind {}
+one sig Background, Global, Guard, SelfResponse, Activation, PairGuard, PairConflict, AdvisoryQuery,
+  Coverage, PermissionQuery, PositiveExample, NegativeExample, PremiseCheck, Implication, AuxiliaryCore extends QueryKind {}
+abstract sig QueryStage {}
+one sig ClusteringQueries, AnalysisQueries extends QueryStage {}
+abstract sig Verdict {}
+one sig Sat, Unsat, Unknown, Timeout, SolverError extends Verdict {}
+sig Query {
+  group : one Group, owners : set Claim, kind : one QueryKind,
+  stage : one QueryStage, premiseSample : lone Sample, conclusionSample : lone Sample,
+  explicitCoverage : one Bool,
+  first : lone Claim, second : lone Claim,
+  applicability : set Valuation, family : set Claim,
+  premise : set Valuation, conclusion : set Valuation,
+  prerequisites : set Query, satPrerequisites : set Query,
+  auxiliaryOf : lone Query, observed : one Verdict, errorDiagnostic : one Bool,
+  pairOwner : lone Query,
+  bytesWithinBound : one Bool, pairWithinBudget : one Bool, concurrencyAdmitted : one Bool,
+  writeFails : one Bool
+  , compilation : one CompileInput
 }
-
-// Adapter terminal error kinds (post adapter-internal retries) [FLA-DEGRADE-KIND].
-abstract sig ErrorKind {}
-one sig SpawnError, InvalidFiles, InvalidTimeout,       // infrastructure: no per-claim fallback
-        TimeoutErr, InvalidJson, SchemaValidation,      // model response: degrade to per-claim retry
-        PromptTooLarge                                  // degrade only if inline fallback fits
-        extends ErrorKind {}
-
-// Prompt-size pre-check result for prompt_too_large degradation.
-abstract sig FallbackFit {}
-one sig FallbackFits, FallbackDoesNotFit extends FallbackFit {}
-
-// Temp context directory lifecycle states [FLA-TEMP-LIFECYCLE].
-abstract sig TempState {}
-one sig NotCreated, DirCreated, FileWritten,
-        CleanupSucceeded, CleanupFailed extends TempState {}
-
-// Batch attempt resolution [FLA-BATCH-EVIDENCE outcome classification].
-abstract sig Resolution {}
-one sig Unresolved, BatchSuccess, ModelFailure,
-        InfraFailure, TransportFailure extends Resolution {}
-
-// Per-claim terminal outcome [FLA-CLAIM-PARTITION].
-abstract sig Outcome {}
-one sig NoOutcome, CandidateOutcome, ClaimErrorOutcome extends Outcome {}
-
-// Whether the batch attaches a context file [FLA-ATTACH-TRANSPORT].
-abstract sig AttachedKind {}
-one sig Attached, Inline extends AttachedKind {}
-
-abstract sig DegradedKind {}
-one sig NotDegraded, Degraded extends DegradedKind {}
-
-// A physical batch: one first-sample attempt over a chunk of one logical group.
-sig PhysicalBatch {
-  claims            : set Claim,          // non-empty chunk of one logical group
-  attached          : one AttachedKind,   // Attached iff two or more claims
-  fallbackFits      : one FallbackFit,    // pre-computed inline-fits pre-check
-  var tempState     : one TempState,
-  var resolution    : one Resolution,
-  var degraded      : one DegradedKind,
-  var outcomes      : Claim -> one Outcome
+sig ScriptToken {}
+sig EvidenceToken {}
+one sig Run {
+  var phase : one Phase,
+  var frozen : set Group,
+  var stages : Attempt -> one TempStage,
+  var spawned : set Attempt,
+  var captured : set Attempt,
+  var settled : set Attempt,
+  var accepted : set Sample,
+  var errors : set Claim,
+  var selected : Claim -> lone Sample,
+  var issued : set Query,
+  var persisted : set Query,
+  var skipped : set Query,
+  var usedScripts : Query -> lone ScriptToken,
+  var reservations : (Attempt + Query) -> lone EvidenceToken,
+  var outputFailed : one Bool
+}
+fun candidates : set Claim { Run.accepted.claim }
+fun ready_samples[c : Claim] : set Sample { { s : Run.accepted | s.claim = c } }
+fun response[s : Sample] : set Valuation {
+  s.claim.negated = True => Valuation - s.positiveMeaning else s.positiveMeaning
+}
+fun semantic_response[c : Claim] : set Valuation { response[c.(Run.selected)] }
+fun mandatory[g : Group] : set Valuation {
+  { v : Valuation | all c : candidates & members[g] | c.modal = Mandatory and c.form = Refinement implies
+    (v in c.guard implies v in semantic_response[c] & c.postcondition) }
+}
+fun formula[q : Query] : set Valuation {
+  let B = q.group.background, C = mandatory[q.group], a = q.first, b = q.second |
+    q.kind = Background => B else
+    (q.kind = Global => B & C else
+    (q.kind = Guard => B & a.guard else
+    (q.kind = SelfResponse => B & a.guard & semantic_response[a] & a.postcondition else
+    (q.kind = Activation => B & a.guard & C else
+    (q.kind = PairGuard => B & a.guard & b.guard else
+    (q.kind = PairConflict => B & a.guard & b.guard & C else
+    (q.kind = Coverage => (B & q.applicability) - q.family.guard else
+    (q.kind in PermissionQuery + AdvisoryQuery => B & a.guard & C & semantic_response[a] else
+    (q.kind in PositiveExample + NegativeExample => B & C & a.input & a.outcome & a.postcondition else
+    (q.kind = PremiseCheck => B & q.premise else
+    (q.kind = Implication => (B & q.premise) - q.conclusion else B & C)))))))))))
+}
+fun verdict[q : Query] : one Verdict { q.errorDiagnostic = True => SolverError else q.observed }
+fact solver_observations {
+  // Finite-valuation oracle for conclusive results. Errors/unknown/timeouts are
+  // representable external observations, not guessed successful outcomes.
+  all q : Query | {
+    q.owners in members[q.group]
+    q.premiseSample.claim + q.conclusionSample.claim in q.owners
+    q.satPrerequisites in q.prerequisites
+    q.auxiliaryOf in q.prerequisites
+    q.stage = ClusteringQueries implies q.kind in Background + PremiseCheck + Implication
+    q.stage = ClusteringQueries implies q.prerequisites.stage in ClusteringQueries
+    some q.premiseSample implies q.premise = sample_meaning[q.premiseSample]
+    some q.conclusionSample implies q.conclusion = sample_meaning[q.conclusionSample]
+    q not in q.^prerequisites
+    q.first + q.second + q.family in members[q.group]
+    q.first + q.second in q.owners
+    q.kind in Guard + SelfResponse + Activation + PermissionQuery + AdvisoryQuery + PositiveExample + NegativeExample implies one q.first
+    q.kind in PairGuard + PairConflict implies one q.first and one q.second
+    q.kind = PairConflict implies {
+      q.first in inputOrder/prevs[q.second]
+      (q.pairWithinBudget = True iff #prior_pair_candidates[q] < Config.pairBudget)
+    }
+    q.kind = PairGuard implies {
+      one q.pairOwner
+      q.pairOwner.kind = PairConflict
+      q.pairOwner.group = q.group
+      q.first = q.pairOwner.first and q.second = q.pairOwner.second
+      q.pairWithinBudget = q.pairOwner.pairWithinBudget
+    }
+    q.kind not in PairGuard + PairConflict implies q.pairWithinBudget = True
+  }
+  all disj p,q : Query | p.kind = PairConflict and q.kind = PairConflict and p.group = q.group implies
+    p.first != q.first or p.second != q.second
+}
+fun prior_pair_candidates[q : Query] : set Query {
+  { p : Query | p.kind = PairConflict and p.group = q.group and
+    (p.first in inputOrder/prevs[q.first] or
+      (p.first = q.first and p.second in inputOrder/prevs[q.second])) }
 }
 ```
 
@@ -312,8 +236,8 @@ WHEN an external LLM response wraps a valid JSON payload in markdown code fences
 **Postcondition:** Common markdown formatting does not cause an otherwise valid payload to be rejected.
 
 ##### Evidence
-- Implementation: [opencode.ts:406 extractJsonPayload()](/src/adapters/opencode.ts#L406), [opencode.ts:434 stripMarkdownFences()](/src/adapters/opencode.ts#L434)
-- Test: [opencode.test.ts:147 accepts markdown-fenced JSON payloads](/test/contract/opencode.test.ts#L147)
+- Implementation: [opencode.ts:821 extractJsonPayload()](/src/adapters/opencode.ts#L821), [opencode.ts:849 stripMarkdownFences()](/src/adapters/opencode.ts#L849)
+- Test: [opencode.test.ts:445 accepts markdown-fenced JSON payloads](/test/contract/opencode.test.ts#L445)
 - Example:
 ```typescript
 const { extractJsonPayload } = await import("./src/adapters/opencode.ts");
@@ -327,9 +251,9 @@ WHEN an external LLM response contains explanatory text before or after a valid 
 **Postcondition:** Recoverable wrapper text does not prevent downstream schema validation.
 
 ##### Evidence
-- Implementation: [opencode.ts:406 extractJsonPayload()](/src/adapters/opencode.ts#L406), [opencode.ts:467 extractFirstJsonValue()](/src/adapters/opencode.ts#L467)
-- Test: [opencode.test.ts:168 accepts wrapped prefixed/suffixed JSON payloads](/test/contract/opencode.test.ts#L168)
-- Test (property): [opencode.test.ts:189 property: accepts prefix+json wrappers when prefix excludes braces/brackets](/test/contract/opencode.test.ts#L189)
+- Implementation: [opencode.ts:821 extractJsonPayload()](/src/adapters/opencode.ts#L821), [opencode.ts:882 extractFirstJsonValue()](/src/adapters/opencode.ts#L882)
+- Test: [opencode.test.ts:466 accepts wrapped prefixed/suffixed JSON payloads](/test/contract/opencode.test.ts#L466)
+- Test (property): [opencode.test.ts:487 property: accepts prefix+json wrappers when prefix excludes braces/brackets](/test/contract/opencode.test.ts#L487)
 - Example:
 ```typescript
 const { extractJsonPayload } = await import("./src/adapters/opencode.ts");
@@ -343,8 +267,8 @@ IF an external LLM response does not contain a recoverable valid JSON payload, T
 **Postcondition:** Malformed payloads are surfaced explicitly rather than accepted silently.
 
 ##### Evidence
-- Implementation: [opencode.ts:406 extractJsonPayload()](/src/adapters/opencode.ts#L406)
-- Test: [opencode.test.ts:692 throws on truncated JSON (unbalanced braces)](/test/contract/opencode.test.ts#L692), [opencode.test.ts:698 throws on input with only prose text](/test/contract/opencode.test.ts#L698)
+- Implementation: [opencode.ts:821 extractJsonPayload()](/src/adapters/opencode.ts#L821)
+- Test: [opencode.test.ts:1148 throws on truncated JSON (unbalanced braces)](/test/contract/opencode.test.ts#L1148), [opencode.test.ts:1154 throws on input with only prose text](/test/contract/opencode.test.ts#L1154)
 - Example:
 ```typescript
 const { extractJsonPayload } = await import("./src/adapters/opencode.ts");
@@ -354,51 +278,24 @@ extractJsonPayload("I cannot provide a JSON response"); //=> throws Error
 #### Requirement model
 
 ```alloy
-// --- JSON payload extraction: structural invariants (pure function) ---
-// JSON extraction is deterministic and total: every input is either
-// recoverable (fenced, wrapped, pure) or irrecoverable (rejected with error).
-
-abstract sig JsonInput {}
-sig MarkdownFenced, PrefixedSuffixed, PureJson, Irrecoverable extends JsonInput {}
-
-sig JsonExtraction {
-  input : one JsonInput,
-  recovered : one Bool
+// Lexer boundary: recovery observations distinguish malformed transport from
+// valid typed content; concrete balanced JSON extraction is tested separately.
+pred valid_attempt[a : Attempt] {
+  a.result = GoodResponse
+  a.jsonRecoverable = True
+  a.transportFailure = NoTransportFailure
+  a.shapeValid = True and a.expressionsValid = True and a.fragmentValid = True
+  a.registry = a.batch.group.registry
+  a.boundIndexes = { c : a.claims, i : Index | i = c.index }
 }
-
-// Precondition: input is raw LLM response text (always available after call)
-// Postconditions by input type:
-fact fenced_accepted {
-  all je : JsonExtraction | je.input in MarkdownFenced implies je.recovered = True
-}
-fact wrapped_accepted {
-  all je : JsonExtraction | je.input in PrefixedSuffixed implies je.recovered = True
-}
-fact pure_accepted {
-  all je : JsonExtraction | je.input in PureJson implies je.recovered = True
-}
-fact irrecoverable_rejected {
-  all je : JsonExtraction | je.input in Irrecoverable implies je.recovered = False
-}
-
-// Safety: recovered payloads are never from irrecoverable inputs
-assert recovered_implies_valid_input {
-  all je : JsonExtraction | je.recovered = True implies je.input not in Irrecoverable
-}
-
-// Safety: irrecoverable inputs are explicitly rejected (no silent acceptance)
-assert irrecoverable_never_silent {
-  all je : JsonExtraction | je.input in Irrecoverable implies je.recovered = False
-}
-
-// Invariant: extraction is a total function (every input maps to exactly one result)
-assert extraction_total {
-  all je : JsonExtraction | je.recovered = True or je.recovered = False
-}
+// Safety: model/encoding failure never becomes an accepted sample.
+assert rejected_response_not_accepted { always (all s : Run.accepted | valid_attempt[s.attempt]) }
 ```
 
 ### Requirement: Formalize Requirement And Scenario Claims Into Logic Artifacts [FLA-FORMALIZE-CLAIMS]
-WHEN requirement and scenario claims are available for formal analysis, THE spec-check tool SHALL translate each claim into a typed logic representation and generated SMT-LIB artifacts that preserve the claim identifier, source provenance, obligation level, and supporting declarations needed for solver analysis, SHALL use the run-configured universal timeout for every external LLM formalization invocation, and SHALL group claims into formalization batches using the shared semantic logical-file grouping rather than raw source-spec file paths.
+WHEN admitted requirement and scenario claims are available, THE spec-check tool SHALL formalize source-established clause predicates against a frozen semantic-group registry while preserving source identity, modality, provenance, and explicit analyzed scope.
+
+**Postcondition:** Attached claim context retains parser-owned subject, form and scenario kind on batch, singleton recovery and additional-sample paths. Context is not an extra response predicate slot; source modality and negation remain deterministic.
 
 **References:**
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Scope`
@@ -407,358 +304,206 @@ WHEN requirement and scenario claims are available for formal analysis, THE spec
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Make JSON extraction tolerant but keep schema validation strict`
 - `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Scope`
 - `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Proposed Design`
+- [Design: Interaction Protocols](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#interaction-protocols)
+- [Design: Interface Contracts](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#interface-contracts)
 
 #### Scenario: Generate Inspectable Logic Artifacts [FLA-FORMAL-ARTS]
-WHEN a claim is selected for formalization, THE spec-check tool SHALL emit inspectable logic and SMT artifacts that let a reviewer trace the formal result back to the originating requirement or scenario.
-
-**Postcondition:** Formal analysis inputs are available as reviewable evidence linked to their source claims.
+WHEN a claim is formalized, THE spec-check tool SHALL persist raw attempts, accepted typed predicates, source-derived semantic rules, registry identity, and compiled artifacts linked to its source clauses.
 
 ##### Evidence
-- Implementation: [formalize.ts:154 formalizeClaims()](/src/domain/formal/formalize.ts#L154), [formalize.ts:476 buildFormalizationPrompt()](/src/domain/formal/formalize.ts#L476)
-- Test: [formalize.test.ts:45 formalizeClaims produces valid candidates from mock responses](/test/contract/formalize.test.ts#L45), [formalize.test.ts:159 buildFormalizationPrompt fences claim text as untrusted](/test/contract/formalize.test.ts#L159), [safety-liveness.invariant.test.ts:177 LIVE-11: if opencode responds with valid output, formalization completes](/test/invariant/safety-liveness.invariant.test.ts#L177)
+- Implementation: [source-formalize.ts:80 processGroup()](/src/domain/formal/source-formalize.ts#L80), [source-formalize.ts:152 acceptSample()](/src/domain/formal/source-formalize.ts#L152), [query-executor.ts:124 execute()](/src/domain/formal/query-executor.ts#L124)
+- Test: [formalization-predicates.test.ts:84 uses a frozen registry for batched and additional samples](/test/contract/formalization-predicates.test.ts#L84)
+- Test (integration): [semantic-pipeline.integration.test.ts:40 runs the source pipeline with real Z3 and checksummed raw/query artifacts](/test/integration/semantic-pipeline.integration.test.ts#L40)
 
 #### Scenario: Abort On Complete Formalization Failure [FLA-FORMAL-FAIL]
-IF no formalization candidates are produced for the entire phase after bounded retries, THEN THE spec-check tool SHALL abort the run with exit code `2` rather than continue with zero formal evidence.
-
-**Postcondition:** No solver conclusion is produced when the formalization phase yields zero candidates.
+IF attempted eligible claims produce zero candidates after bounded recovery, THEN THE spec-check tool SHALL preserve their attempt evidence and SHALL abort specs-forward formalization with `FormalizationError` exit `9`.
 
 ##### Evidence
-- Implementation: [formalize.ts:402 sampleFormalizationsForClaim()](/src/domain/formal/formalize.ts#L402)
-- Test: [formalize.test.ts:90 returns error when all samples invalid after max attempts](/test/contract/formalize.test.ts#L90), [formalize.test.ts:113 returns error when callOpencode fails fatally](/test/contract/formalize.test.ts#L113)
+- Implementation: [source-formalize.ts:104 processBatch()](/src/domain/formal/source-formalize.ts#L104), [run-cli.ts:482 runFormalizationPhaseWithEvidence()](/src/cli/run-cli.ts#L482)
+- Test (integration): [semantic-pipeline.integration.test.ts:116 all rejected predicate attempts retain raw evidence and fail formalization with exit category 9](/test/integration/semantic-pipeline.integration.test.ts#L116)
 
 #### Scenario: Continue With Partial Formalization Results [FLA-FORMAL-PARTIAL]
-IF some claims fail formalization but at least one claim succeeds, THEN THE spec-check tool SHALL continue with the successful candidates, SHALL collect per-claim failures as errors in the formalization output, and SHALL let callers decide severity based on the ratio of successes to failures.
-
-**Postcondition:** Partial formalization results are preserved and downstream phases proceed with available candidates.
+IF some eligible claims fail while others produce candidates, THEN THE spec-check tool SHALL continue with candidates and SHALL report per-claim failures and incomplete analyzed scope.
 
 ##### Evidence
-- Implementation: [formalize.ts:154 formalizeClaims()](/src/domain/formal/formalize.ts#L154)
-- Test: [formalize.test.ts:169 returns successful candidates alongside errors on partial failure](/test/contract/formalize.test.ts#L169)
+- Implementation: [source-formalize.ts:104 processBatch()](/src/domain/formal/source-formalize.ts#L104), [source-formalize.ts:160 rejectSample()](/src/domain/formal/source-formalize.ts#L160)
+- Test: [formalize.test.ts:379 returns successful candidates alongside errors on partial failure](/test/contract/formalize.test.ts#L379), [formalization-predicates.test.ts:138 recovery feedback and rejected samples survive later candidate shortfalls](/test/contract/formalization-predicates.test.ts#L138)
 
 #### Scenario: Universal LLM Timeout For Formalization [FLA-FORMAL-TIMEOUT]
-WHEN the spec-check tool invokes an external LLM to formalize a claim or claim batch, THE spec-check tool SHALL use the run-configured universal timeout budget for that invocation.
-
-**Postcondition:** Formalization timeout behavior is consistent with every other LLM-backed phase in the same run.
+WHEN discovery or formalization invokes the external model, THE spec-check tool SHALL use the run-configured universal LLM timeout and existing bounded retry policy.
 
 ##### Evidence
-- Implementation: [formalize.ts:154 formalizeClaims()](/src/domain/formal/formalize.ts#L154), [opencode.ts:86 callOpencode()](/src/adapters/opencode.ts#L86), [timeout.ts:16 DEFAULT_TIMEOUT_MS](/src/domain/timeout.ts#L16)
-- Test: [formalize.test.ts:45 formalizeClaims produces valid candidates from mock responses](/test/contract/formalize.test.ts#L45), [opencode.test.ts:403 retries on timeout up to retry limit then returns timeout error](/test/contract/opencode.test.ts#L403)
+- Implementation: [source-formalize.ts:80 processGroup()](/src/domain/formal/source-formalize.ts#L80), [predicate-formalization.ts:26 invokePredicates()](/src/adapters/predicate-formalization.ts#L26), [opencode.ts:464 callOpencode()](/src/adapters/opencode.ts#L464)
+- Test: [opencode.test.ts:859 retries on timeout up to retry limit then returns timeout error](/test/contract/opencode.test.ts#L859)
 
 #### Scenario: Semantic Groups May Span Provenance Files [FLA-FORMAL-SPAN]
-WHEN a merged capability's claims originate from more than one provenance file, THE spec-check tool SHALL place all such claims in one formalization logical group under the shared semantic key.
-
-**Postcondition:** Formalization batches reflect the merged capability structure, not raw file layout.
+WHEN one merged capability contains claims from multiple files, THE spec-check tool SHALL use one semantic group and frozen registry while preserving each source span.
 
 ##### Evidence
-- Implementation: [formalize.ts:129 formalizeClaims()](/src/domain/formal/formalize.ts#L129), [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
+- Implementation: [source-formalize.ts:80 processGroup()](/src/domain/formal/source-formalize.ts#L80), [grouping.ts:225 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L225)
 - Test (integration): [semantic-batching.integration.test.ts:173 aligns merged grouping, provenance, bounds, prompt, cleanup, and evidence](/test/integration/semantic-batching.integration.test.ts#L173)
+
+#### Scenario: All-Ineligible Input Completes Diagnostics [FLA-FORMAL-NO-ELIGIBLE]
+WHEN source admission yields no eligible claims, THE spec-check tool SHALL skip formalization model calls and SHALL complete diagnostic reporting with no formal verdict rather than fabricate candidates or treat source ineligibility as an adapter failure.
+
+##### Evidence
+- Implementation: [formalize.ts:132 formalizeClaims()](/src/domain/formal/formalize.ts#L132), [source-formalize.ts:57 formalizeSourceClaims()](/src/domain/formal/source-formalize.ts#L57)
+- Test: [formalization-predicates.test.ts:103 all-ineligible source performs no model invocation](/test/contract/formalization-predicates.test.ts#L103)
 
 #### Requirement model
 
 ```alloy
-// --- Formalization phase: claim -> samples with abort/partial semantics ---
-
-pred formalize_success {
-  // Guard: in formalization phase with claims available
-  Pipeline.phase = FormalizationPh
-  some Claim
-  some s : Sample | s.schemaValid = True
-  // Effect: advance to validation
-  Pipeline.phase' = ValidationPh
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
+// Event: bounded discovery completes for one semantic group before sampling.
+pred freeze[g : Group] {
+  Run.phase = Discover and g not in Run.frozen
+  Config.controlsValid = True
+  Run.frozen' = Run.frozen + g
+  keep_attempts
+  keep_queries
+  Run.phase' = Run.phase
 }
-
-pred formalize_abort {
-  // Guard: in formalization phase, zero valid samples exist
-  Pipeline.phase = FormalizationPh
-  no s : Sample | s.schemaValid = True
-  // Effect: abort with exit code 2
-  Pipeline.phase' = AbortedPh
-  Pipeline.exitCode' = 2
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
+pred begin_sampling {
+  Run.phase = Discover and (Run.frozen = Group or Config.controlsValid = False)
+  Run.phase' = (Config.controlsValid = False => Aborted else (no eligible => Complete else Sampling))
+  Run.frozen' = Run.frozen
+  keep_attempts
+  keep_queries
 }
-
-pred formalize_partial {
-  // Guard: some claims have valid samples, some don't
-  Pipeline.phase = FormalizationPh
-  some s : Sample | s.schemaValid = True
-  some c : Claim | no s : Sample | s.claim = c and s.schemaValid = True
-  // Effect: continue with available candidates
-  Pipeline.phase' = ValidationPh
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-// Safety: abort implies no solver conclusions ever produced
-assert abort_no_conclusions {
-  always (Pipeline.phase' = AbortedPh implies
-    after always no f : Pipeline.findings | f.findingType = Contradiction)
-}
-
-// Safety: zero valid samples always triggers abort (not silent continuation)
-assert zero_candidates_implies_abort {
-  always (
-    (Pipeline.phase = FormalizationPh and
-     (no s : Sample | s.schemaValid = True) and
-     Pipeline.phase' != FormalizationPh)
-    implies Pipeline.phase' = AbortedPh)
+// Safety: all-ineligible scope completes diagnostically without invented calls.
+assert no_eligible_no_calls { always (no eligible implies no Run.spawned + Run.issued) }
+// Total eligible failure maps to FormalizationError exit 9; invalid controls
+// and artifact naming failures remain distinct preflight/input categories.
+fun formalization_exit : lone Int {
+  Run.phase = Aborted and some eligible and candidates + Run.errors = eligible and no candidates and
+    Run.outputFailed = False => 9 else none
 }
 ```
 
 ### Requirement: Formalization Sample Schema Validation [FLA-VALIDATE-SAMPLE]
-WHEN the spec-check tool receives a formalization sample from `opencode`, THE spec-check tool SHALL validate the sample against the logic IR schema including sort consistency, assertion well-formedness, identifier format, and same-claim declaration uniqueness before accepting it into clustering.
+WHEN a clause interpretation is received, THE spec-check tool SHALL validate its source index, registry hash, expected clause slots, complete expressions, symbol resolution, sorts, units, arity, and supported fragment before admitting it to clustering.
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Failure Modes`
+- [Design: Expression and semantic IR](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#expression-and-semantic-ir)
 
 #### Scenario: Valid Sample Accepted [FLA-SAMPLE-ACCEPT]
-WHEN a formalization sample passes schema validation for sort consistency, assertion well-formedness, and identifier format, THE spec-check tool SHALL accept it as a clustering candidate.
-
-**Postcondition:** Only structurally valid samples enter the clustering phase.
+WHEN every expected clause predicate validates against the frozen signature, THE spec-check tool SHALL construct the rule skeleton and modality from the source AST and SHALL accept the typed sample.
 
 ##### Evidence
-- Implementation: [validate.ts:53 validateFormalizationSample()](/src/domain/formal/validate.ts#L53)
-- Test: [validate.test.ts:14 accepts valid sample](/test/contract/validate.test.ts#L14), [validate.test.ts:62 accepts nested balanced parentheses](/test/contract/validate.test.ts#L62), [safety-liveness.invariant.test.ts:68 SAFE-3: no formalization sample enters clustering without schema validation](/test/invariant/safety-liveness.invariant.test.ts#L68)
-- Example:
-```typescript
-const { validateFormalizationSample } = await import("./src/domain/formal/validate.ts");
-const result = validateFormalizationSample({ claimId: "REQ-VALID", obligation: "mandatory", variables: [{ name: "State", sort: "Bool" }], functions: [{ name: "ok", args: ["Bool"], returns: "Bool" }], assertions: [{ id: "ASSERT-1", expr: "(ok true)" }] }); //=> type Object
-result.ok; //=> true
-```
+- Implementation: [predicate-lowering.ts:89 lowerPredicates()](/src/domain/formal/predicate-lowering.ts#L89)
+- Test: [formalization-predicates.test.ts:72 source negation and postcondition control the response skeleton](/test/contract/formalization-predicates.test.ts#L72), [formalization-predicates.test.ts:84 uses a frozen registry for batched and additional samples](/test/contract/formalization-predicates.test.ts#L84)
 
 #### Scenario: Invalid Sample Rejected [FLA-SAMPLE-REJECT]
-IF a formalization sample violates the logic IR schema, THEN THE spec-check tool SHALL reject it from clustering and preserve the invalid sample as evidence.
-
-**Postcondition:** Invalid formalizations are visible to reviewers without corrupting downstream analysis.
+IF a sample has undeclared references, wrong sorts/units/arity, missing or duplicate clause slots, unsupported operators, trailing expressions, or solver commands, THEN THE spec-check tool SHALL reject it before solver execution and SHALL preserve the raw response and validation reason.
 
 ##### Evidence
-- Implementation: [validate.ts:53 validateFormalizationSample()](/src/domain/formal/validate.ts#L53)
-- Test: [validate.test.ts:20 rejects non-object input](/test/contract/validate.test.ts#L20), [validate.test.ts:26 rejects missing claimId](/test/contract/validate.test.ts#L26), [validate.test.ts:32 rejects invalid obligation](/test/contract/validate.test.ts#L32), [validate.test.ts:38 rejects unbalanced assertion parentheses](/test/contract/validate.test.ts#L38), [validate.test.ts:47 rejects function with undeclared sort](/test/contract/validate.test.ts#L47), [safety-liveness.invariant.test.ts:68 SAFE-3: no formalization sample enters clustering without schema validation](/test/invariant/safety-liveness.invariant.test.ts#L68)
-- Example:
-```typescript
-const { validateFormalizationSample } = await import("./src/domain/formal/validate.ts");
-const result = validateFormalizationSample({ claimId: "", obligation: "mandatory", variables: [], functions: [], assertions: [] }); //=> type Object
-result.ok; //=> false
-```
+- Implementation: [predicate-lowering.ts:89 lowerPredicates()](/src/domain/formal/predicate-lowering.ts#L89), [expressions.ts:24 validateExpression()](/src/domain/formal/expressions.ts#L24), [source-formalize.ts:160 rejectSample()](/src/domain/formal/source-formalize.ts#L160)
+- Test: [formalization-predicates.test.ts:63 rejects response-only output for a source with a trigger](/test/contract/formalization-predicates.test.ts#L63), [formalization-predicates.test.ts:138 recovery feedback and rejected samples survive later candidate shortfalls](/test/contract/formalization-predicates.test.ts#L138), [typed-expressions.test.ts:28 rejects %s](/test/contract/typed-expressions.test.ts#L28)
 
 #### Scenario: Same-Claim Declaration Collisions Rejected [FLA-SAMPLE-SAMECLAIM]
-IF a single claim declares overlapping raw variable and function names, OR declares duplicate same-kind variables or functions whose raw names sanitize to one symbol, THEN THE spec-check tool SHALL reject that sample during schema validation before it enters clustering.
-
-**Postcondition:** Same-claim structural declaration collisions that do not depend on merge order are rejected at validation; residual same-claim cross-kind sanitizer collisions are deferred to compiler-level `symbol_kind_collision` detection.
+IF a sample attempts conflicting or duplicate declarations or shadows a registry/builtin symbol, THEN THE spec-check tool SHALL reject it without changing the frozen signature.
 
 ##### Evidence
-- Implementation: [validate.ts:133 validateDeclarationCollisions()](/src/domain/formal/validate.ts#L133)
+- Implementation: [predicate-lowering.ts:89 lowerPredicates()](/src/domain/formal/predicate-lowering.ts#L89), [validate.ts:133 validateDeclarationCollisions()](/src/domain/formal/validate.ts#L133)
 - Test: [validate.test.ts:71 rejects raw variable/function name overlap within one claim](/test/contract/validate.test.ts#L71), [validate.test.ts:84 rejects duplicate variables that sanitize to the same symbol](/test/contract/validate.test.ts#L84), [validate.test.ts:101 rejects duplicate functions that sanitize to the same symbol](/test/contract/validate.test.ts#L101)
-- Example:
-```typescript
-const { validateFormalizationSample } = await import("./src/domain/formal/validate.ts");
-const result = validateFormalizationSample({ claimId: "REQ-X", obligation: "mandatory", variables: [{ name: "foo", sort: "Bool" }], functions: [{ name: "foo", args: ["Bool"], returns: "Bool" }], assertions: [{ id: "A1", expr: "(foo true)" }] }); //=> type Object
-result.ok; //=> false
-```
 
 #### Scenario: All Samples Invalid After Retries [FLA-SAMPLE-EXHAUST]
-IF all formalization samples for a claim are invalid after bounded retries, THEN THE spec-check tool SHALL record the failure as an error in the formalization output and SHALL exclude that claim from clustering. THE tool SHALL NOT abort the entire phase unless no claims produce valid candidates.
-
-**Postcondition:** Per-claim formalization failures are collected as errors; remaining valid claims proceed to clustering.
+IF a claim exhausts bounded attempts without a valid sample, THEN THE spec-check tool SHALL return one claim error and SHALL preserve all rejected attempts while successful siblings continue.
 
 ##### Evidence
-- Implementation: [formalize.ts:402 sampleFormalizationsForClaim()](/src/domain/formal/formalize.ts#L402)
-- Test: [formalize.test.ts:90 returns error when all samples invalid after max attempts](/test/contract/formalize.test.ts#L90)
+- Implementation: [source-formalize.ts:132 recoverClaimSamples()](/src/domain/formal/source-formalize.ts#L132), [source-formalize.ts:104 processBatch()](/src/domain/formal/source-formalize.ts#L104)
+- Test: [formalize.test.ts:153 returns error when all samples invalid after max attempts](/test/contract/formalize.test.ts#L153)
+- Test (integration): [semantic-pipeline.integration.test.ts:116 all rejected predicate attempts retain raw evidence and fail formalization with exit category 9](/test/integration/semantic-pipeline.integration.test.ts#L116)
+
+#### Scenario: Logical Inconsistency Is Not Schema Invalidity [FLA-SAMPLE-INCONSISTENT]
+WHEN a type-valid predicate is logically inconsistent, THE spec-check tool SHALL retain it for inconsistency diagnosis rather than discard it as a parsing or type error.
+
+##### Evidence
+- Implementation: [predicate-lowering.ts:89 lowerPredicates()](/src/domain/formal/predicate-lowering.ts#L89)
+- Test: [formalization-predicates.test.ts:129 type-valid inconsistent predicates remain samples for diagnosis](/test/contract/formalization-predicates.test.ts#L129)
 
 #### Requirement model
 
 ```alloy
-// --- Schema validation: gate between formalization and clustering ---
-
-pred validate_accept [s : Sample] {
-  // Guard: in validation phase, sample passes schema checks
-  Pipeline.phase = ValidationPh
-  s.schemaValid = True
-  // Effect: sample enters candidates
-  Pipeline.candidates' = Pipeline.candidates + s
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-pred validate_reject [s : Sample] {
-  // Guard: in validation phase, sample fails schema checks
-  Pipeline.phase = ValidationPh
-  s.schemaValid = False
-  s not in Pipeline.candidates
-  // Effect: sample excluded (preserved as evidence externally)
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-pred validation_complete {
-  // Guard: validation phase done
-  Pipeline.phase = ValidationPh
-  // Effect: advance to clustering if candidates exist, else abort
-  some Pipeline.candidates implies Pipeline.phase' = ClusteringPh
-  no Pipeline.candidates implies Pipeline.phase' = AbortedPh
-  Pipeline.exitCode' = (no Pipeline.candidates implies 2 else Pipeline.exitCode)
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-}
-
-// Safety: only valid samples ever enter the candidates set
-assert only_valid_in_candidates {
-  always (all s : Pipeline.candidates | s.schemaValid = True)
-}
-
-// Safety: invalid samples never corrupt downstream analysis
-assert invalid_never_in_candidates {
-  always (all s : Sample |
-    s.schemaValid = False implies s not in Pipeline.candidates)
+// Event: accept typed source-index/registry-valid samples only after capture and
+// terminal cleanup. Logical inconsistency is deliberately not schema invalidity.
+pred settle[a : Attempt] {
+  Run.phase = Sampling and a in Run.captured - Run.settled
+  a.(Run.stages) in CleanupSucceeded + CleanupFailed
+  Run.settled' = Run.settled + a
+  Run.accepted' = Run.accepted + (valid_attempt[a] => { s : Sample | s.attempt = a } else none)
+  Run.stages' = Run.stages
+  Run.spawned' = Run.spawned
+  Run.captured' = Run.captured
+  Run.errors' = Run.errors
+  Run.selected' = Run.selected
+  Run.phase' = Run.phase
+  Run.frozen' = Run.frozen
+  keep_queries
 }
 ```
 
 ### Requirement: SMT-LIB Compilation And Identifier Sanitization [FLA-SMTLIB-COMPILE]
-WHEN the spec-check tool compiles logic IR into SMT-LIB artifacts, THE spec-check tool SHALL sanitize user-derived identifiers with an injective encoding to prevent solver syntax collisions and identifier aliasing, SHALL include reversible mapping comments that link sanitized identifiers back to their original claim identifiers, SHALL emit only declarations and assertions without solver commands (`(check-sat)`), and SHALL expose decomposed assertion expressions alongside the compiled text for downstream query construction.
+WHEN typed semantic artifacts are compiled, THE spec-check tool SHALL render resolved AST nodes with injective namespaced identifiers, reversible source mappings, and declarations/assertions only.
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Constraints`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
+- [Design: Expression and semantic IR](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#expression-and-semantic-ir)
 
 #### Scenario: Unsafe Identifier Sanitized [FLA-SMTLIB-SANITIZE]
-WHEN a claim identifier contains any code point outside the pass-through set of ASCII letters and digits `[A-Za-z0-9]` (for example parentheses, pipe characters, whitespace, a literal underscore, or a supplementary-plane character), THE spec-check tool SHALL iterate the identifier by Unicode code point, SHALL replace each such code point with `_` followed by exactly six uppercase hexadecimal digits of the Unicode code point, and SHALL emit a mapping comment.
-
-**Postcondition:** The SMT-LIB file is syntactically valid, the encoding is uniquely decodable, and the original identifier is recoverable from the mapping comment.
+WHEN an identifier needs escaping, THE spec-check tool SHALL preserve the existing Unicode-code-point encoding using `_` and six uppercase hexadecimal digits with reversible mapping comments.
 
 ##### Evidence
-- Implementation: [smtlib.ts:142 sanitizeIdentifier()](/src/domain/formal/smtlib.ts#L142)
-- Test: [smtlib.test.ts:34 sanitizes unsafe identifiers](/test/contract/smtlib.test.ts#L34)
+- Implementation: [identifiers.ts:91 sanitizeIdentifier()](/src/domain/formal/identifiers.ts#L91), [signature.ts:90 renderExpressionSignature()](/src/domain/formal/signature.ts#L90)
+- Test: [smtlib.test.ts:34 sanitizes unsafe identifiers](/test/contract/smtlib.test.ts#L34), [typed-mapping-comments.test.ts:9 preserves constants/functions/enums/Unicode/newline identity as inert JSON comments](/test/contract/typed-mapping-comments.test.ts#L9)
 - Test (property): [logic.property.test.ts:448 sanitized identifiers remain SMT-safe](/test/property/logic.property.test.ts#L448)
-- Test (integration): [z3-smtlib.integration.test.ts:31 each golden sample compiles to Z3-accepted SMT-LIB (sat, no errors)](/test/integration/z3-smtlib.integration.test.ts#L31)
-- Example:
-```typescript
-const { sanitizeIdentifier } = await import("./src/domain/formal/smtlib.ts");
-const safe = sanitizeIdentifier("REQ_VALID_1"); //=> type String
-safe; //=> REQ_00005FVALID_00005F1
-const unsafe = sanitizeIdentifier("REQ(1)|A"); //=> type String
-unsafe.includes("("); //=> false
-unsafe.includes("|"); //=> false
-```
 
 #### Scenario: Valid Identifier Preserved [FLA-SMTLIB-PRESERVE]
-WHEN a claim identifier contains only pass-through characters `[A-Za-z0-9]` and does not begin with a digit, THE spec-check tool SHALL use the identifier unchanged in the SMT-LIB output.
-
-**Postcondition:** No unnecessary transformation is applied to identifiers already drawn entirely from the pass-through set.
+WHEN the injective identifier encoder receives a non-digit-leading ASCII alphanumeric identifier, THE spec-check tool SHALL preserve that identifier's characters within its assigned namespace.
 
 ##### Evidence
-- Implementation: [smtlib.ts:142 sanitizeIdentifier()](/src/domain/formal/smtlib.ts#L142)
+- Implementation: [identifiers.ts:91 sanitizeIdentifier()](/src/domain/formal/identifiers.ts#L91), [signature.ts:14 expressionSymbolName()](/src/domain/formal/signature.ts#L14)
 - Test: [smtlib.test.ts:39 compiles logic IR with mapping comments](/test/contract/smtlib.test.ts#L39)
-- Test (property): [logic.property.test.ts:448 sanitized identifiers remain SMT-safe](/test/property/logic.property.test.ts#L448)
-- Example:
-```typescript
-const { sanitizeIdentifier } = await import("./src/domain/formal/smtlib.ts");
-sanitizeIdentifier("CLAIMID42"); //=> CLAIMID42
-```
 
 #### Scenario: Compiled Output Excludes Solver Commands [FLA-SMTLIB-QUERYSAT]
-WHEN the spec-check tool compiles logic IR into SMT-LIB text, THE compiled output SHALL contain variable declarations (`declare-const`), function declarations (`declare-fun`), and assertions (`assert`) but SHALL NOT include `(check-sat)`. THE spec-check tool SHALL append `(check-sat)` at query execution time when submitting the compiled output to the solver.
-
-**Postcondition:** Compiled SMT-LIB is a reusable component that can be composed into different query types (satisfiability, implication) without stripping embedded solver commands.
+WHEN reusable SMT-LIB is compiled, THE spec-check tool SHALL omit `check-sat`, `set-option`, model/core requests, and other query commands until query assembly.
 
 ##### Evidence
-- Implementation: [smtlib.ts:204 compileSmtlib()](/src/domain/formal/smtlib.ts#L204)
-- Test: [smtlib.test.ts:39 compiles logic IR with mapping comments](/test/contract/smtlib.test.ts#L39), [smtlib.test.ts:57 produces a single smt2 without solver commands (callers append them)](/test/contract/smtlib.test.ts#L57)
-- Example:
-```typescript
-const { compileSmtlib } = await import("./src/domain/formal/smtlib.ts");
-const { toClaimId } = await import("./src/domain/branded.ts");
-const compiled = compileSmtlib({ claimId: toClaimId("R1"), obligation: "mandatory", variables: [{ name: "S", sort: "Bool" }], functions: [], assertions: [{ id: "A1", expr: "S" }] }); //*
-compiled.smtlib.includes("(check-sat)"); //=> false
-compiled.smtlib.includes("(assert"); //=> true
-```
+- Implementation: [typed-smtlib.ts:20 compileTypedClaim()](/src/domain/formal/typed-smtlib.ts#L20), [typed-smtlib.ts:40 compileTypedGroup()](/src/domain/formal/typed-smtlib.ts#L40)
+- Test: [smtlib.test.ts:57 produces a single smt2 without solver commands (callers append them)](/test/contract/smtlib.test.ts#L57), [typed-expressions.test.ts:68 checks shared signatures and declares each symbol once](/test/contract/typed-expressions.test.ts#L68)
 
 #### Scenario: Assertion Expressions Exposed [FLA-SMTLIB-ASSERTEXPRS]
-WHEN the spec-check tool compiles logic IR into SMT-LIB, THE compiled output SHALL include the decomposed inner assertion expressions (without the `(assert ...)` wrapper) for use in downstream implication query construction.
-
-**Postcondition:** Downstream consumers can construct negated or combined assertions from the compiled output without re-parsing the SMT-LIB text.
+WHEN compilation completes, THE spec-check tool SHALL expose typed predicate/assertion structures and their rendered expressions so downstream builders do not reparse emitted SMT-LIB.
 
 ##### Evidence
-- Implementation: [smtlib.ts:204 compileSmtlib()](/src/domain/formal/smtlib.ts#L204)
-- Test: [smtlib.test.ts:39 compiles logic IR with mapping comments](/test/contract/smtlib.test.ts#L39)
-- Example:
-```typescript
-const { compileSmtlib } = await import("./src/domain/formal/smtlib.ts");
-const { toClaimId } = await import("./src/domain/branded.ts");
-const compiled = compileSmtlib({ claimId: toClaimId("R1"), obligation: "mandatory", variables: [{ name: "S", sort: "Bool" }], functions: [], assertions: [{ id: "A1", expr: "S" }] }); //*
-compiled.assertionExprs.length; //=> 1
-```
+- Implementation: [predicate-lowering.ts:89 lowerPredicates()](/src/domain/formal/predicate-lowering.ts#L89), [typed-smtlib.ts:20 compileTypedClaim()](/src/domain/formal/typed-smtlib.ts#L20)
+- Test: [smtlib.test.ts:39 compiles logic IR with mapping comments](/test/contract/smtlib.test.ts#L39), [formalization-predicates.test.ts:72 source negation and postcondition control the response skeleton](/test/contract/formalization-predicates.test.ts#L72)
+
+#### Scenario: Literal Contents Are Not Renamed [FLA-SMTLIB-LITERALS]
+WHEN the expression parser encounters literal content, THE spec-check tool SHALL preserve its lexical meaning without identifier substitution and SHALL reject unsupported literal sorts before compilation.
+
+##### Evidence
+- Implementation: [expression-parser.ts:22 parseExpressionSyntax()](/src/domain/formal/expression-parser.ts#L22), [expressions.ts:24 validateExpression()](/src/domain/formal/expressions.ts#L24), [expression-render.ts:48 renderExpression()](/src/domain/formal/expression-render.ts#L48)
+- Test: [typed-expressions.test.ts:38 lexes string punctuation literally and rejects the unsupported theory](/test/contract/typed-expressions.test.ts#L38), [typed-expressions.test.ts:47 preserves exact integers, decimals and reduced rationals](/test/contract/typed-expressions.test.ts#L47), [typed-expressions.test.ts:87 distinguishes quoted numeric symbol identities from numeric literals](/test/contract/typed-expressions.test.ts#L87)
 
 #### Requirement model
 
 ```alloy
-// --- SMT-LIB compilation: sanitization and structural properties ---
-// Compilation is a pure function (no state transitions). Its properties are
-// structural invariants on the compiled output.
-
-sig CompiledArtifact {
-  declarations : set Claim,
-  assertions : set Assertion,
-  hasCheckSat : one Bool,
-  hasMappingComments : one Bool,
-  exposedExprs : set Assertion
-}
-
-// Compilation postconditions (structural invariants)
-fact compilation_valid {
-  all art : CompiledArtifact {
-    // No solver commands in compiled output
-    art.hasCheckSat = False
-    // Mapping comments present for traceability
-    art.hasMappingComments = True
-    // All assertions have exposed inner expressions
-    art.assertions in art.exposedExprs
-  }
-}
-
-// Sanitization: deterministic, reversible, and identity-preserving for safe IDs
-pred sanitize_id [cid : ClaimId, outputSafe : Bool] {
-  outputSafe = True   // result is always safe (sanitized or preserved)
-}
-
-// Safety: compiled output never contains check-sat
-assert no_checksat_in_compiled {
-  all art : CompiledArtifact | art.hasCheckSat = False
-}
-
-// Safety: safe identifiers are preserved unchanged
-assert safe_ids_preserved {
-  all cid : ClaimId | cid.safety = Safe implies sanitize_id[cid, True]
-}
+// Compiler observations are over resolved symbols, not string replacement.
+sig Symbol { encoded : one Label }
+fact symbol_encoding_injective { all disj a, b : Symbol | a.encoded != b.encoded }
+sig Compilation { symbols : set Symbol, included : set Claim, commandsPresent : one Bool }
+pred reusable_compilation[c : Compilation] { c.commandsPresent = False }
+// Safety contract: reusable compilation cannot issue a solver query. Concrete
+// Unicode encoding, inert mapping comments and literal preservation use tests.
+// Safety: compiler names injective.
+assert compiler_names_injective { all disj a, b : Symbol | a.encoded != b.encoded }
 ```
 
 ### Requirement: Per-Spec Combined SMT-LIB Compilation [FLA-SPEC-COMBINE]
-WHEN the spec-check tool performs specs-forward logic analysis, THE spec-check tool SHALL combine all formalized claims from a single merged capability analysis unit into exactly one SMT-LIB file, SHALL deduplicate compatible variable and function declarations across claims by final sanitized symbol identity, and SHALL use named assertions (`(assert (! expr :named label))`) to enable unsat-core identification. The compiled output SHALL NOT include solver commands (`check-sat`, `set-option`, `get-unsat-core`) — the logic analysis orchestrator appends these at query time using a two-phase approach (Phase 1: satisfiability check only; Phase 2: re-run with `(set-option :produce-unsat-cores true)` and `(get-unsat-core)` only when UNSAT is detected).
+WHEN a merged capability's admitted mandatory rules are compiled, THE spec-check tool SHALL construct a checked shared signature and named assertions with an authoritative surviving-claim set while separating reusable compilation from query commands.
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`
@@ -766,416 +511,255 @@ WHEN the spec-check tool performs specs-forward logic analysis, THE spec-check t
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
 - `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Scope`
 - `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Interaction Protocols`
+- [Design: Concepts and assumptions](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#concepts-and-assumptions)
+- [Design: Expression and semantic IR](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#expression-and-semantic-ir)
 
 #### Scenario: Variable And Function Deduplication [FLA-SPEC-DEDUP]
-WHEN multiple claims from the same merged capability analysis unit declare identical variable or function names with identical sorts or signatures after sanitization, THE spec-check tool SHALL emit only one declaration in the combined output and SHALL keep all compatible claims included.
-
-**Postcondition:** The combined SMT-LIB file has no duplicate declarations from compatible claims, and compatible redeclarations do not re-anchor declaration ownership to a later claim.
+WHEN compatible declarations refer to the same resolved concept, THE spec-check tool SHALL emit one declaration and SHALL retain all compatible claims, including in clustering and cross-side queries.
 
 ##### Evidence
-- Implementation: [smtlib.ts:278 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L278)
-- Test: [smtlib.test.ts:90 deduplicates identical variable declarations](/test/contract/smtlib.test.ts#L90), [smtlib.test.ts:102 deduplicates identical function declarations](/test/contract/smtlib.test.ts#L102)
+- Implementation: [signature.ts:39 mergeExpressionSignatures()](/src/domain/formal/signature.ts#L39), [typed-smtlib.ts:40 compileTypedGroup()](/src/domain/formal/typed-smtlib.ts#L40)
+- Test: [typed-expressions.test.ts:68 checks shared signatures and declares each symbol once](/test/contract/typed-expressions.test.ts#L68), [smtlib.test.ts:90 deduplicates identical variable declarations](/test/contract/smtlib.test.ts#L90), [smtlib.test.ts:102 deduplicates identical function declarations](/test/contract/smtlib.test.ts#L102)
 
 #### Scenario: Function Signature Conflict Detection [FLA-SPEC-CONFLICT]
-IF two claims from the same merged capability analysis unit declare the same sanitized function symbol with incompatible signatures, THEN THE spec-check tool SHALL emit a `logic.merge_conflict` finding, SHALL exclude the later conflicting claim from the combined file, and SHALL preserve both claim identifiers, both raw function names, and the shared sanitized symbol in the finding evidence.
-
-**Postcondition:** Function-signature conflicts are surfaced as findings rather than producing malformed solver input; no surviving sanitized function symbol has more than one signature, and the excluded claim contributes no assertions or declarations to the combined file.
+IF a residual compiler input conflicts with an established function signature, THEN THE spec-check tool SHALL emit `logic.merge_conflict`, exclude the later offending claim, and preserve both signatures and source identities.
 
 ##### Evidence
-- Implementation: [smtlib.ts:278 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L278), [logic-analysis.ts:315 conflictToFinding()](/src/domain/formal/logic-analysis.ts#L315)
+- Implementation: [smtlib.ts:277 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L277), [logic-analysis.ts:324 conflictToFinding()](/src/domain/formal/logic-analysis.ts#L324)
 - Test: [smtlib.test.ts:115 detects function signature conflicts and excludes conflicting claims](/test/contract/smtlib.test.ts#L115), [logic-analysis.test.ts:575 maps each merge conflict kind to merge_conflict finding with stable evidence](/test/contract/logic-analysis.test.ts#L575)
 - Test (property): [logic.property.test.ts:700 function-signature conflict histories keep function-conflict-only scope](/test/property/logic.property.test.ts#L700)
-- Example:
-```typescript
-const { compileSpecSmtlib } = await import("./src/domain/formal/smtlib.ts");
-const { toClaimId } = await import("./src/domain/branded.ts");
-const result = compileSpecSmtlib("spec.md", [{ claimId: toClaimId("R1"), obligation: "mandatory", variables: [], functions: [{ name: "f", args: ["Bool"], returns: "Bool" }], assertions: [{ id: "A1", expr: "(f true)" }] }, { claimId: toClaimId("R2"), obligation: "mandatory", variables: [], functions: [{ name: "f", args: ["Bool", "Bool"], returns: "Bool" }], assertions: [{ id: "A1", expr: "true" }] }]); //*
-result.conflicts[0].kind; //=> function_signature_mismatch
-result.claimIds.includes("R2"); //=> false
-```
 
 #### Scenario: Variable Sort Conflict Detection [FLA-SPEC-VARSORT-CONFLICT]
-IF two claims from the same merged capability analysis unit declare the same sanitized variable symbol with incompatible sorts, THEN THE spec-check tool SHALL emit a `logic.merge_conflict` finding for `variable_sort_mismatch`, SHALL exclude the later conflicting claim from the combined file, and SHALL preserve both claim identifiers, both raw variable names, the shared sanitized symbol, and both sorts in the finding evidence.
-
-**Postcondition:** No surviving combined SMT-LIB artifact contains one sanitized variable symbol with more than one sort.
+IF a residual compiler input conflicts with an established variable sort, THEN THE spec-check tool SHALL emit `logic.merge_conflict` for `variable_sort_mismatch` and SHALL exclude the later offending claim with both sorts preserved.
 
 ##### Evidence
-- Implementation: [smtlib.ts:278 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L278), [logic-analysis.ts:315 conflictToFinding()](/src/domain/formal/logic-analysis.ts#L315)
+- Implementation: [smtlib.ts:277 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L277), [logic-analysis.ts:324 conflictToFinding()](/src/domain/formal/logic-analysis.ts#L324)
 - Test: [smtlib.test.ts:135 detects variable sort mismatch and excludes later claim](/test/contract/smtlib.test.ts#L135), [logic-analysis.test.ts:575 maps each merge conflict kind to merge_conflict finding with stable evidence](/test/contract/logic-analysis.test.ts#L575)
-- Test (property): [logic.property.test.ts:864 regression FLA-SPEC-CONFLICT-ORDER preserves first claimant after reorder](/test/property/logic.property.test.ts#L864)
-- Example:
-```typescript
-const { compileSpecSmtlib } = await import("./src/domain/formal/smtlib.ts");
-const { toClaimId } = await import("./src/domain/branded.ts");
-const vsc = compileSpecSmtlib("spec.md", [{ claimId: toClaimId("R1"), obligation: "mandatory", variables: [{ name: "S", sort: "Bool" }], functions: [], assertions: [{ id: "A1", expr: "S" }] }, { claimId: toClaimId("R2"), obligation: "mandatory", variables: [{ name: "S", sort: "Int" }], functions: [], assertions: [{ id: "A1", expr: "(> S 0)" }] }]); //*
-vsc.conflicts[0].kind; //=> variable_sort_mismatch
-vsc.claimIds.join(","); //=> R1
-```
 
 #### Scenario: Symbol Kind Collision Detection [FLA-SPEC-SYMKIND-CONFLICT]
-IF one claim declares a sanitized symbol as a variable and another claim declares the same sanitized symbol as a function, OR IF one claim contains distinct raw names that sanitize to the same symbol with opposite declaration kinds, THEN THE spec-check tool SHALL emit a `logic.merge_conflict` finding for `symbol_kind_collision`, SHALL exclude the offending claim from the combined file, and SHALL preserve both claim identifiers, both raw names, both declaration kinds, and the shared sanitized symbol in the finding evidence.
-
-**Postcondition:** No surviving combined SMT-LIB artifact contains one sanitized symbol declared as both `declare-const` and `declare-fun`.
+IF residual declarations bind one solver symbol as both constant and function, THEN THE spec-check tool SHALL report `symbol_kind_collision` and SHALL exclude the offending claim.
 
 ##### Evidence
-- Implementation: [smtlib.ts:278 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L278), [logic-analysis.ts:315 conflictToFinding()](/src/domain/formal/logic-analysis.ts#L315)
+- Implementation: [smtlib.ts:277 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L277)
 - Test: [smtlib.test.ts:155 detects symbol kind collision across claims](/test/contract/smtlib.test.ts#L155), [smtlib.test.ts:175 detects same-claim symbol kind collision](/test/contract/smtlib.test.ts#L175)
 - Test (property): [logic.property.test.ts:877 regression FLA-SPEC-SYMKIND-CONFLICT same-claim cross-kind collision excludes claim](/test/property/logic.property.test.ts#L877), [logic.property.test.ts:894 regression FLA-SPEC-SYMKIND-CONFLICT same-claim collision can cite excluded existing claim](/test/property/logic.property.test.ts#L894)
-- Example:
-```typescript
-const { compileSpecSmtlib } = await import("./src/domain/formal/smtlib.ts");
-const { toClaimId } = await import("./src/domain/branded.ts");
-const skc = compileSpecSmtlib("spec.md", [{ claimId: toClaimId("R1"), obligation: "mandatory", variables: [{ name: "P", sort: "Bool" }], functions: [], assertions: [{ id: "A1", expr: "P" }] }, { claimId: toClaimId("R2"), obligation: "mandatory", variables: [], functions: [{ name: "P", args: ["Bool"], returns: "Bool" }], assertions: [{ id: "A1", expr: "(P true)" }] }]); //*
-skc.conflicts[0].kind; //=> symbol_kind_collision
-```
 
 #### Scenario: Single Conflict Reason With Fixed Precedence [FLA-SPEC-CONFLICT-ORDER]
-IF a claim introduces more than one kind of incompatible declaration binding relative to already-established sanitized symbols, THEN THE spec-check tool SHALL record exactly one conflict reason for that excluded claim under the fixed precedence `variable_sort_mismatch`, then `function_signature_mismatch`, then `symbol_kind_collision`.
+IF a residual offending claim has multiple declaration conflict kinds, THEN THE spec-check tool SHALL retain one compiler exclusion reason in the existing variable-sort, function-signature, then symbol-kind precedence.
 
-**Postcondition:** Every excluded claim carries exactly one conflict reason, and the highest-precedence conflict is the reason reported.
+**Postcondition:** These defensive compiler exclusions do not authorize first-wins resolution of ambiguous semantic identities during concept discovery.
 
 ##### Evidence
-- Implementation: [smtlib.ts:278 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L278)
+- Implementation: [smtlib.ts:277 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L277)
 - Test: [smtlib.test.ts:196 uses conflict precedence variable before function before symbol-kind](/test/contract/smtlib.test.ts#L196)
 - Test (property): [logic.property.test.ts:864 regression FLA-SPEC-CONFLICT-ORDER preserves first claimant after reorder](/test/property/logic.property.test.ts#L864)
 
 #### Scenario: Surviving Claim Set Is Authoritative [FLA-SPEC-CLAIMIDS]
-WHEN the spec-check tool finishes combining a compile group, THE spec-check tool SHALL expose `compiled.claimIds` as the authoritative surviving-claim set containing exactly the non-excluded claims in original input order, and downstream checks SHALL derive claim inclusion from `compiled.claimIds` rather than from conflict evidence tuples.
-
-**Postcondition:** Excluded claims contribute no assertions and no unique declarations to the emitted SMT-LIB, and `compiled.claimIds` is the single source of truth for inclusion across deeper checks, assertion labels, and unsat-core resolution.
+WHEN compilation excludes claims, THE spec-check tool SHALL expose the exact surviving set in input order and SHALL use that set for assertions, dependencies, labels, and downstream scope accounting.
 
 ##### Evidence
-- Implementation: [smtlib.ts:278 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L278)
+- Implementation: [smtlib.ts:277 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L277)
 - Test: [smtlib.test.ts:115 detects function signature conflicts and excludes conflicting claims](/test/contract/smtlib.test.ts#L115)
 - Test (property): [logic.property.test.ts:655 compile is deterministic for the same generated state](/test/property/logic.property.test.ts#L655), [logic.property.test.ts:675 append-compatible histories are monotonic when no reorders/removals occur](/test/property/logic.property.test.ts#L675)
-- Example:
-```typescript
-const { compileSpecSmtlib } = await import("./src/domain/formal/smtlib.ts");
-const { toClaimId } = await import("./src/domain/branded.ts");
-const surv = compileSpecSmtlib("spec.md", [{ claimId: toClaimId("R1"), obligation: "mandatory", variables: [{ name: "S", sort: "Bool" }], functions: [], assertions: [{ id: "A1", expr: "S" }] }, { claimId: toClaimId("R2"), obligation: "mandatory", variables: [{ name: "S", sort: "Int" }], functions: [], assertions: [{ id: "A1", expr: "(> S 0)" }] }]); //*
-surv.claimIds.join(","); //=> R1
-```
 
 #### Scenario: Duplicate Claim Identifier Rejected Before Solver Execution [FLA-SPEC-DUPLICATE-CLAIM-ID]
-IF a compile group contains duplicate raw claim identifiers or duplicate sanitized claim identifiers, THEN THE spec-check tool SHALL emit `logic.invalid_group`, SHALL skip combined SMT-LIB compilation for that group, and SHALL NOT invoke the solver for that group.
-
-**Postcondition:** Claim identity remains one-to-one across included claims, assertion labels, unsat-core resolution, and finding evidence.
+IF a compile group violates the existing raw or sanitized claim-label uniqueness precondition, THEN THE spec-check tool SHALL report `logic.invalid_group` before compilation or solver execution without merging distinct source-local claims.
 
 ##### Evidence
-- Implementation: [logic-analysis.ts:200 preflightGroupClaimIds()](/src/domain/formal/logic-analysis.ts#L200), [logic-analysis.ts:380 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L380)
+- Implementation: [logic-analysis.ts:209 preflightGroupClaimIds()](/src/domain/formal/logic-analysis.ts#L209), [static-analysis.ts:48 prepareGroup()](/src/domain/formal/static-analysis.ts#L48)
 - Test: [logic-analysis.test.ts:556 rejects duplicate raw claim IDs as invalid group before compile and solver work](/test/contract/logic-analysis.test.ts#L556), [logic-analysis.test.ts:619 detects constructed sanitized-id collision in preflight](/test/contract/logic-analysis.test.ts#L619)
 - Test (property): [logic.property.test.ts:717 constructed sanitized collisions reject with duplicate_sanitized_claim_id](/test/property/logic.property.test.ts#L717), [logic.property.test.ts:733 logic analysis performs zero solver and write work for invalid groups](/test/property/logic.property.test.ts#L733)
-- Example:
-```typescript
-const { preflightGroupClaimIds } = await import("./src/domain/formal/logic-analysis.ts");
-const { toClaimId } = await import("./src/domain/branded.ts");
-const dup = preflightGroupClaimIds([{ claimId: toClaimId("R1"), obligation: "mandatory", variables: [], functions: [], assertions: [{ id: "A1", expr: "true" }] }, { claimId: toClaimId("R1"), obligation: "mandatory", variables: [], functions: [], assertions: [{ id: "A1", expr: "true" }] }]); //=> type Object
-dup.kind; //=> duplicate_raw_claim_id
-```
 
 #### Scenario: Oversized Compile Group Rejected Before Solver Execution [FLA-SPEC-GROUP-BOUNDS]
-IF a compile group contains more claims than `CLAIMS_PER_GROUP_MAX`, OR any single claim declares more variable-plus-function symbols than `DECLARATIONS_PER_CLAIM_MAX`, THEN THE spec-check tool SHALL emit `logic.invalid_group`, SHALL skip combined SMT-LIB compilation for that group, and SHALL NOT invoke the solver or write solver artifacts for that group.
-
-**Postcondition:** An oversized group is rejected as a graceful finding rather than aborting the run; valid sibling groups in the same analysis still compile and run to completion.
+IF a compile group exceeds its claim or declaration bounds, THEN THE spec-check tool SHALL report `logic.invalid_group` before compilation, solver-artifact writing, or solver execution for that group while valid siblings proceed.
 
 ##### Evidence
-- Implementation: [logic-analysis.ts:267 preflightGroupBounds()](/src/domain/formal/logic-analysis.ts#L267), [smtlib.ts:278 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L278)
-- Test: [smtlib.test.ts:68 throws its size precondition as an unreachable backstop when called directly past a bound](/test/contract/smtlib.test.ts#L68), [logic-analysis.test.ts:631 rejects an oversized compile group as invalid group before compile and solver work](/test/contract/logic-analysis.test.ts#L631), [logic-analysis.test.ts:651 rejects a claim with too many declarations as invalid group scoped to that claim](/test/contract/logic-analysis.test.ts#L651), [logic-analysis.test.ts:681 rejects only the oversized group while a valid sibling group still runs](/test/contract/logic-analysis.test.ts#L681)
+- Implementation: [logic-analysis.ts:276 preflightGroupBounds()](/src/domain/formal/logic-analysis.ts#L276), [static-analysis.ts:48 prepareGroup()](/src/domain/formal/static-analysis.ts#L48)
+- Test: [logic-analysis.test.ts:631 rejects an oversized compile group as invalid group before compile and solver work](/test/contract/logic-analysis.test.ts#L631), [logic-analysis.test.ts:651 rejects a claim with too many declarations as invalid group scoped to that claim](/test/contract/logic-analysis.test.ts#L651), [logic-analysis.test.ts:681 rejects only the oversized group while a valid sibling group still runs](/test/contract/logic-analysis.test.ts#L681)
 - Test (property): [logic.property.test.ts:761 preflightGroupBounds accepts group cardinality at the limit and flags it one past the limit](/test/property/logic.property.test.ts#L761), [logic.property.test.ts:780 preflightGroupBounds counts variables plus functions against the per-claim limit](/test/property/logic.property.test.ts#L780)
-- Example:
-```typescript
-const { preflightGroupBounds } = await import("./src/domain/formal/logic-analysis.ts");
-const { toClaimId } = await import("./src/domain/branded.ts");
-preflightGroupBounds([{ claimId: toClaimId("R1"), obligation: "mandatory", variables: [{ name: "S", sort: "Bool" }], functions: [], assertions: [{ id: "A1", expr: "S" }] }]); //=> null
-```
 
 #### Scenario: Dangling Assertion Reference Becomes Solver Error [FLA-SPEC-DANGLING-REF]
-IF a claim assertion references a declaration that becomes undefined after another claim is merge-excluded, THEN THE spec-check tool SHALL surface the unresolved reference through the `logic.solver_error` path rather than silently emitting malformed solver input.
+IF a dependency becomes unresolved after exclusion, THEN THE spec-check tool SHALL mark dependent formal scope invalid before querying and SHALL preserve the unresolved-reference evidence rather than deliberately delegate detection to Z3.
 
-**Postcondition:** Assertion-reference resolution is out of scope for merge exclusion; any resulting dangling reference is reported as a solver error with preserved solver input and output as evidence.
+**Postcondition:** The historical scenario identifier is retained, but its solver-error-only behavior is replaced by early dependency validation; unexpected solver rejection remains a backstop.
 
 ##### Evidence
-- Implementation: [logic-analysis.ts:380 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L380)
-- Test: [logic-analysis.test.ts:318 solver error produces logic.solver_error finding](/test/contract/logic-analysis.test.ts#L318)
+- Implementation: [expressions.ts:24 validateExpression()](/src/domain/formal/expressions.ts#L24), [typed-smtlib.ts:40 compileTypedGroup()](/src/domain/formal/typed-smtlib.ts#L40)
 
 #### Scenario: Untrusted Comment Text Stays Inert [FLA-SPEC-COMMENT-SAFE]
-WHEN the spec-check tool emits SMT-LIB mapping comments generated from untrusted strings such as claim identifiers, raw symbol names, or source paths, THE spec-check tool SHALL escape line-breaking characters so the comment text cannot introduce executable solver commands on following lines.
-
-**Postcondition:** Raw evidence embedded in compiler output remains inert comment data and cannot inject SMT-LIB commands by starting a new line.
+WHEN mapping comments contain untrusted text, THE spec-check tool SHALL neutralize line breaks so the text cannot introduce solver commands.
 
 ##### Evidence
-- Implementation: [smtlib.ts:278 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L278)
+- Implementation: [typed-smtlib.ts:11 comment()](/src/domain/formal/typed-smtlib.ts#L11), [signature.ts:90 renderExpressionSignature()](/src/domain/formal/signature.ts#L90)
+- Test: [typed-mapping-comments.test.ts:9 preserves constants/functions/enums/Unicode/newline identity as inert JSON comments](/test/contract/typed-mapping-comments.test.ts#L9)
 - Test (property): [logic.property.test.ts:812 compiler comment emission neutralizes newline-based SMT command injection](/test/property/logic.property.test.ts#L812)
 
 #### Scenario: Named Assertion Labels Map To Claims [FLA-SPEC-NAMED]
-WHEN the spec-check tool generates named assertions in the combined SMT-LIB, THE label for each assertion SHALL encode the source claim identifier and assertion index so that unsat-core results can be mapped back to specific included claims.
-
-**Postcondition:** The assertion-name-to-claim-ID mapping is deterministic and reversible, and `assertionNameMap` contains labels for included claims only.
+WHEN assertions are named, THE spec-check tool SHALL map every unique label to an included source-local claim and assertion index with authored IDs retained as display metadata.
 
 ##### Evidence
-- Implementation: [smtlib.ts:278 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L278)
-- Test: [smtlib.test.ts:79 uses named assertions with :named labels](/test/contract/smtlib.test.ts#L79), [smtlib.test.ts:214 maps assertion labels back to claim IDs](/test/contract/smtlib.test.ts#L214)
-- Example:
-```typescript
-const { compileSpecSmtlib } = await import("./src/domain/formal/smtlib.ts");
-const { toClaimId } = await import("./src/domain/branded.ts");
-const result = compileSpecSmtlib("spec.md", [{ claimId: toClaimId("R1"), obligation: "mandatory", variables: [{ name: "S", sort: "Bool" }], functions: [], assertions: [{ id: "A1", expr: "S" }] }]); //*
-result.smtlib.includes(":named R1__a0"); //=> true
-result.assertionNameMap.get("R1__a0"); //=> R1
-```
+- Implementation: [typed-smtlib.ts:40 compileTypedGroup()](/src/domain/formal/typed-smtlib.ts#L40), [static-context.ts:93 coreIds()](/src/domain/formal/static-context.ts#L93)
+- Test: [smtlib.test.ts:79 uses named assertions with :named labels](/test/contract/smtlib.test.ts#L79), [smtlib.test.ts:214 maps assertion labels back to claim IDs](/test/contract/smtlib.test.ts#L214), [static-queries.test.ts:28 detects guarded/unconditional conflict and attributes only the sufficient core](/test/contract/static-queries.test.ts#L28)
 
 #### Scenario: Assertion Label Encoding Is Injective [FLA-SPEC-LABEL-ENCODE]
-WHEN the spec-check tool encodes a named-assertion label, THE spec-check tool SHALL form the label as `<sanitizedClaimId>__a<index>`, where `sanitizeIdentifier()` is injective: it passes through only ASCII letters and digits `[A-Za-z0-9]`, reserves `_` as the escape lead, and escapes every other code point, including a literal underscore, as `_` followed by exactly six uppercase hexadecimal digits of the Unicode code point. It SHALL escape a leading raw digit, SHALL map the empty string to `_`, and SHALL perform no Unicode normalization.
-
-**Postcondition:** The `__a<index>` separator remains unambiguous and distinct raw claim IDs cannot produce colliding assertion labels.
+WHEN labels are encoded, THE spec-check tool SHALL preserve the existing injective identifier mapping and an unambiguous assertion-index separator while separating concept, constructor, and assertion namespaces.
 
 ##### Evidence
-- Implementation: [smtlib.ts:142 sanitizeIdentifier()](/src/domain/formal/smtlib.ts#L142), [smtlib.ts:278 compileSpecSmtlib()](/src/domain/formal/smtlib.ts#L278)
+- Implementation: [identifiers.ts:91 sanitizeIdentifier()](/src/domain/formal/identifiers.ts#L91), [typed-smtlib.ts:40 compileTypedGroup()](/src/domain/formal/typed-smtlib.ts#L40), [signature.ts:14 expressionSymbolName()](/src/domain/formal/signature.ts#L14), [signature.ts:25 enumConstructorName()](/src/domain/formal/signature.ts#L25)
 - Test: [smtlib.test.ts:226 keeps assertion labels distinct for formerly colliding identifiers](/test/contract/smtlib.test.ts#L226)
 - Test (property): [logic.property.test.ts:459 sanitizer is injective for generated distinct raw identifiers](/test/property/logic.property.test.ts#L459), [logic.property.test.ts:470 sanitizeIdentifier is uniquely decodable, proving injectivity over full Unicode](/test/property/logic.property.test.ts#L470)
-- Example:
-```typescript
-const { sanitizeIdentifier } = await import("./src/domain/formal/smtlib.ts");
-sanitizeIdentifier("A_B"); //=> A_00005FB
-sanitizeIdentifier(""); //=> _
-sanitizeIdentifier("1X"); //=> _000031X
-```
 
 #### Requirement model
 
 ```alloy
-// --- Per-spec combination: deduplication, conflict detection, named assertions ---
-
-sig CombinedSpec {
-  specRef : one Spec,
-  includedClaims : set Claim,
-  excludedClaims : set Claim,
-  namedAssertions : Assertion -> one Claim
+abstract sig DeclarationKind {}
+one sig VariableDeclaration, FunctionDeclaration extends DeclarationKind {}
+sig Signature {}
+sig Declaration { owner : one Claim, symbol : one Symbol, kind : one DeclarationKind, signature : one Signature }
+abstract sig ConflictReason {}
+one sig VariableSortMismatch, FunctionSignatureMismatch, SymbolKindMismatch extends ConflictReason {}
+sig CompileInput {
+  claims : set Claim, retained : set Claim, excluded : set Claim, unresolved : set Claim,
+  oversized : one Bool, reusable : one Compilation
 }
-
-// Structure of a combined spec: its included and excluded claims partition
-// exactly the claims of the referenced spec, and named assertions map only to
-// included claims. Declaration agreement -- that no surviving symbol carries two
-// sorts or two kinds -- is modeled separately as the predicate combined_wellformed
-// so a check can derive it from the exclusion policy; here we fix only the
-// include/exclude/label structure.
-fact combined_structure {
-  all cs : CombinedSpec {
-    // Included and excluded claims partition exactly the claims of specRef.
-    cs.includedClaims + cs.excludedClaims =
-      { c : Claim | c.spec = cs.specRef }
-    no (cs.includedClaims & cs.excludedClaims)
-    // Named assertions map to included claims only
-    all a : cs.namedAssertions.Claim | a.sourceClaim in cs.includedClaims
-  }
+fun declarations[c : Claim] : set Declaration { owner.c }
+fun conflict_reason[a,b : Claim] : lone ConflictReason {
+  (some x : declarations[a], y : declarations[b] | x.symbol = y.symbol and x.kind = VariableDeclaration and
+    y.kind = VariableDeclaration and x.signature != y.signature) => VariableSortMismatch else
+  ((some x : declarations[a], y : declarations[b] | x.symbol = y.symbol and x.kind = FunctionDeclaration and
+    y.kind = FunctionDeclaration and x.signature != y.signature) => FunctionSignatureMismatch else
+  ((some x : declarations[a], y : declarations[b] | x.symbol = y.symbol and x.kind != y.kind) => SymbolKindMismatch else none))
 }
-
-// Same-claim same-name declarations survive validation only as residual
-// cross-kind sanitizer collisions (opposite kinds); same-kind same-name
-// duplicates are rejected earlier at validation.
-fact validated_same_claim_declarations {
-  all c : Claim, disj d1, d2 : Declaration |
-    (d1.declClaim = c and d2.declClaim = c and d1.declName = d2.declName)
-      implies d1.declKind != d2.declKind
+// Well-founded source-order selection: an excluded claim cannot poison later
+// declarations. This is a pure compiler contract, not first-wins concept identity.
+pred checked_compilation[g : CompileInput] {
+  g.retained in g.claims
+  all c : g.claims | (c in g.retained iff
+    no conflict_reason[c,c] and
+      (all p : g.retained & inputOrder/prevs[c] | no conflict_reason[p,c]))
+  g.excluded = g.claims - g.retained
+  g.unresolved = { c : g.retained | some c.^dependencies - g.retained }
+  g.reusable.included = g.retained - g.unresolved
+  g.reusable.symbols = { d : Declaration | d.owner in g.reusable.included }.symbol
+  reusable_compilation[g.reusable]
 }
-
-// Combined-artifact wellformedness: every pair of included declarations sharing
-// one sanitized name agrees on both declaration kind and signature, so no
-// surviving symbol is bound to two sorts or to both a variable and a function.
-// This is stated as a predicate rather than a fact so the model can represent a
-// malformed artifact; the checks below show the exclusion policy rules it out.
-pred combined_wellformed [cs : CombinedSpec] {
-  all disj d1, d2 : Declaration |
-    (d1.declClaim in cs.includedClaims and d2.declClaim in cs.includedClaims and
-     d1.declName = d2.declName) implies
-       (d1.declKind = d2.declKind and d1.declSig = d2.declSig)
+pred compile_group_valid[g : CompileInput] {
+  g.oversized = False
+  all disj a, b : g.claims | a.compileLabel != b.compileLabel and a.sanitizedLabel != b.sanitizedLabel
 }
-
-// A conflict: two declarations (possibly of the same claim when c1 = c2) share
-// a sanitized name but disagree on declaration kind or signature. Passing
-// c1 = c2 models a same-claim variable/function sanitizer collision.
-pred conflict_detected [c1, c2 : Claim, sp : Spec] {
-  c1.spec = sp and c2.spec = sp
-  some disj d1, d2 : Declaration |
-    d1.declClaim = c1 and d2.declClaim = c2 and
-    d1.declName = d2.declName and
-    (d1.declKind != d2.declKind or d1.declSig != d2.declSig)
+// Safety: compiler exclusions leave the retained signature conflict-free.
+assert compiler_exclusions_are_sound {
+  all g : CompileInput | checked_compilation[g] implies
+    all a,b : g.retained | no conflict_reason[a,b]
 }
-
-// The exclusion policy: every detected conflict has at least one of its two
-// claims excluded. For a same-claim conflict (c1 = c2) this reduces to
-// excluding that single claim.
-pred conflicts_excluded [cs : CombinedSpec] {
-  all c1, c2 : Claim |
-    conflict_detected[c1, c2, cs.specRef] implies
-      (c1 in cs.excludedClaims or c2 in cs.excludedClaims)
-}
-
-pred emit_merge_conflict [c1, c2 : Claim] {
-  Pipeline.phase = CompilationPh
-  conflict_detected[c1, c2, c1.spec]
-  some f : Finding |
-    f.findingType = MergeConflict and
-    f.severity = ErrorSev and
-    c1 + c2 in f.involvedClaims and
-    Pipeline.findings' = Pipeline.findings + f
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-// Excluding at least one claim from every detected conflict is enough to make
-// the combined artifact wellformed. The check encodes the requirement's
-// exclusion rule (FLA-SPEC-CONFLICT and its siblings) and confirms it yields a
-// symbol-consistent artifact.
-assert exclusion_implies_wellformed {
-  all cs : CombinedSpec |
-    conflicts_excluded[cs] implies combined_wellformed[cs]
-}
-
-// A same-claim sanitizer collision forces that claim's own exclusion once the
-// exclusion policy is applied.
-assert same_claim_collision_excluded {
-  all cs : CombinedSpec, c : Claim |
-    (conflicts_excluded[cs] and conflict_detected[c, c, cs.specRef])
-      implies c in cs.excludedClaims
-}
-
-// NOTE: two additional group-level rejections that also gate compilation --
-// duplicate claim identity [FLA-SPEC-DUPLICATE-CLAIM-ID] and oversized compile
-// groups [FLA-SPEC-GROUP-BOUNDS] -- are preflight failures rather than merge
-// exclusions. They emit a `logic.invalid_group` finding (the InvalidGroup
-// finding type) and skip the solver entirely; both are modeled as the events
-// duplicate_claim_id_rejected / oversized_group_rejected in the
-// [state machine and invariant checks](#state-machine-and-invariant-checks)
-// section below.
+// Later conflicting declarations are a typed-compiler boundary, not a permission
+// to change semantic identities. Exclusions and unresolved dependencies remain
+// explicit inputs to query eligibility rather than deliberate solver errors.
 ```
 
 ### Requirement: Surface Ambiguity Through Sample Clustering [FLA-CLUSTER-AMBIG]
-WHEN multiple formalization samples are produced for the same claim, THE spec-check tool SHALL compare the samples for semantic equivalence using solver-backed implication checks, select a stable interpretation only when it meets the configured stability threshold, and SHALL surface divergent interpretations as ambiguity findings with rationale.
+WHEN multiple candidate interpretations exist, THE spec-check tool SHALL compare compatible candidates under a satisfiable background and SHALL qualify stability by the frozen registry, sample count, and measured equivalence evidence.
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Motivation`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Failure Modes`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
+- [Design: Clustering and alignment](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#clustering-and-alignment)
 
 #### Scenario: Select Stable Interpretation [FLA-CLUSTER-STABLE]
-WHEN one equivalence cluster exceeds the configured stability threshold, THE spec-check tool SHALL select the highest-confidence sample from that cluster as the representative formalization for the claim.
-
-**Postcondition:** Downstream solver analysis uses one explicit representative interpretation with preserved clustering evidence.
+WHEN a nonvacuous equivalence cluster meets the configured stability threshold, THE spec-check tool SHALL select its highest-confidence candidate with deterministic input-index tie-breaking and SHALL preserve evidence and registry-dependent qualifications.
 
 ##### Evidence
-- Implementation: [clustering.ts:97 clusterFormalizationSamples()](/src/domain/formal/clustering.ts#L97)
-- Test: [clustering.test.ts:30 selects representative from stable cluster when threshold met](/test/contract/clustering.test.ts#L30)
+- Implementation: [typed-clustering.ts:15 clusterTypedSamples()](/src/domain/formal/typed-clustering.ts#L15)
+- Test: [semantic-clustering.test.ts:42 stable samples share declarations and preserve equivalence evidence](/test/contract/semantic-clustering.test.ts#L42), [semantic-clustering.test.ts:86 selects the largest nonvacuous cluster with deterministic quality tie-breaking](/test/contract/semantic-clustering.test.ts#L86)
 
 #### Scenario: Surface Divergent Interpretations [FLA-CLUSTER-DIVERGE]
-IF no equivalence cluster meets the configured stability threshold, THEN THE spec-check tool SHALL emit an ambiguity finding that preserves the distinct surviving interpretations for reviewer inspection.
+IF no compatible nonvacuous cluster meets the threshold, THEN THE spec-check tool SHALL preserve alternatives and SHALL label any diagnostic representative analysis interpretation-dependent rather than authoritative.
 
-**Postcondition:** Weak or unstable claim meaning becomes a surfaced finding instead of a hidden assumption.
+**Postcondition:** Selected artifacts retain single/stable/unstable assessment, sample count, selected input index and cluster membership on both source sides, including downstream evidence and comparisons. Single samples are not measured stable.
 
 ##### Evidence
-- Implementation: [clustering.ts:97 clusterFormalizationSamples()](/src/domain/formal/clustering.ts#L97)
-- Test: [clustering.test.ts:53 emits ambiguity finding when no cluster meets stability threshold](/test/contract/clustering.test.ts#L53), [clustering.test.ts:122 with two non-equivalent samples (sat both) produces two clusters](/test/contract/clustering.test.ts#L122)
+- Implementation: [typed-clustering.ts:15 clusterTypedSamples()](/src/domain/formal/typed-clustering.ts#L15), [interpretation-assessment.ts:8 assessRepresentative()](/src/domain/formal/interpretation-assessment.ts#L8)
+- Test: [semantic-clustering.test.ts:23 selection admission refusal issues no solver work and retains diagnostic scope](/test/contract/semantic-clustering.test.ts#L23), [semantic-clustering.test.ts:50 two impossible samples cannot establish stable agreement](/test/contract/semantic-clustering.test.ts#L50), [semantic-clustering.test.ts:86 selects the largest nonvacuous cluster with deterministic quality tie-breaking](/test/contract/semantic-clustering.test.ts#L86)
 
 #### Scenario: Inconclusive Implication Check Preserved [FLA-CLUSTER-INCON]
-IF the solver returns timeout or unknown for a pairwise implication check, THE spec-check tool SHALL record the inconclusive pair as evidence and SHALL NOT treat the pair as either equivalent or distinct.
+IF an equivalence query returns timeout, unknown, or error, THEN THE spec-check tool SHALL preserve that outcome without treating the pair as equivalent or proved distinct.
 
-**Postcondition:** Inconclusive solver results do not corrupt cluster construction.
+**Postcondition:** Only an UNSAT sample premise is categorized as inconsistent. Unknown, timeout, and error premises are inconclusive; admission-skipped premises are unassessed. Dependent equivalence checks remain blocked scope rather than proof of inconsistency.
 
 ##### Evidence
-- Implementation: [clustering.ts:290 classifyImplication()](/src/domain/formal/clustering.ts#L290)
-- Test: [clustering.test.ts:79 records inconclusive pairwise result when z3 returns timeout](/test/contract/clustering.test.ts#L79)
+- Implementation: [typed-clustering.ts:15 clusterTypedSamples()](/src/domain/formal/typed-clustering.ts#L15)
+- Test: [semantic-clustering.test.ts:65 unknown background/premise checks remain inconclusive](/test/contract/semantic-clustering.test.ts#L65), [semantic-clustering.test.ts:73 reports %s sample premises without claiming more than the outcome](/test/contract/semantic-clustering.test.ts#L73)
 
 #### Scenario: Single Solver Command Per Implication Query [FLA-CLUSTER-QUERY]
-WHEN the spec-check tool constructs a pairwise implication query to test whether sample A entails sample B, THE query SHALL assert A's declarations and assertions as the premise, SHALL assert the negation of the conjunction of B's assertions (i.e., `(assert (not (and b1 b2 ...)))`) as the consequent test, and SHALL contain exactly one `(check-sat)` command at the end. A result of `unsat` means A entails B; a result of `sat` means A does not entail B.
-
-**Postcondition:** Each implication query produces exactly one solver result with unambiguous interpretation; the negation applies to the conjunction of all target assertions jointly.
+WHEN compatible satisfiable samples A and D are compared, THE spec-check tool SHALL emit one shared declaration signature and the formula `B and A and not(D)` with exactly one `check-sat` per implication script.
 
 ##### Evidence
-- Implementation: [clustering.ts:244 buildImplicationQuery()](/src/domain/formal/clustering.ts#L244)
-- Test: [implication-query.test.ts:20 contains exactly one (check-sat) command](/test/contract/implication-query.test.ts#L20), [implication-query.test.ts:31 does not directly assert right-side claim expressions](/test/contract/implication-query.test.ts#L31), [implication-query.test.ts:48 encodes implication as assert-left + negate-right](/test/contract/implication-query.test.ts#L48)
+- Implementation: [typed-clustering.ts:15 clusterTypedSamples()](/src/domain/formal/typed-clustering.ts#L15), [query-executor.ts:124 execute()](/src/domain/formal/query-executor.ts#L124)
+- Test: [semantic-clustering.test.ts:42 stable samples share declarations and preserve equivalence evidence](/test/contract/semantic-clustering.test.ts#L42), [implication-query.test.ts:20 contains exactly one (check-sat) command](/test/contract/implication-query.test.ts#L20), [implication-query.test.ts:31 does not directly assert right-side claim expressions](/test/contract/implication-query.test.ts#L31), [implication-query.test.ts:48 encodes implication as assert-left + negate-right](/test/contract/implication-query.test.ts#L48)
+
+#### Scenario: Impossible Samples Do Not Establish Stable Meaning [FLA-CLUSTER-VACUOUS]
+IF samples are inconsistent under the background, THEN THE spec-check tool SHALL identify their inconsistency separately and SHALL NOT use their vacuous mutual implication to claim stable intended meaning.
+
+##### Evidence
+- Implementation: [typed-clustering.ts:15 clusterTypedSamples()](/src/domain/formal/typed-clustering.ts#L15)
+- Test: [semantic-clustering.test.ts:50 two impossible samples cannot establish stable agreement](/test/contract/semantic-clustering.test.ts#L50)
+
+#### Scenario: Single Sample Does Not Establish Agreement [FLA-CLUSTER-SINGLE]
+WHEN only one valid sample exists, THE spec-check tool SHALL report a selected interpretation and sample count without claiming observed cross-sample stability.
+
+##### Evidence
+- Implementation: [typed-clustering.ts:15 clusterTypedSamples()](/src/domain/formal/typed-clustering.ts#L15)
+- Test: [semantic-clustering.test.ts:58 a single sample is selected rather than measured stable](/test/contract/semantic-clustering.test.ts#L58)
 
 #### Requirement model
 
 ```alloy
-// --- Clustering: equivalence via implication, stability, ambiguity ---
-
-// Two samples are semantically equivalent when each entails the other. An
-// implication query returns Unsat exactly when entailment holds (the negated
-// consequent is unsatisfiable under the premise), so mutual Unsat encodes
-// equivalence [FLA-CLUSTER-QUERY]. The domain fact clusters_respect_equivalence
-// forces equivalent samples to share a cluster.
-pred samples_equivalent [a, b : Sample] {
-  some ir1 : ImplicationResult | ir1.from = a and ir1.to = b and ir1.result = Unsat
-  some ir2 : ImplicationResult | ir2.from = b and ir2.to = a and ir2.result = Unsat
+fun sample_meaning[s : Sample] : set Valuation {
+  s.claim.modal = Permission => s.claim.guard & response[s] & s.claim.postcondition else
+  (s.claim.form != Refinement => s.claim.input & response[s] & s.claim.postcondition else
+    { v : Valuation | v not in s.claim.guard or v in response[s] & s.claim.postcondition })
 }
-
-pred cluster_stable [cl : Cluster] {
-  // Cluster has enough members to meet threshold
-  #cl.members >= 2
-  some cl.representative
+fun equivalent_class[s : Sample] : set Sample {
+  { t : s.*known_equivalence & Run.accepted | t.claim = s.claim and
+    (let B = { g : Group | t.claim in members[g] }.background |
+      some B & sample_meaning[t] and some B & sample_meaning[s] and
+        B & sample_meaning[t] = B & sample_meaning[s]) }
 }
-
-pred cluster_select_representative [c : Claim, cl : Cluster] {
-  // Guard: clustering phase, cluster is stable for this claim
-  Pipeline.phase = ClusteringPh
-  cluster_stable[cl]
-  cl.representative.claim = c
-  // Effect: representative selected for this claim
-  Pipeline.representatives' = Pipeline.representatives + (c -> cl.representative)
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
+// Mutual conclusive UNSAT observations are edges; unknown/skipped queries never
+// become equivalence edges. Transitive closure permits independently proved chains.
+fun known_equivalence : Sample -> Sample {
+  { s,t : Run.accepted | s.claim = t.claim and
+    (s = t or (some a,b : Run.persisted | a.kind = Implication and b.kind = Implication and
+      a.stage = ClusteringQueries and b.stage = ClusteringQueries and
+      a.premiseSample = s and a.conclusionSample = t and
+      b.premiseSample = t and b.conclusionSample = s and verdict[a] = Unsat and verdict[b] = Unsat)) }
 }
-
-pred cluster_divergent [c : Claim] {
-  // Guard: no stable cluster for this claim
-  Pipeline.phase = ClusteringPh
-  no cl : Cluster | cluster_stable[cl] and cl.representative.claim = c
-  // Effect: ambiguity finding emitted
-  some f : Finding |
-    f.findingType = Ambiguity and
-    f.severity = WarningSev and
-    c in f.involvedClaims and
-    Pipeline.findings' = Pipeline.findings + f
-  // No representative selected for this claim
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
+pred stable_sample[s : Sample] {
+  #ready_samples[s.claim] > 1
+  some equivalent_class[s]
+  (#equivalent_class[s]).mul[Config.thresholdDenominator] >=
+    (#ready_samples[s.claim]).mul[Config.thresholdNumerator]
 }
-
-// Inconclusive implication: pair neither equivalent nor proven distinct
-pred implication_inconclusive [a, b : Sample] {
-  some ir : ImplicationResult | ir.from = a and ir.to = b and ir.result in (Timeout + Unknown)
+pred preferred[s, t : Sample] {
+  s.confidence > t.confidence or (s.confidence = t.confidence and s.attempt in t.attempt.earlier)
 }
-
-// Safety: inconclusive checks do not corrupt cluster membership
-// (guaranteed by fact: clusters_respect_equivalence only uses Unsat results)
-assert inconclusive_no_cluster_corruption {
-  all disj a, b : Sample |
-    implication_inconclusive[a, b] implies not samples_equivalent[a, b]
+pred choose[c : Claim, s : Sample] {
+  Run.phase = Selecting and c in candidates and no c.(Run.selected)
+  { q : Query | q.stage = ClusteringQueries and c in q.owners } in Run.persisted + Run.skipped
+  s in ready_samples[c]
+  (some t : ready_samples[c] | stable_sample[t]) implies stable_sample[s]
+  no t : ready_samples[c] - s | (stable_sample[t] iff stable_sample[s]) and
+    (#equivalent_class[t] > #equivalent_class[s] or
+      (#equivalent_class[t] = #equivalent_class[s] and preferred[t, s]))
+  Run.selected' = Run.selected + c -> s
+  Run.phase' = Run.phase
+  Run.frozen' = Run.frozen
+  keep_attempts_except_selection
+  keep_queries
 }
-
-// Safety: each implication query produces exactly one result
-assert single_result_per_query {
-  all ir : ImplicationResult | one ir.result
-}
-
-// Safety: divergent claims surface ambiguity findings
-assert divergent_produces_finding {
-  always (all c : Claim |
-    cluster_divergent[c] implies
-      (some f : Pipeline.findings' | f.findingType = Ambiguity and c in f.involvedClaims))
-}
+// Safety: a singleton never establishes measured cross-sample stability.
+assert singleton_not_stable { always (all s : Run.accepted | one ready_samples[s.claim] implies not stable_sample[s]) }
 ```
 
 ### Requirement: Clustering Determinism And Symmetry [FLA-CLUSTER-PROPERTIES]
@@ -1191,7 +775,7 @@ WHEN sample A implies sample B and sample B implies sample A, THE spec-check too
 **Postcondition:** Mutual implication is correctly classified as equivalence.
 
 ##### Evidence
-- Implementation: [clustering.ts:313 buildEquivalenceClusters()](/src/domain/formal/clustering.ts#L313)
+- Implementation: [clustering.ts:319 buildEquivalenceClusters()](/src/domain/formal/clustering.ts#L319)
 - Test: [clustering.test.ts:101 with two equivalent samples (mutual unsat) produces single cluster](/test/contract/clustering.test.ts#L101)
 - Test (property): [logic.property.test.ts:492 cluster construction is deterministic and symmetric for mutual pairs](/test/property/logic.property.test.ts#L492)
 - Example:
@@ -1208,37 +792,21 @@ WHEN the same formalization samples and solver results are processed on two sepa
 **Postcondition:** Clustering is a deterministic function of its inputs.
 
 ##### Evidence
-- Implementation: [clustering.ts:313 buildEquivalenceClusters()](/src/domain/formal/clustering.ts#L313)
+- Implementation: [typed-clustering.ts:15 clusterTypedSamples()](/src/domain/formal/typed-clustering.ts#L15), [clustering.ts:319 buildEquivalenceClusters()](/src/domain/formal/clustering.ts#L319)
+- Test: [semantic-clustering.test.ts:86 selects the largest nonvacuous cluster with deterministic quality tie-breaking](/test/contract/semantic-clustering.test.ts#L86)
 - Test (property): [logic.property.test.ts:492 cluster construction is deterministic and symmetric for mutual pairs](/test/property/logic.property.test.ts#L492)
 
 #### Requirement model
 
 ```alloy
-// --- Clustering properties: symmetry and determinism ---
-// Symmetry follows from the domain fact clusters_respect_equivalence: whenever
-// two samples are equivalent, they share a cluster. Determinism -- the same
-// samples and solver results always yield the same clusters -- is a relation
-// between two independent runs, which a single-instance Alloy assertion cannot
-// express; it is verified by the property-based test cited in the evidence. The
-// assertion available here is the structural consequence of a deterministic,
-// disjoint, non-empty clustering: distinct clusters carry distinct member sets.
-
-// Symmetry: mutual implication places samples in the same cluster.
-assert symmetric_implication_same_cluster {
-  all disj a, b : Sample, cl : Cluster |
-    (samples_equivalent[a, b] and a in cl.members) implies b in cl.members
-}
-
-// Distinct clusters have distinct member sets -- two cluster identities never
-// collapse to the same membership -- which follows from disjoint, non-empty
-// clusters and is the structural signature of deterministic clustering.
-assert clusters_have_distinct_members {
-  all disj cl1, cl2 : Cluster | cl1.members != cl2.members
-}
+// Deterministic tie-breaking additionally uses immutable attempt input order.
+// Two-run serialization is an implementation-test boundary, not cluster identity.
+// Safety: same finite meanings form symmetric equivalence classes.
+assert equivalence_symmetric { always (all s, t : Run.accepted | t in equivalent_class[s] iff s in equivalent_class[t]) }
 ```
 
 ### Requirement: Run Per-Spec Combined Solver Analysis [FLA-RUN-LOGIC]
-WHEN formal artifacts are available, THE spec-check tool SHALL group representative spec-derived claims by merged capability analysis unit, SHALL compile each group into a single combined SMT-LIB file with named assertions, SHALL invoke Z3 per merged capability group using a two-phase approach (Phase 1: satisfiability check only; Phase 2: re-invoke with unsat-core support only when contradiction is detected), and SHALL classify contradictions with severity derived from the highest-obligation claim in the unsat core.
+WHEN static semantic artifacts are available, THE spec-check tool SHALL analyze each merged capability under explicit background premises and separate mandatory, advisory, permission, and scenario tracks with valuation-based result meanings.
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`
@@ -1246,195 +814,101 @@ WHEN formal artifacts are available, THE spec-check tool SHALL group representat
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
 - `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Quality Attributes`
 - `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Interaction Protocols`
+- [Design: Static query contracts](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#static-query-contracts)
 
 #### Scenario: Report Contradiction With Unsat-Core Identification [FLA-LOGIC-CORE]
-WHEN a per-merged-capability combined query returns unsat, THE spec-check tool SHALL parse the unsat core to identify the specific conflicting claims, SHALL report a `logic.contradiction` finding referencing those claims, and SHALL derive severity from the highest-obligation claim in the core (mandatory → error, advisory → warning, informational → info).
-
-**Postcondition:** Reviewers can identify which specific claims within a merged capability view are mutually contradictory.
+WHEN `B and C` is UNSAT after a satisfiable background check, THE spec-check tool SHALL report a mandatory `logic.contradiction` and SHALL attempt a source-mapped sufficient unsat core without calling it minimal unless minimized.
 
 ##### Evidence
-- Implementation: [logic-analysis.ts:380 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L380)
-- Test: [logic-analysis.test.ts:122 mandatory contradiction (unsat) reported at severity error](/test/contract/logic-analysis.test.ts#L122), [logic-analysis.test.ts:267 unsat core identifies specific conflicting claims](/test/contract/logic-analysis.test.ts#L267)
-- Test (integration): [z3-smtlib.integration.test.ts:75 directly contradictory bare assertions produce UNSAT](/test/integration/z3-smtlib.integration.test.ts#L75)
+- Implementation: [static-analysis.ts:69 checkMandatoryBaseline()](/src/domain/formal/static-analysis.ts#L69), [static-context.ts:93 coreIds()](/src/domain/formal/static-context.ts#L93)
+- Test: [logic-analysis.test.ts:122 mandatory contradiction (unsat) reported at severity error](/test/contract/logic-analysis.test.ts#L122), [logic-analysis.test.ts:267 unsat core identifies specific conflicting claims](/test/contract/logic-analysis.test.ts#L267), [static-queries.test.ts:71 preserves original UNSAT when core extraction fails](/test/contract/static-queries.test.ts#L71)
 
 #### Scenario: Advisory-Only Core Reported At Lower Severity [FLA-LOGIC-ADVISORY]
-WHEN the unsat core contains only advisory or informational claims with no mandatory claims, THE spec-check tool SHALL report the contradiction at warning or info severity respectively.
-
-**Postcondition:** Contradictions among advisory claims are visible but clearly distinguished from mandatory violations.
+WHEN an advisory extension conflicts with the mandatory baseline or other advisories, THE spec-check tool SHALL report the advisory conflict at warning severity without declaring the mandatory model inconsistent because of the advisory addition.
 
 ##### Evidence
-- Implementation: [logic-analysis-sexpr.ts:402 deriveSeverityFromClaims()](/src/domain/formal/logic-analysis-sexpr.ts#L402), [logic-analysis-sexpr.ts:443 obligationToSeverity()](/src/domain/formal/logic-analysis-sexpr.ts#L443)
-- Test: [logic-analysis.test.ts:142 advisory-only contradiction (unsat) reported at severity warning](/test/contract/logic-analysis.test.ts#L142), [logic-analysis.test.ts:297 severity derived from highest-obligation in core (advisory when no mandatory in core)](/test/contract/logic-analysis.test.ts#L297)
-- Example:
-```typescript
-const { obligationToSeverity } = await import("./src/domain/formal/logic-analysis.ts");
-obligationToSeverity("mandatory"); //=> error
-obligationToSeverity("advisory"); //=> warning
-obligationToSeverity("informational"); //=> info
-```
+- Implementation: [static-analysis.ts:84 checkRuleResponses()](/src/domain/formal/static-analysis.ts#L84), [static-analysis.ts:161 checkAdvisories()](/src/domain/formal/static-analysis.ts#L161)
+- Test: [static-queries.test.ts:45 separates advisory and permission conflicts from mandatory satisfiability](/test/contract/static-queries.test.ts#L45)
 
 #### Scenario: Preserve Inconclusive Solver Result [FLA-LOGIC-TIMEOUT]
-IF the solver returns timeout or unknown for a per-merged-capability query, THEN THE spec-check tool SHALL preserve the inconclusive result as evidence and SHALL emit a `logic.inconclusive` finding at warning severity.
-
-**Postcondition:** Inconclusive logic results remain visible to reviewers and do not masquerade as success.
+IF a required static query returns timeout or unknown, THEN THE spec-check tool SHALL preserve it and SHALL emit a warning-scoped inconclusive outcome instead of a clean result.
 
 ##### Evidence
-- Implementation: [logic-analysis.ts:380 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L380)
-- Test: [logic-analysis.test.ts:162 timeout/unknown result preserved as inconclusive finding](/test/contract/logic-analysis.test.ts#L162)
+- Implementation: [static-context.ts:83 query()](/src/domain/formal/static-context.ts#L83), [query-executor.ts:124 execute()](/src/domain/formal/query-executor.ts#L124)
+- Test: [logic-analysis.test.ts:162 timeout/unknown result preserved as inconclusive finding](/test/contract/logic-analysis.test.ts#L162), [query-timeout-history.test.ts:16 releases slots after timeout, then preserves exact completed evidence: %s](/test/contract/query-timeout-history.test.ts#L16)
 
 #### Scenario: Sat Result Triggers Deeper Analysis [FLA-LOGIC-SAT]
-WHEN a per-merged-capability combined query returns sat, THE spec-check tool SHALL NOT emit a global contradiction finding for that merged capability, but SHALL proceed with pairwise guard-activation contradiction checks and completeness gap detection to identify conditional contradictions and unspecified states that the global satisfiability check cannot surface.
-
-**Postcondition:** A globally satisfiable merged capability is not assumed free of all issues; deeper conditional analysis follows.
+WHEN the mandatory global query is SAT, THE spec-check tool SHALL describe a shared satisfying valuation and SHALL plan bounded guard, activation, self-response, pair, coverage, permission, and scenario checks where their prerequisites hold.
 
 ##### Evidence
-- Implementation: [logic-analysis.ts:380 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L380)
-- Test: [logic-analysis.test.ts:226 sat result does not generate contradiction finding](/test/contract/logic-analysis.test.ts#L226)
+- Implementation: [static-analysis.ts:26 analyzeStaticGroup()](/src/domain/formal/static-analysis.ts#L26), [static-analysis.ts:69 checkMandatoryBaseline()](/src/domain/formal/static-analysis.ts#L69)
+- Test: [static-queries.test.ts:28 detects guarded/unconditional conflict and attributes only the sufficient core](/test/contract/static-queries.test.ts#L28), [static-queries.test.ts:90 every production query family agrees with the independent finite evaluator](/test/contract/static-queries.test.ts#L90)
 
 #### Scenario: Solver Error Produces Finding [FLA-LOGIC-ERROR]
-IF the solver emits error diagnostics (such as `(error ...)` lines in stdout) indicating malformed input, THEN THE spec-check tool SHALL emit a `logic.solver_error` finding at error severity referencing all claims in the affected merged capability group, and SHALL persist the solver input and output as evidence.
-
-**Postcondition:** Solver errors are surfaced as explicit findings rather than silently treated as successful analysis.
+IF Z3 emits an error diagnostic even alongside SAT or UNSAT, THEN THE spec-check tool SHALL classify the query as an error and SHALL preserve the exact script and captured outputs.
 
 ##### Evidence
-- Implementation: [logic-analysis.ts:380 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L380)
-- Test: [logic-analysis.test.ts:318 solver error produces logic.solver_error finding](/test/contract/logic-analysis.test.ts#L318)
+- Implementation: [z3.ts:128 runZ3Query()](/src/adapters/z3.ts#L128), [query-executor.ts:124 execute()](/src/domain/formal/query-executor.ts#L124)
+- Test: [logic-analysis.test.ts:318 solver error produces logic.solver_error finding](/test/contract/logic-analysis.test.ts#L318), [static-semantics.oracle.test.ts:30 rejects a duplicated declaration despite a printed unsat verdict](/test/oracle/static-semantics.oracle.test.ts#L30)
+
+#### Scenario: Inconsistent Background Blocks Favorable Conclusions [FLA-LOGIC-BACKGROUND]
+IF the background is UNSAT, THEN THE spec-check tool SHALL report inconsistent premises and SHALL block dependent favorable coverage, implication, stability, and feasibility conclusions.
+
+##### Evidence
+- Implementation: [static-analysis.ts:59 checkBackground()](/src/domain/formal/static-analysis.ts#L59), [static-context.ts:120 blockDependent()](/src/domain/formal/static-context.ts#L120), [typed-clustering.ts:15 clusterTypedSamples()](/src/domain/formal/typed-clustering.ts#L15)
+
+#### Scenario: Failed Core Extraction Preserves Original Outcome [FLA-LOGIC-CORE-FAIL]
+IF an auxiliary core query fails after an UNSAT primary query, THEN THE spec-check tool SHALL preserve both executions and the original UNSAT outcome with attribution explicitly unavailable.
+
+##### Evidence
+- Implementation: [static-analysis.ts:69 checkMandatoryBaseline()](/src/domain/formal/static-analysis.ts#L69), [static-context.ts:93 coreIds()](/src/domain/formal/static-context.ts#L93)
+- Test: [static-queries.test.ts:71 preserves original UNSAT when core extraction fails](/test/contract/static-queries.test.ts#L71)
 
 #### Requirement model
 
 ```alloy
-// --- Solver analysis: two-phase approach with severity derivation ---
-// Severity is derived from the highest-obligation claim in the unsat core via
-// the shared obligationToSeverity function (defined with the domain vocabulary).
-
-// Per-spec solver query result
-sig SpecQueryResult {
-  querySpec : one Spec,
-  globalResult : one SolverResult,
-  unsatCore : set Claim
+pred query_enabled[q : Query] {
+  ((Run.phase = Selecting and q.stage = ClusteringQueries) or (Run.phase = Analyzing and q.stage = AnalysisQueries))
+  q not in Run.issued + Run.skipped
+  q.group in Run.frozen
+  q.owners in candidates
+  q.stage = AnalysisQueries implies q.owners in (Run.selected).Sample
+  q.premiseSample + q.conclusionSample in Run.accepted
+  q.prerequisites in Run.persisted
+  all p : q.satPrerequisites | verdict[p] = Sat
+  q.bytesWithinBound = True and q.concurrencyAdmitted = True
+  q.pairWithinBudget = True
+  checked_compilation[q.compilation]
+  compile_group_valid[q.compilation]
+  q.compilation.claims = candidates & members[q.group]
+  q.owners in q.compilation.reusable.included
+  q.family in q.compilation.reusable.included
+  q.observed = Sat implies some formula[q]
+  q.observed = Unsat implies no formula[q]
+  q.kind not in Background + AuxiliaryCore implies
+    some p : q.satPrerequisites | p.kind = Background and p.group = q.group
+  q.kind in Activation + SelfResponse implies
+    some p : q.satPrerequisites | p.kind = Guard and p.first = q.first
+  q.kind = PairConflict implies
+    some p : q.satPrerequisites | p.kind = PairGuard and p.first = q.first and p.second = q.second
+  q.kind = Implication implies
+    some p : q.satPrerequisites | p.kind = PremiseCheck and p.premise = q.premise and p.group = q.group
+  q.kind in Coverage + PermissionQuery + PositiveExample + NegativeExample implies
+    some p : q.satPrerequisites | p.kind = Global and p.group = q.group
+  q.kind = PermissionQuery implies q.first.modal = Permission
+  q.kind = AdvisoryQuery implies q.first.modal = Advisory
+  q.kind = PositiveExample implies q.first.form = Example
+  q.kind = NegativeExample implies q.first.form = ProhibitedExample
 }
-
-// Unsat core only populated when result is Unsat
-fact unsat_core_constraint {
-  all sqr : SpecQueryResult |
-    sqr.globalResult != Unsat implies no sqr.unsatCore
-  all sqr : SpecQueryResult |
-    sqr.globalResult = Unsat implies some sqr.unsatCore
-  all sqr : SpecQueryResult |
-    sqr.unsatCore in { c : Claim | c.spec = sqr.querySpec }
+// Outcome projections distinguish errors/inconclusiveness from clean results.
+fun contradictions : set Query { { q : Run.persisted | q.kind in Global + Activation + PairConflict and verdict[q] = Unsat } }
+fun inconclusive : set Query { { q : Run.persisted | verdict[q] in Unknown + Timeout + SolverError } }
+fun favorable : set Query { { q : Run.persisted | q.kind in Coverage + Implication and verdict[q] = Unsat and
+  some q.group.background and no q.owners & interpretation_dependent and all p : q.satPrerequisites | verdict[p] = Sat } }
+fun interpretation_dependent : set Claim {
+  { c : candidates | some c.(Run.selected) and #ready_samples[c] > 1 and not stable_sample[c.(Run.selected)] }
 }
-
-pred solver_reports_contradiction [sqr : SpecQueryResult] {
-  // Guard: analysis phase, global result is unsat
-  Pipeline.phase = AnalysisPh
-  sqr.globalResult = Unsat
-  // Effect: contradiction finding with severity from max obligation in core
-  some f : Finding {
-    f.findingType = Contradiction
-    f.severity = obligationToSeverity[maxObligation[sqr.unsatCore]]
-    f.involvedClaims = sqr.unsatCore
-    Pipeline.findings' = Pipeline.findings + f
-  }
-  Pipeline.evidence' = Pipeline.evidence + sqr.querySpec
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-pred solver_inconclusive [sqr : SpecQueryResult] {
-  // Guard: analysis phase, timeout or unknown
-  Pipeline.phase = AnalysisPh
-  sqr.globalResult in (Timeout + Unknown)
-  // Effect: inconclusive finding at warning severity
-  some f : Finding {
-    f.findingType = Inconclusive
-    f.severity = WarningSev
-    f.involvedClaims = { c : Claim | c.spec = sqr.querySpec }
-    Pipeline.findings' = Pipeline.findings + f
-  }
-  Pipeline.evidence' = Pipeline.evidence + sqr.querySpec
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-pred solver_sat_deeper [sqr : SpecQueryResult] {
-  // Guard: analysis phase, global result is sat
-  Pipeline.phase = AnalysisPh
-  sqr.globalResult = Sat
-  // Effect: no global contradiction, proceed to deeper analysis
-  Pipeline.findings' = Pipeline.findings  // no new contradiction finding
-  Pipeline.evidence' = Pipeline.evidence + sqr.querySpec
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-pred solver_error_found [sqr : SpecQueryResult] {
-  // Guard: solver emits error diagnostics
-  Pipeline.phase = AnalysisPh
-  sqr.globalResult = SolverError
-  // Effect: solver_error finding at error severity
-  some f : Finding {
-    f.findingType = SolverErrType
-    f.severity = ErrorSev
-    f.involvedClaims = { c : Claim | c.spec = sqr.querySpec }
-    Pipeline.findings' = Pipeline.findings + f
-  }
-  Pipeline.evidence' = Pipeline.evidence + sqr.querySpec
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-// Safety: severity correctly derived from highest obligation in unsat core
-assert contradiction_severity_correct {
-  always (all sqr : SpecQueryResult |
-    solver_reports_contradiction[sqr] implies
-      (some f : Pipeline.findings' - Pipeline.findings |
-        f.findingType = Contradiction and
-        f.severity = obligationToSeverity[maxObligation[sqr.unsatCore]]))
-}
-
-// Safety: advisory-only cores never produce error severity
-assert advisory_only_not_error {
-  always (all sqr : SpecQueryResult |
-    (solver_reports_contradiction[sqr] and
-     no c : sqr.unsatCore | c.obligation = Mandatory)
-    implies
-      (all f : Pipeline.findings' - Pipeline.findings |
-        f.findingType = Contradiction implies f.severity != ErrorSev))
-}
-
-// Safety: sat result never produces global contradiction finding
-assert sat_no_global_contradiction {
-  always (all sqr : SpecQueryResult |
-    solver_sat_deeper[sqr] implies
-      no f : Pipeline.findings' - Pipeline.findings | f.findingType = Contradiction)
-}
-
-// Safety: inconclusive results never masquerade as success
-assert inconclusive_never_silent {
-  always (all sqr : SpecQueryResult |
-    solver_inconclusive[sqr] implies
-      some f : Pipeline.findings' - Pipeline.findings | f.findingType = Inconclusive)
-}
-
-// Safety: solver errors are surfaced explicitly
-assert solver_error_surfaced {
-  always (all sqr : SpecQueryResult |
-    solver_error_found[sqr] implies
-      some f : Pipeline.findings' - Pipeline.findings |
-        f.findingType = SolverErrType and f.severity = ErrorSev)
-}
+fun temp_cleanup_warnings : set Attempt { { a : Run.settled | a.cleanupFails = True } }
 ```
 
 ### Requirement: Group Specs-Forward Logic By Merged Capability [FLA-GROUP-MERGED]
@@ -1453,8 +927,8 @@ WHEN one capability has finalized-plus-delta inputs that merge into one active c
 **Postcondition:** Base and delta files for the same capability are no longer analyzed as separate solver groups.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345)
-- Test: [pipeline-helpers.test.ts:77 produces one logic group per non-empty merged capability with no omissions](/test/contract/pipeline-helpers.test.ts#L77), [merge-logic-routing.test.ts:35 runs one logic group per merged capability and detects contradictions in one run](/test/contract/merge-logic-routing.test.ts#L35)
+- Implementation: [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365)
+- Test: [pipeline-helpers.test.ts:86 produces one logic group per non-empty merged capability with no omissions](/test/contract/pipeline-helpers.test.ts#L86), [merge-logic-routing.test.ts:35 runs one logic group per merged capability and detects contradictions in one run](/test/contract/merge-logic-routing.test.ts#L35)
 
 #### Scenario: Synthetic Logical Key Drives Artifact Naming [FLA-GROUP-LOGICAL]
 WHEN the spec-check tool persists solver artifacts or reports for a merged capability logic group, THE spec-check tool SHALL derive those artifact names from the merged capability `logicalFile` key rather than from the original base or delta source file paths.
@@ -1462,8 +936,8 @@ WHEN the spec-check tool persists solver artifacts or reports for a merged capab
 **Postcondition:** Capability-scoped logic artifacts align with merged capability semantics while original claim provenance remains unchanged.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345), [pipeline-helpers.ts:403 sanitizeLogicalFileForArtifacts()](/src/cli/pipeline-helpers.ts#L403), [logic-analysis.ts:414 artifactBase computation in analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L414)
-- Test: [pipeline-helpers.test.ts:126 groups by Claim.capability instead of provenance.file](/test/contract/pipeline-helpers.test.ts#L126), [merge-logic-routing.test.ts:57 writes logic artifacts under synthetic merged logicalFile artifact key](/test/contract/merge-logic-routing.test.ts#L57)
+- Implementation: [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365), [pipeline-helpers.ts:422 sanitizeLogicalFileForArtifacts()](/src/cli/pipeline-helpers.ts#L422), [logic-analysis.ts:389 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L389)
+- Test: [pipeline-helpers.test.ts:137 groups by Claim.capability instead of provenance.file](/test/contract/pipeline-helpers.test.ts#L137), [merge-logic-routing.test.ts:57 writes logic artifacts under synthetic merged logicalFile artifact key](/test/contract/merge-logic-routing.test.ts#L57)
 
 #### Scenario: Sanitized Logical Key Collision Aborts Pipeline [FLA-GROUP-COLLISION]
 IF two merged capability logical keys would sanitize to the same artifact-path key, THEN THE spec-check tool SHALL abort the pipeline before writing any logic artifacts.
@@ -1471,8 +945,8 @@ IF two merged capability logical keys would sanitize to the same artifact-path k
 **Postcondition:** Persisted solver evidence remains deterministic and collision-free.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:386 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L386), [pipeline-helpers.ts:403 sanitizeLogicalFileForArtifacts()](/src/cli/pipeline-helpers.ts#L403)
-- Test: [pipeline-helpers.test.ts:150 fails on sanitized logicalFile collisions](/test/contract/pipeline-helpers.test.ts#L150)
+- Implementation: [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365), [pipeline-helpers.ts:422 sanitizeLogicalFileForArtifacts()](/src/cli/pipeline-helpers.ts#L422)
+- Test: [pipeline-helpers.test.ts:162 fails on sanitized logicalFile collisions](/test/contract/pipeline-helpers.test.ts#L162)
 
 #### Scenario: Solver Grouping Uses Shared Key Helper [FLA-GROUP-SHARED]
 WHEN the spec-check tool groups claims for solver analysis, THE solver grouping path SHALL call the shared semantic key helper and SHALL NOT duplicate capability fallback logic locally.
@@ -1480,338 +954,126 @@ WHEN the spec-check tool groups claims for solver analysis, THE solver grouping 
 **Postcondition:** Any solver-specific filtering happens before grouping and is documented independently of the key function.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:356 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L356), [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185)
-- Test: [safety-liveness.invariant.test.ts:177 LIVE-11: if opencode responds with valid output, formalization completes](/test/invariant/safety-liveness.invariant.test.ts#L177)
+- Implementation: [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365), [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185)
+- Test: [safety-liveness.invariant.test.ts:355 LIVE-11: if opencode responds with valid output, formalization completes](/test/invariant/safety-liveness.invariant.test.ts#L355)
 - Test (property): [semantic-batching.property.test.ts:179 matches solver grouping after the same explicit filtering](/test/property/semantic-batching.property.test.ts#L179)
 
 #### Requirement model
 
 ```alloy
-// --- Merged capability grouping: logical keys and collision detection ---
-
-sig LogicalKey {
-  sanitizedForm : one LogicalKey    // self-referencing: the sanitized version
-}
-
-sig LogicalGroup {
-  groupCap : one Spec,              // the merged capability this group represents
-  logicalKey : one LogicalKey,      // derived from merged capability identity
-  groupClaims : set Claim           // claims in this group (spec-derived only)
-}
-
-// Invariant: one logic group per merged capability [FLA-GROUP-ONE]
-fact one_group_per_capability {
-  all disj lg1, lg2 : LogicalGroup | lg1.groupCap != lg2.groupCap
-}
-
-// Invariant: groups only contain claims from their capability
-fact group_claims_from_capability {
-  all lg : LogicalGroup | lg.groupClaims in { c : Claim | c.spec = lg.groupCap }
-}
-
-// Invariant: non-spec claims excluded from capability-grouped logic path
-fact non_spec_excluded {
-  all lg : LogicalGroup, c : lg.groupClaims | c.spec = lg.groupCap
-}
-
-// Invariant: logical key drives artifact naming (not source file)
-fact logical_key_drives_naming {
-  all lg : LogicalGroup | some lg.logicalKey.sanitizedForm
-}
-
-// Collision predicate: two groups sanitize to same key [FLA-GROUP-COLLISION]
-pred logical_key_collision {
-  some disj lg1, lg2 : LogicalGroup |
-    lg1.logicalKey.sanitizedForm = lg2.logicalKey.sanitizedForm
-}
-
-// Failure mode: collision aborts pipeline before writing artifacts
-pred collision_aborts_pipeline {
-  Pipeline.phase = CompilationPh
-  logical_key_collision
-  // Effect: abort immediately
-  Pipeline.phase' = AbortedPh
-  Pipeline.exitCode' = 2
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-}
-
-// Safety: collision always aborts (never silently overwrites)
-assert collision_implies_abort {
-  always (collision_aborts_pipeline implies Pipeline.phase' = AbortedPh)
-}
-
-// Safety: without collision, compilation phase does not abort from this path
-assert no_collision_no_grouping_abort {
-  always (
-    (Pipeline.phase = CompilationPh and not logical_key_collision)
-    implies not collision_aborts_pipeline)
-}
-
-// Safety: during compilation without a key collision, each merged capability
-// is represented by at most one logic group (the structural footprint of
-// "exactly one group per capability" from fact one_group_per_capability).
-// The eventual FORMATION of that group is the liveness property stated below
-// as merged_cap_group_formation; this assertion is its safety counterpart.
-assert group_formation_complete {
-  always (
-    (Pipeline.phase = CompilationPh and not logical_key_collision)
-    implies (all sp : Spec | lone { lg : LogicalGroup | lg.groupCap = sp }))
-}
+// Safety: one shared semantic key groups multi-file capability claims.
+assert key_group_parity { all a, b : eligible | key[a] = key[b] implies
+  (some g : Group | a + b in members[g]) }
 ```
 
 ### Requirement: Pairwise Guard-Activation Contradiction Checking [FLA-PAIRWISE]
-WHEN the global satisfiability check for a spec group returns sat, THE spec-check tool SHALL extract conditional assertions (implications of the form `(=> guard consequent)`), SHALL identify pairs from different claims, SHALL check each pair by forcing both guards active and asserting both consequents simultaneously, SHALL emit a `logic.conditional_contradiction` finding when the resulting query is unsatisfiable, and SHALL surface any pairwise `timeout` or `unknown` verdicts as one aggregated `logic.inconclusive` warning carrying counts and sampled claim IDs.
+WHEN prerequisite static queries permit co-activation analysis, THE spec-check tool SHALL select bounded pairs using typed dependencies and SHALL check guard coexistence before testing the full mandatory set under both guards.
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Failure Modes`
+- [Design: Static query contracts](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#static-query-contracts)
 
 #### Scenario: Conditional Contradiction Detected [FLA-PAIRWISE-CONTRA]
-WHEN two claims from the same spec have conditional assertions whose guards can coexist but whose consequents conflict (the combined query of both guards and both consequents is unsatisfiable), THE spec-check tool SHALL emit a `logic.conditional_contradiction` finding identifying both claims and their respective guards.
-
-**Postcondition:** Contradictions hidden by vacuous truth in the global check are surfaced with specific guard and claim evidence.
+WHEN `B and G_i and G_j` is SAT and adding `C` is UNSAT, THE spec-check tool SHALL report `logic.conditional_contradiction` with the selected activation and actual sufficient conflicting rules.
 
 ##### Evidence
-- Implementation: [logic-analysis-checks.ts:218 runPairwiseContradictionChecks()](/src/domain/formal/logic-analysis-checks.ts#L218), [logic-analysis-checks.ts:361 checkPairContradiction()](/src/domain/formal/logic-analysis-checks.ts#L361)
-- Test: [logic-analysis.test.ts:339 sat with conditional assertions from different claims triggers pairwise checks](/test/contract/logic-analysis.test.ts#L339)
-- Test (integration): [z3-smtlib.integration.test.ts:149 conditional contradiction detected by pairwise check (guards forced)](/test/integration/z3-smtlib.integration.test.ts#L149)
+- Implementation: [static-analysis.ts:109 checkMandatoryPairs()](/src/domain/formal/static-analysis.ts#L109), [static-context.ts:93 coreIds()](/src/domain/formal/static-context.ts#L93)
+- Test: [static-queries.test.ts:28 detects guarded/unconditional conflict and attributes only the sufficient core](/test/contract/static-queries.test.ts#L28), [static-queries.test.ts:38 detects three-rule conflicts through constraint dependency closure](/test/contract/static-queries.test.ts#L38)
 
 #### Scenario: Compatible Conditional Assertions Produce No Finding [FLA-PAIRWISE-COMPAT]
-WHEN two conditional assertions have guards that can coexist and consequents that are mutually satisfiable, THE spec-check tool SHALL NOT emit a pairwise contradiction finding for that pair.
-
-**Postcondition:** Compatible conditional rules do not produce false-positive contradiction findings.
+WHEN co-active guards and the mandatory constraints admit a shared valuation, THE spec-check tool SHALL omit a pair-conflict finding without claiming that every input in the guard region has a valid response.
 
 ##### Evidence
-- Implementation: [logic-analysis-checks.ts:361 checkPairContradiction()](/src/domain/formal/logic-analysis-checks.ts#L361)
+- Implementation: [static-analysis.ts:109 checkMandatoryPairs()](/src/domain/formal/static-analysis.ts#L109)
 - Test: [logic-analysis.test.ts:383 compatible conditional assertions produce no pairwise finding](/test/contract/logic-analysis.test.ts#L383)
 
 #### Scenario: Pairwise Check Bounded By Pair Count [FLA-PAIRWISE-BOUND]
-WHEN the number of candidate pairs exceeds the configured `--pair-budget` (default 200), THE spec-check tool SHALL check only up to the limit, SHALL cap pairwise Z3 fan-out at `PAIRWISE_SOLVER_CONCURRENCY` (`3`), and SHALL NOT block indefinitely on quadratic pair explosion. The `--pair-budget` controls pairwise bounds for both specs-forward guard-activation checks and code-backwards cross-side implication checks.
+WHEN candidate pairs exceed effective `pairBudget` with default 200, THE spec-check tool SHALL execute only the deterministic admitted prefix and SHALL report remaining scope while using the shared run-wide solver pool.
 
-**Postcondition:** Pairwise analysis completes in bounded time regardless of claim count, and with the one concurrent completeness query the per-group deeper-check solver peak remains `4` and the global peak remains bounded by group concurrency.
+**Postcondition:** A candidate is a pair surviving the conservative dependency-component filter. Examining an admitted candidate consumes one pair allowance before guard-feasibility/co-activation results; compatible, infeasible, and unestablished candidates still count. This is not a findings quota or an actual-script counter. Unissued co-activation/conflict plans are reported with prerequisite or admission reasons, compactly aggregated where needed. Advisory pair examinations have their own bounded prefix; all actual scripts additionally consume the shared script allowance.
 
 ##### Evidence
-- Implementation: [logic-analysis-checks.ts:218 runPairwiseContradictionChecks()](/src/domain/formal/logic-analysis-checks.ts#L218)
-- Test: [logic-analysis.test.ts:420 pairwise checks bounded by pair count limit](/test/contract/logic-analysis.test.ts#L420)
+- Implementation: [static-analysis.ts:109 checkMandatoryPairs()](/src/domain/formal/static-analysis.ts#L109), [query-executor.ts:124 execute()](/src/domain/formal/query-executor.ts#L124)
+- Test: [static-queries.test.ts:121 retains candidate pair examinations, including infeasible guards, and accounts for dependent checks](/test/contract/static-queries.test.ts#L121), [static-queries.test.ts:136 records the unissued conflict when co-activation is excluded or unknown](/test/contract/static-queries.test.ts#L136)
 
 #### Scenario: Severity Derived From Paired Claims [FLA-PAIRWISE-SEV]
-WHEN the spec-check tool emits a pairwise contradiction finding, THE severity SHALL be derived from the highest obligation level among the two conflicting claims (mandatory → error, advisory → warning, informational → info).
+WHEN a mandatory-track co-activation conflict is established, THE spec-check tool SHALL derive attribution from its actual sufficient core and SHALL report it as an error while advisory-track conflicts remain warnings.
 
-**Postcondition:** Pairwise contradiction severity is consistent with the obligation-aware severity model used by the global contradiction check.
+**Postcondition:** A multi-rule core is not falsely attributed only to the selected pair.
 
 ##### Evidence
-- Implementation: [logic-analysis-sexpr.ts:402 deriveSeverityFromClaims()](/src/domain/formal/logic-analysis-sexpr.ts#L402)
-- Test: [logic-analysis.test.ts:339 sat with conditional assertions from different claims triggers pairwise checks](/test/contract/logic-analysis.test.ts#L339)
+- Implementation: [static-analysis.ts:109 checkMandatoryPairs()](/src/domain/formal/static-analysis.ts#L109), [static-context.ts:93 coreIds()](/src/domain/formal/static-context.ts#L93)
+- Test: [static-queries.test.ts:28 detects guarded/unconditional conflict and attributes only the sufficient core](/test/contract/static-queries.test.ts#L28), [static-queries.test.ts:38 detects three-rule conflicts through constraint dependency closure](/test/contract/static-queries.test.ts#L38)
 
 #### Requirement model
 
 ```alloy
-// --- Pairwise guard-activation: conditional contradiction detection ---
-
-sig PairwiseCheck {
-  pairAssertion1 : one Assertion,
-  pairAssertion2 : one Assertion,
-  pairResult : one SolverResult
+// Pair candidates, issued scripts and findings are distinct budgets/sets.
+fun pair_candidates : set Query { { q : Query | q.kind = PairConflict } }
+fun skipped_pairs : set Query { pair_candidates & Run.skipped }
+// Safety: no pair-conflict execution precedes its SAT guard-coexistence query.
+assert pair_prerequisites {
+  always (all q : Run.issued | q.kind = PairConflict implies
+    all p : q.satPrerequisites | p in Run.persisted and verdict[p] = Sat)
 }
-
-// Pairwise checks involve conditional assertions from different claims
-fact pairwise_wellformed {
-  all pc : PairwiseCheck {
-    pc.pairAssertion1.kind = Conditional
-    pc.pairAssertion2.kind = Conditional
-    pc.pairAssertion1.sourceClaim != pc.pairAssertion2.sourceClaim
-    pc.pairAssertion1.sourceClaim.spec = pc.pairAssertion2.sourceClaim.spec
-  }
-}
-
-pred pairwise_contradiction [pc : PairwiseCheck] {
-  // Guard: analysis phase, guards coexist but consequents conflict (unsat)
-  Pipeline.phase = AnalysisPh
-  pc.pairResult = Unsat
-  // Effect: emit conditional_contradiction finding
-  let c1 = pc.pairAssertion1.sourceClaim, c2 = pc.pairAssertion2.sourceClaim |
-    some f : Finding {
-      f.findingType = ConditionalContradiction
-      f.severity = obligationToSeverity[maxObligation[c1 + c2]]
-      f.involvedClaims = c1 + c2
-      Pipeline.findings' = Pipeline.findings + f
-    }
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-pred pairwise_compatible [pc : PairwiseCheck] {
-  // Guard: consequents are mutually satisfiable (sat)
-  Pipeline.phase = AnalysisPh
-  pc.pairResult = Sat
-  // Effect: no finding emitted
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-// Safety: compatible pairs never produce false-positive contradiction findings
-assert compatible_no_false_positive {
-  always (all pc : PairwiseCheck |
-    pairwise_compatible[pc] implies
-      Pipeline.findings' = Pipeline.findings)
-}
-
-// Safety: pairwise severity consistent with obligation model
-assert pairwise_severity_correct {
-  always (all pc : PairwiseCheck |
-    pairwise_contradiction[pc] implies
-      (some f : Pipeline.findings' - Pipeline.findings |
-        f.findingType = ConditionalContradiction and
-        f.severity = obligationToSeverity[maxObligation[
-          pc.pairAssertion1.sourceClaim + pc.pairAssertion2.sourceClaim]]))
-}
-
-// Liveness: pairwise analysis terminates (bounded by pair budget)
-// The budget is a finite natural number, and each check consumes one unit.
-// This is not modeled as a temporal property since the budget is static.
 ```
 
 ### Requirement: Completeness Gap Detection [FLA-COMPLETENESS]
-WHEN the global satisfiability check for a spec group returns sat AND all assertions in the spec group are conditional (implications), THE spec-check tool SHALL negate all guards simultaneously and check satisfiability. IF the result is sat, THE tool SHALL emit a `logic.completeness_gap` warning finding indicating that there exist reachable states where no conditional rule applies and behavior is unspecified. IF the completeness query returns `timeout` or `unknown`, THE tool SHALL surface that outcome as one aggregated `logic.inconclusive` warning carrying counts and sampled claim IDs.
+WHEN an explicit coverage obligation identifies applicability predicate K and a behavior family with guards, THE spec-check tool SHALL search for `B and K and not(or guards)` and SHALL report its outcome as scoped guard coverage over valuations.
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
+- [Design: Static query contracts](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#static-query-contracts)
 
 #### Scenario: Gap Detected In All-Conditional Spec [FLA-COMPLETENESS-GAP]
-WHEN all assertions in a spec group are conditional implications and there exists a satisfying assignment where no guard holds, THE spec-check tool SHALL emit a `logic.completeness_gap` warning finding identifying the number of guards and the affected claim identifiers.
-
-**Postcondition:** Specifications with unguarded state gaps are surfaced for reviewer attention.
+WHEN the scoped coverage query is SAT, THE spec-check tool SHALL report `logic.completeness_gap` with a decoded uncovered valuation, applicability domain, behavior family, and included/excluded rule scope.
 
 ##### Evidence
-- Implementation: [logic-analysis-checks.ts:518 runCompletenessCheck()](/src/domain/formal/logic-analysis-checks.ts#L518)
-- Test: [logic-analysis.test.ts:446 completeness gap detected when all assertions are conditional](/test/contract/logic-analysis.test.ts#L446)
-- Test (integration): [z3-smtlib.integration.test.ts:173 completeness gap: all-conditional spec has unreachable states](/test/integration/z3-smtlib.integration.test.ts#L173)
+- Implementation: [static-analysis.ts:141 checkCoverage()](/src/domain/formal/static-analysis.ts#L141), [static-context.ts:105 witness()](/src/domain/formal/static-context.ts#L105)
+- Test: [static-queries.test.ts:53 records exact scoped coverage witness despite an unrelated invariant](/test/contract/static-queries.test.ts#L53)
 
 #### Scenario: No Gap When Ubiquitous Assertions Exist [FLA-COMPLETENESS-UBIQ]
-WHEN a spec group contains at least one unconditional (ubiquitous) assertion, THE spec-check tool SHALL skip the completeness gap check for that group.
+WHEN a group contains ubiquitous assertions unrelated to the selected behavior family, THE spec-check tool SHALL continue the scoped coverage query rather than suppress coverage for the entire group.
 
-**Postcondition:** Specs with ubiquitous rules that provide baseline coverage in all states do not produce spurious completeness gap findings.
+**Postcondition:** The historical unconditional-suppression behavior is intentionally replaced; a relevant ubiquitous behavior rule may cover its own family.
 
 ##### Evidence
-- Implementation: [logic-analysis-checks.ts:518 runCompletenessCheck()](/src/domain/formal/logic-analysis-checks.ts#L518)
-- Test: [logic-analysis.test.ts:484 completeness check skipped when ubiquitous assertions exist](/test/contract/logic-analysis.test.ts#L484)
+- Implementation: [static-analysis.ts:141 checkCoverage()](/src/domain/formal/static-analysis.ts#L141), [static-context.ts:105 witness()](/src/domain/formal/static-context.ts#L105)
+- Test: [static-queries.test.ts:53 records exact scoped coverage witness despite an unrelated invariant](/test/contract/static-queries.test.ts#L53)
 
 #### Scenario: Exhaustive Guards Produce No Gap Finding [FLA-COMPLETENESS-EXHAUST]
-WHEN the negation of all guards is unsatisfiable (the guards are exhaustive), THE spec-check tool SHALL NOT emit a completeness gap finding.
-
-**Postcondition:** Specifications whose conditional rules cover all reachable states are confirmed complete without false positives.
+WHEN the scoped coverage query is UNSAT under satisfiable premises, THE spec-check tool SHALL report no uncovered valuation in that scope without claiming response completeness or temporal reachability.
 
 ##### Evidence
-- Implementation: [logic-analysis-checks.ts:518 runCompletenessCheck()](/src/domain/formal/logic-analysis-checks.ts#L518)
-- Test: [logic-analysis.test.ts:516 exhaustive guards produce no completeness gap finding](/test/contract/logic-analysis.test.ts#L516)
-- Test (integration): [z3-smtlib.integration.test.ts:445 exhaustive guards leave no completeness gap](/test/integration/z3-smtlib.integration.test.ts#L445)
+- Implementation: [static-analysis.ts:141 checkCoverage()](/src/domain/formal/static-analysis.ts#L141)
+
+#### Scenario: Missing Coverage Expectation Is A Suggestion [FLA-COVERAGE-POTENTIAL]
+WHEN a guard-gap search has no explicit applicability expectation, THE spec-check tool SHALL label any result a potential gap for review rather than a proven completeness defect or missing idle behavior.
+
+##### Evidence
+- Implementation: [static-analysis.ts:141 checkCoverage()](/src/domain/formal/static-analysis.ts#L141)
+- Test: [static-queries.test.ts:64 missing coverage expectation yields a potential suggestion, not a completeness defect](/test/contract/static-queries.test.ts#L64)
+
+#### Scenario: Inconclusive Coverage Remains Visible [FLA-COVERAGE-UNKNOWN]
+IF coverage is skipped, blocked, timed out, or unknown, THEN THE spec-check tool SHALL record that scope as unestablished rather than exhaustive.
+
+##### Evidence
+- Implementation: [static-analysis.ts:141 checkCoverage()](/src/domain/formal/static-analysis.ts#L141), [static-context.ts:83 query()](/src/domain/formal/static-context.ts#L83), [static-context.ts:120 blockDependent()](/src/domain/formal/static-context.ts#L120)
+- Test: [static-queries.test.ts:81 reports script budget exhaustion and static guard vacuity explicitly](/test/contract/static-queries.test.ts#L81)
 
 #### Requirement model
 
 ```alloy
-// --- Completeness gap detection: conditional coverage analysis ---
-
-pred all_conditional [sp : Spec] {
-  all a : Assertion | a.sourceClaim.spec = sp implies a.kind = Conditional
-}
-
-pred has_unconditional [sp : Spec] {
-  some a : Assertion | a.sourceClaim.spec = sp and a.kind = Unconditional
-}
-
-// Gap check result for a spec group
-abstract sig GapResult {}
-one sig GapSat, GapUnsat extends GapResult {}
-
-sig GapCheck {
-  gapSpec : one Spec,
-  gapResult : one GapResult
-}
-
-pred completeness_gap_detected [gc : GapCheck] {
-  // Guard: analysis phase, all conditional, negated guards sat
-  Pipeline.phase = AnalysisPh
-  all_conditional[gc.gapSpec]
-  gc.gapResult = GapSat
-  // Effect: emit completeness_gap warning
-  some f : Finding {
-    f.findingType = CompletenessGap
-    f.severity = WarningSev
-    f.involvedClaims = { c : Claim | c.spec = gc.gapSpec }
-    Pipeline.findings' = Pipeline.findings + f
-  }
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-pred completeness_gap_skipped [sp : Spec] {
-  // Guard: spec has unconditional assertions
-  Pipeline.phase = AnalysisPh
-  has_unconditional[sp]
-  // Effect: no gap check, no finding
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-pred exhaustive_guards [gc : GapCheck] {
-  // Guard: all conditional, but negated guards unsat (exhaustive)
-  Pipeline.phase = AnalysisPh
-  all_conditional[gc.gapSpec]
-  gc.gapResult = GapUnsat
-  // Effect: no gap finding
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-// Safety: ubiquitous assertions skip gap check (no spurious gap findings)
-assert ubiquitous_no_spurious_gap {
-  always (all sp : Spec |
-    completeness_gap_skipped[sp] implies
-      no f : Pipeline.findings' - Pipeline.findings | f.findingType = CompletenessGap)
-}
-
-// Safety: exhaustive guards produce no gap finding
-assert exhaustive_no_gap {
-  always (all gc : GapCheck |
-    exhaustive_guards[gc] implies
-      no f : Pipeline.findings' - Pipeline.findings | f.findingType = CompletenessGap)
-}
-
-// Safety: gap detection requires all-conditional precondition
-assert gap_requires_all_conditional {
-  always (all gc : GapCheck |
-    completeness_gap_detected[gc] implies all_conditional[gc.gapSpec])
-}
+// Coverage quantifies only over the selected behavior family and applicability.
+// Unrelated unconditional rules do not erase uncovered valuations.
+fun gaps : set Query { { q : Run.persisted | q.kind = Coverage and q.explicitCoverage = True and verdict[q] = Sat } }
+fun potential_gaps : set Query { { q : Run.persisted | q.kind = Coverage and q.explicitCoverage = False and verdict[q] = Sat } }
+// Safety: a reported gap has an actual finite uncovered valuation.
+assert gaps_have_witnesses { always (all q : gaps | some formula[q]) }
 ```
 
 ### Requirement: Bounded Solver Timeouts [FLA-SOLVER-TIMEOUT]
@@ -1827,7 +1089,7 @@ WHEN the solver returns a definitive result (sat or unsat) within the per-query 
 **Postcondition:** Timely solver results are used normally.
 
 ##### Evidence
-- Implementation: [z3.ts:67 runZ3Query()](/src/adapters/z3.ts#L67)
+- Implementation: [z3.ts:128 runZ3Query()](/src/adapters/z3.ts#L128)
 - Test: [z3.test.ts:16 pipes SMT-LIB via stdin and captures stdout/stderr](/test/contract/z3.test.ts#L16), [z3.test.ts:37 classifies sat stdout as sat](/test/contract/z3.test.ts#L37), [z3.test.ts:53 classifies unsat stdout as unsat](/test/contract/z3.test.ts#L53)
 
 #### Scenario: Query Exceeds Timeout [FLA-TIMEOUT-EXCEED]
@@ -1836,76 +1098,66 @@ IF the solver does not return a result within the per-query timeout, THEN THE sp
 **Postcondition:** A single slow query does not block the entire solver analysis phase.
 
 ##### Evidence
-- Implementation: [z3.ts:88 runZ3Query()](/src/adapters/z3.ts#L88)
+- Implementation: [z3.ts:128 runZ3Query()](/src/adapters/z3.ts#L128)
 - Test: [z3.test.ts:99 returns timeout when process timed out](/test/contract/z3.test.ts#L99), [fault-injection.test.ts:26 classifies timedOut process as timeout regardless of signal](/test/contract/fault-injection.test.ts#L26)
 
 #### Requirement model
 
 ```alloy
-// --- Bounded solver timeouts: inconclusive classification ---
-
-// Safety: timeout is never classified as success (sat) or failure (unsat)
-// Timeout always produces an Inconclusive finding, never a Contradiction
-assert timeout_never_contradiction {
-  always (all sqr : SpecQueryResult |
-    (Pipeline.phase = AnalysisPh and sqr.globalResult = Timeout) implies
-      (solver_inconclusive[sqr] implies
-        no f : Pipeline.findings' - Pipeline.findings | f.findingType = Contradiction))
+// Terminal timeout is an external bounded-process observation; it is not SAT.
+// Event: persist one terminal query, including error/timeout and auxiliary work.
+pred persist[q : Query] {
+  Run.phase in Selecting + Analyzing and q in Run.issued - Run.persisted
+  q.writeFails = False
+  Run.persisted' = Run.persisted + q
+  Run.phase' = Run.phase
+  Run.frozen' = Run.frozen
+  keep_attempts
+  keep_queries_except_persistence
 }
-
-// Safety: timeout never blocks remaining analysis (pipeline continues)
-assert timeout_no_block {
-  always (all sqr : SpecQueryResult |
-    solver_inconclusive[sqr] implies Pipeline.phase' != AbortedPh)
-}
-
-// Liveness: every query eventually resolves (completes or times out)
-// Guaranteed by the timeout mechanism: no query runs longer than the budget.
+// Safety: timeout does not become a contradiction or favorable proof.
+assert timeouts_not_proofs { always (no { q : Run.persisted | verdict[q] = Timeout } & (contradictions + favorable)) }
 ```
 
 ### Requirement: Solver Evidence Persistence [FLA-SOLVER-PERSIST]
-WHEN the spec-check tool runs solver analysis, THE spec-check tool SHALL persist all solver inputs (combined per-spec SMT-LIB files) and outputs (stdout including unsat core, stderr, exit classification) verbatim under the output directory with one artifact set per spec group.
+WHEN a solver script executes, THE spec-check tool SHALL persist its exact commands, checked signature and assumptions, source attribution, captured stdout/stderr, solver identity/options, and terminal status under a stable query identifier.
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Quality Attributes`
+- [Design: Interface Contracts](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#interface-contracts)
 
 #### Scenario: Sat Result Persisted [FLA-PERSIST-SAT]
-WHEN a per-spec solver query returns sat, THE spec-check tool SHALL persist the combined SMT-LIB input file and the solver stdout/stderr.
+WHEN a query is SAT, THE spec-check tool SHALL preserve the executed script including `check-sat`, its outputs, and any separately executed witness/model script and decoding status.
 
-**Postcondition:** The satisfiable result is available for reviewer inspection.
+**Postcondition:** Value decoding requires an exact standalone top-level SAT verdict supporting LF or CRLF output. Missing/non-SAT verdicts, duplicate bindings, malformed scalar values, and unexpected symbols cannot become a complete witness. Completeness refers to the explicitly requested scalar names; partial and unavailable decoding remain distinct from complete assignment evidence. Raw stdout is preserved unchanged.
 
 ##### Evidence
-- Implementation: [logic-analysis.ts:380 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L380)
-- Test: [logic-analysis.test.ts:182 persists SMT-LIB input, stdout, stderr for each spec group](/test/contract/logic-analysis.test.ts#L182)
+- Implementation: [query-executor.ts:124 execute()](/src/domain/formal/query-executor.ts#L124), [model-values.ts:48 decodeResult()](/src/domain/formal/model-values.ts#L48), [static-context.ts:105 witness()](/src/domain/formal/static-context.ts#L105)
+- Test: [solver-decoding.test.ts:14 decodes exact requested assignments with %j lines and whitespace](/test/contract/solver-decoding.test.ts#L14), [solver-decoding.test.ts:28 rejects misleading/malformed values: %s](/test/contract/solver-decoding.test.ts#L28), [solver-decoding.test.ts:32 distinguishes partial values and exact requested subsets](/test/contract/solver-decoding.test.ts#L32), [solver-decoding.test.ts:46 preserves a SAT auxiliary outcome and raw CRLF bytes even when requested assignments are incomplete](/test/contract/solver-decoding.test.ts#L46)
 
 #### Scenario: Unsat Core Persisted [FLA-PERSIST-UNSAT]
-WHEN a per-spec solver query returns unsat, THE spec-check tool SHALL persist the combined SMT-LIB input file, the solver stdout (containing the unsat core), and the solver stderr.
-
-**Postcondition:** The contradictory assertion subset (unsat core) is available for reviewer inspection and maps back to specific claims via named assertion labels.
+WHEN a query is UNSAT, THE spec-check tool SHALL preserve the primary script and outputs plus every executed core-extraction script, output, and label mapping.
 
 ##### Evidence
-- Implementation: [logic-analysis.ts:380 analyzeSpecGroup()](/src/domain/formal/logic-analysis.ts#L380)
-- Test: [logic-analysis.test.ts:182 persists SMT-LIB input, stdout, stderr for each spec group](/test/contract/logic-analysis.test.ts#L182)
+- Implementation: [query-executor.ts:124 execute()](/src/domain/formal/query-executor.ts#L124), [static-context.ts:93 coreIds()](/src/domain/formal/static-context.ts#L93)
+- Test: [formal-preparation.test.ts:146 query preparation preserves exact script, evidence bytes, order and actual execution counts](/test/contract/formal-preparation.test.ts#L146)
+
+#### Scenario: Deeper And Failed Queries Are Persisted [FLA-PERSIST-ALL]
+WHEN clustering, activation, pair, coverage, advisory, permission, scenario, or comparison scripts execute, THE spec-check tool SHALL preserve each execution even if it errors, times out, is unknown, or fails auxiliary extraction.
+
+##### Evidence
+- Implementation: [query-executor.ts:124 execute()](/src/domain/formal/query-executor.ts#L124)
+- Test: [query-timeout-history.test.ts:16 releases slots after timeout, then preserves exact completed evidence: %s](/test/contract/query-timeout-history.test.ts#L16), [formal-preparation.test.ts:146 query preparation preserves exact script, evidence bytes, order and actual execution counts](/test/contract/formal-preparation.test.ts#L146)
+- Test (integration): [semantic-pipeline.integration.test.ts:40 runs the source pipeline with real Z3 and checksummed raw/query artifacts](/test/integration/semantic-pipeline.integration.test.ts#L40)
 
 #### Requirement model
 
 ```alloy
-// --- Solver evidence persistence: all inputs and outputs persisted ---
-
-// Safety: every solver analysis event persists evidence for the spec
-assert all_queries_persisted {
-  always (all sqr : SpecQueryResult |
-    (solver_reports_contradiction[sqr] or solver_inconclusive[sqr] or
-     solver_sat_deeper[sqr] or solver_error_found[sqr])
-    implies sqr.querySpec in Pipeline.evidence')
-}
-
-// Safety: unsat results always have a non-empty unsat core
-assert unsat_has_core {
-  all sqr : SpecQueryResult |
-    sqr.globalResult = Unsat implies some sqr.unsatCore
-}
+// Safety: completion binds every executed script, including failed auxiliaries.
+assert complete_requires_evidence { always (Run.phase = Complete implies Run.issued = Run.persisted) }
+// Safety: failed core extraction never erases a primary result.
+assert primary_outcome_retained { always (all q : Run.persisted | some q.auxiliaryOf implies q.auxiliaryOf in Run.persisted) }
 ```
 
 ### Requirement: Shared Semantic Logical-File Grouping [FLA-SEMANTIC-GROUPING]
@@ -1922,7 +1174,7 @@ WHEN a formalizable claim carries a capability that is present in the logical-fi
 **Postcondition:** The claim's semantic key equals the mapped `logicalFile` string exactly.
 
 ##### Evidence
-- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
+- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [grouping.ts:225 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L225)
 - Test: [semantic-grouping.test.ts:112 selects mapped, provenance, and synthetic fallback keys exactly](/test/contract/semantic-grouping.test.ts#L112)
 
 #### Scenario: Capability-Less Claim Groups By Provenance File [FLA-SEMGRP-PROVENANCE]
@@ -1931,7 +1183,7 @@ WHEN a formalizable claim has no capability, THE spec-check tool SHALL group tha
 **Postcondition:** The claim's semantic key equals its provenance file string exactly.
 
 ##### Evidence
-- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
+- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [grouping.ts:225 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L225)
 - Test: [semantic-grouping.test.ts:112 selects mapped, provenance, and synthetic fallback keys exactly](/test/contract/semantic-grouping.test.ts#L112)
 
 #### Scenario: Unmapped Capability Uses Synthetic Fallback [FLA-SEMGRP-FALLBACK]
@@ -1940,7 +1192,7 @@ WHEN a formalizable claim carries a capability that is absent from the logical-f
 **Postcondition:** Capability-bearing claims never fall back to provenance-file grouping merely because the map lacks an entry.
 
 ##### Evidence
-- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
+- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [grouping.ts:225 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L225)
 - Test: [semantic-grouping.test.ts:112 selects mapped, provenance, and synthetic fallback keys exactly](/test/contract/semantic-grouping.test.ts#L112)
 
 #### Scenario: Historical File Grouping Is Emergent Only [FLA-SEMGRP-EMERGENT]
@@ -1949,7 +1201,7 @@ WHEN the semantic keys of the input claims equal their provenance files, THE spe
 **Postcondition:** There is exactly one production grouping path; legacy-style grouping is an output equivalence, not a configuration.
 
 ##### Evidence
-- Implementation: [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
+- Implementation: [grouping.ts:225 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L225)
 - Test (property): [semantic-batching.property.test.ts:207 equals historical file grouping when semantic keys equal provenance files](/test/property/semantic-batching.property.test.ts#L207)
 
 #### Scenario: Requirements And Scenarios Share Grouping Semantics [FLA-SEMGRP-KINDS]
@@ -1958,7 +1210,7 @@ WHEN a logical group contains both requirement claims and scenario claims, THE s
 **Postcondition:** Requirement and scenario claims with equal semantic keys are never split into separate logical groups by kind.
 
 ##### Evidence
-- Implementation: [grouping.ts:208 isFormalizableClaim()](/src/domain/formal/grouping.ts#L208), [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
+- Implementation: [grouping.ts:208 isFormalizableClaim()](/src/domain/formal/grouping.ts#L208), [grouping.ts:225 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L225)
 - Test (integration): [semantic-batching.integration.test.ts:173 aligns merged grouping, provenance, bounds, prompt, cleanup, and evidence](/test/integration/semantic-batching.integration.test.ts#L173)
 
 #### Scenario: Grouping Map Covers All Eligible Capabilities [FLA-SEMGRP-COVERAGE]
@@ -1976,7 +1228,7 @@ WHEN solver grouping and formalization grouping process the same claims after th
 **Postcondition:** No key drift exists between formalization groups and solver groups.
 
 ##### Evidence
-- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224), [pipeline-helpers.ts:356 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L356)
+- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [grouping.ts:225 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L225), [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365)
 - Test (property): [semantic-batching.property.test.ts:179 matches solver grouping after the same explicit filtering](/test/property/semantic-batching.property.test.ts#L179)
 - Test (integration): [semantic-batching.integration.test.ts:173 aligns merged grouping, provenance, bounds, prompt, cleanup, and evidence](/test/integration/semantic-batching.integration.test.ts#L173)
 
@@ -1986,109 +1238,15 @@ WHEN the spec-check tool forms logical groups, THE groups SHALL be ordered by fi
 **Postcondition:** Identical eligible inputs always produce identically ordered groups and group members.
 
 ##### Evidence
-- Implementation: [grouping.ts:224 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L224)
+- Implementation: [grouping.ts:225 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L225)
 - Test (property): [semantic-batching.property.test.ts:155 groups every eligible claim exactly once in stable order](/test/property/semantic-batching.property.test.ts#L155), [semantic-batching.property.test.ts:340 repeats groups, chunks, context bytes, and hashes identically](/test/property/semantic-batching.property.test.ts#L340)
 
 #### Requirement model
 
 ```alloy
-// --- Shared semantic key: grouping properties and grouping-map authority ---
-
-// The shared key helper partitions claims into one group each. This restates
-// the domain fact groups_partition_by_key as a checkable assertion so the check
-// exhibits that the partition holds under the pipeline's grouping construction
-// [FLA-SEMGRP-COVERAGE].
-assert groupingPartitioned {
-  all c : Claim | one g : SemanticLogicalGroup | c in g.groupMembers
-}
-
-// Formalization and solver grouping share one key helper, so claims with equal
-// keys always land in the same group -- there is no key drift between the two
-// phases [FLA-SEMGRP-PARITY].
-assert parityBySharedKey {
-  all disj c1, c2 : Claim |
-    keyFor[c1, GroupingMap] = keyFor[c2, GroupingMap]
-    implies (some g : SemanticLogicalGroup | c1 + c2 in g.groupMembers)
-}
-
-// A capability-less claim keys by its provenance file regardless of whether it
-// is a requirement or a scenario: claim kind does not affect the key
-// [FLA-SEMGRP-KINDS, FLA-SEMGRP-PROVENANCE].
-assert kindIrrelevant {
-  all c : Claim, cp : ClaimProvenance |
-    (cp.claim = c and no cp.cap) implies keyFor[c, GroupingMap].fromProv = cp.provFile
-}
-
-// Every claim obtains exactly one deterministic key, including a claim whose
-// capability is unmapped (which keys to the synthetic fallback)
-// [FLA-SEMGRP-COVERAGE, FLA-SEMGRP-FALLBACK].
-assert fallbackTotal {
-  all c : Claim | one keyFor[c, GroupingMap]
-}
-
-// A merged capability spec records whether its requirements and scenarios are
-// present. The grouping map is built from these specs; each capability is
-// analyzed as one merged view, so capabilities are unique across specs.
-sig MergedSpec {
-  cap : one Capability,
-  reqs : one Presence,
-  scens : one Presence
-}
-
-fact capability_unique {
-  all disj s1, s2 : MergedSpec | s1.cap != s2.cap
-}
-
-// A spec is active for grouping when it contributes any claims (requirements or
-// scenarios); it is active for solver input when it contributes requirements.
-fun activeForGrouping : set MergedSpec {
-  { s : MergedSpec | s.reqs = SomeP or s.scens = SomeP }
-}
-fun activeForSolverInput : set MergedSpec {
-  { s : MergedSpec | s.reqs = SomeP }
-}
-
-// The logical-file map the pipeline builds: capability -> logical file.
-sig BuiltMap {
-  entries : Capability -> lone LogicalFile
-}
-
-// The following are conditions on a candidate map, stated as predicates (not
-// facts) so a check can demonstrate they follow from the map-builder contract
-// rather than being assumed of every map.
-
-// A domain assumption about inputs: any spec with scenarios also has
-// requirements.
-pred scenariosImplyRequirements {
-  all s : MergedSpec | s.scens = SomeP implies s.reqs = SomeP
-}
-
-// The map-builder contract: the built map covers exactly the
-// active-for-grouping capabilities.
-pred mapCoversActiveSpecs [m : BuiltMap] {
-  m.entries.LogicalFile = activeForGrouping.cap
-}
-
-// The grouping map is never narrower than the solver-input set, so solver
-// grouping never keys a capability the formalization map lacks.
-pred groupingMapCoversSolverInputs [m : BuiltMap] {
-  activeForSolverInput.cap in m.entries.LogicalFile
-}
-
-// Scenario-only specs (scenarios but no requirements) still receive a map
-// entry, so their claims group by logical file rather than provenance.
-pred scenarioOnlySpecsMapped [m : BuiltMap] {
-  all s : MergedSpec |
-    (s.scens = SomeP and s.reqs = NoneP)
-    implies s.cap in m.entries.LogicalFile
-}
-
-// Empty specs (no requirements and no scenarios) contribute no map entries.
-pred emptySpecsExcluded [m : BuiltMap] {
-  all s : MergedSpec |
-    (s.reqs = NoneP and s.scens = NoneP)
-    implies s.cap not in m.entries.LogicalFile
-}
+// The same key atom denotes the same exact string, even across origin kinds.
+// Safety: source identity does not depend on optional/duplicate display labels.
+assert source_indexes_unique { all disj a, b : Claim | a.index != b.index }
 ```
 
 ### Requirement: Deterministic Physical Sub-Batching [FLA-SUBBATCH]
@@ -2104,7 +1262,7 @@ WHEN `maxBatchSize` is `0` (an explicit opt-in, not the default), THE spec-check
 **Postcondition:** No physical sub-batching occurs, and the single chunk is unbounded in size.
 
 ##### Evidence
-- Implementation: [grouping.ts:283 splitPhysicalBatches()](/src/domain/formal/grouping.ts#L283)
+- Implementation: [grouping.ts:284 splitPhysicalBatches()](/src/domain/formal/grouping.ts#L284)
 - Test: [semantic-batching.test.ts:92 treats zero as unbounded and one as single-claim batching](/test/contract/semantic-batching.test.ts#L92), [semantic-grouping.test.ts:146 treats zero as unbounded, one as single-claim, and empty input as empty](/test/contract/semantic-grouping.test.ts#L146)
 - Test (property): [degradation.property.test.ts:106 maxBatchSize = MAX_SAFE_INTEGER and zero both yield a single chunk](/test/property/degradation.property.test.ts#L106)
 
@@ -2114,7 +1272,7 @@ WHEN `maxBatchSize` is not provided by CLI flag or config file, THE spec-check t
 **Postcondition:** Physical sub-batching is bounded by default; the unbounded single-chunk behavior requires an explicit `maxBatchSize` of `0`.
 
 ##### Evidence
-- Implementation: [formalize.ts:99 MAX_BATCH_SIZE_DEFAULT](/src/domain/formal/formalize.ts#L99), [formalize.ts:129 formalizeClaims()](/src/domain/formal/formalize.ts#L129), [grouping.ts:283 splitPhysicalBatches()](/src/domain/formal/grouping.ts#L283)
+- Implementation: [formalize.ts:102 MAX_BATCH_SIZE_DEFAULT](/src/domain/formal/formalize.ts#L102), [formalize.ts:132 formalizeClaims()](/src/domain/formal/formalize.ts#L132), [grouping.ts:284 splitPhysicalBatches()](/src/domain/formal/grouping.ts#L284)
 - Test: [semantic-batching.test.ts:106 caps an omitted maxBatchSize at the safe default of 32](/test/contract/semantic-batching.test.ts#L106)
 
 #### Scenario: Single-Claim Batches When Size One [FLA-SUBBATCH-ONE]
@@ -2123,7 +1281,7 @@ WHEN `maxBatchSize` is `1`, THE spec-check tool SHALL issue every first-sample p
 **Postcondition:** No multi-claim attached batches are issued.
 
 ##### Evidence
-- Implementation: [grouping.ts:283 splitPhysicalBatches()](/src/domain/formal/grouping.ts#L283), [formalize.ts:241 formalizePhysicalBatch()](/src/domain/formal/formalize.ts#L241)
+- Implementation: [grouping.ts:284 splitPhysicalBatches()](/src/domain/formal/grouping.ts#L284), [formalize.ts:256 formalizePhysicalBatch()](/src/domain/formal/formalize.ts#L256)
 - Test: [semantic-batching.test.ts:92 treats zero as unbounded and one as single-claim batching](/test/contract/semantic-batching.test.ts#L92), [semantic-grouping.test.ts:146 treats zero as unbounded, one as single-claim, and empty input as empty](/test/contract/semantic-grouping.test.ts#L146)
 
 #### Scenario: Stable Chunk Sizes [FLA-SUBBATCH-CHUNKS]
@@ -2132,7 +1290,7 @@ WHEN `maxBatchSize` is `5` and a logical group contains 12 claims, THE spec-chec
 **Postcondition:** Chunk sizes never exceed `maxBatchSize`, chunk sizes sum to the group size, and claim order is preserved.
 
 ##### Evidence
-- Implementation: [grouping.ts:283 splitPhysicalBatches()](/src/domain/formal/grouping.ts#L283)
+- Implementation: [grouping.ts:284 splitPhysicalBatches()](/src/domain/formal/grouping.ts#L284)
 - Test: [semantic-batching.test.ts:78 splits twelve claims into stable [5, 5, 2] batches](/test/contract/semantic-batching.test.ts#L78), [semantic-grouping.test.ts:135 stably slices twelve claims into batches of five without changing the key](/test/contract/semantic-grouping.test.ts#L135)
 - Test (property): [semantic-batching.property.test.ts:231 preserves sub-batch bounds, sum, key, order, ordinals, and termination](/test/property/semantic-batching.property.test.ts#L231)
 
@@ -2142,38 +1300,14 @@ IF `maxBatchSize`, `samplesPerClaim`, or `concurrency` is not a safe integer wit
 **Postcondition:** Negative, `NaN`, infinite, or fractional control values never reach grouping, sub-batching, or `mapBounded`.
 
 ##### Evidence
-- Implementation: [formalize.ts:202 validateControls()](/src/domain/formal/formalize.ts#L202), [grouping.ts:283 splitPhysicalBatches()](/src/domain/formal/grouping.ts#L283)
+- Implementation: [formalize.ts:217 validateControls()](/src/domain/formal/formalize.ts#L217), [grouping.ts:284 splitPhysicalBatches()](/src/domain/formal/grouping.ts#L284)
 - Test: [formalize.test.ts:265 validates controls and logical-file map values before effects](/test/contract/formalize.test.ts#L265), [semantic-batching-failures.test.ts:215 rejects %s=%s before adapter, filesystem, or worker effects](/test/contract/semantic-batching-failures.test.ts#L215), [semantic-grouping.test.ts:157 rejects invalid direct-call batch bounds instead of risking non-termination](/test/contract/semantic-grouping.test.ts#L157)
 
 #### Requirement model
 
 ```alloy
-// --- Deterministic physical sub-batching: claim partition within one group ---
-// Sub-batching slices a logical group into physical batches. The two facts
-// below capture the invariants the slicing must preserve, independent of the
-// numeric chunk bounds (which are a pure-function test obligation): every
-// eligible claim lands in exactly one physical batch, and a batch never spans
-// logical groups because slicing never changes a claim's semantic key.
-
-// Grouping plus sub-batching partition the eligible claim set across physical
-// batches: every claim belongs to some batch and no claim appears in two
-// [FLA-SEMANTIC-GROUPING, FLA-SUBBATCH].
-fact claims_partitioned_across_batches {
-  Claim in PhysicalBatch.claims
-  all disj b1, b2 : PhysicalBatch | no (b1.claims & b2.claims)
-}
-
-// A physical batch never spans logical groups [FLA-SUBBATCH].
-fact batches_stay_within_groups {
-  all b : PhysicalBatch | one g : SemanticLogicalGroup | b.claims in g.groupMembers
-}
-
-// A batch's claims all share one semantic key, so sub-batching preserves the
-// grouping key of every claim it slices.
-assert batches_within_one_group {
-  all b : PhysicalBatch, disj c1, c2 : b.claims |
-    keyFor[c1, GroupingMap] = keyFor[c2, GroupingMap]
-}
+// Safety: stable slices neither duplicate nor omit an admitted claim.
+assert batches_partition { all c : eligible | one b : Batch | c in b.claims }
 ```
 
 ### Requirement: File-Attached Batch Context Transport [FLA-ATTACH-TRANSPORT]
@@ -2189,7 +1323,7 @@ WHEN a first-sample physical batch contains two or more claims, THE spec-check t
 **Postcondition:** The prompt body contains no claim text; claim content travels only in the attached file.
 
 ##### Evidence
-- Implementation: [formalize.ts:241 formalizePhysicalBatch()](/src/domain/formal/formalize.ts#L241), [formalize.ts:312 formalizeAttachedBatch()](/src/domain/formal/formalize.ts#L312), [batch-transport.ts:219 buildBatchContextFile()](/src/domain/formal/batch-transport.ts#L219)
+- Implementation: [formalize.ts:256 formalizePhysicalBatch()](/src/domain/formal/formalize.ts#L256), [formalize.ts:327 formalizeAttachedBatch()](/src/domain/formal/formalize.ts#L327), [batch-transport.ts:222 buildBatchContextFile()](/src/domain/formal/batch-transport.ts#L222)
 - Test: [semantic-batching.test.ts:158 uses attached JSON for multi-claim batches and inline prompts for size one](/test/contract/semantic-batching.test.ts#L158)
 - Test (integration): [semantic-batching.integration.test.ts:173 aligns merged grouping, provenance, bounds, prompt, cleanup, and evidence](/test/integration/semantic-batching.integration.test.ts#L173)
 
@@ -2199,7 +1333,7 @@ WHEN a first-sample attempt covers exactly one claim, THE spec-check tool SHALL 
 **Postcondition:** Single-claim formalization behavior matches the existing inline path.
 
 ##### Evidence
-- Implementation: [formalize.ts:241 formalizePhysicalBatch()](/src/domain/formal/formalize.ts#L241), [formalize.ts:273 formalizeSingleClaim()](/src/domain/formal/formalize.ts#L273)
+- Implementation: [formalize.ts:256 formalizePhysicalBatch()](/src/domain/formal/formalize.ts#L256), [formalize.ts:288 formalizeSingleClaim()](/src/domain/formal/formalize.ts#L288)
 - Test: [semantic-batching.test.ts:158 uses attached JSON for multi-claim batches and inline prompts for size one](/test/contract/semantic-batching.test.ts#L158)
 - Test (property): [degradation.property.test.ts:90 fit check is bounded by the adapter byte limit and respects the boundary](/test/property/degradation.property.test.ts#L90)
 
@@ -2209,7 +1343,7 @@ WHEN the spec-check tool serializes a batch context file, THE output SHALL be by
 **Postcondition:** The SHA-256 context hash is reproducible from the serialized bytes.
 
 ##### Evidence
-- Implementation: [batch-transport.ts:270 serializeBatchContextFile()](/src/domain/formal/batch-transport.ts#L270), [batch-transport.ts:289 hashBatchContext()](/src/domain/formal/batch-transport.ts#L289)
+- Implementation: [batch-transport.ts:273 serializeBatchContextFile()](/src/domain/formal/batch-transport.ts#L273), [batch-transport.ts:292 hashBatchContext()](/src/domain/formal/batch-transport.ts#L292)
 - Test: [semantic-batching.test.ts:128 serializes deterministic UTF-8 context bytes with null IDs and verbatim paths](/test/contract/semantic-batching.test.ts#L128)
 - Test (property): [semantic-batching.property.test.ts:340 repeats groups, chunks, context bytes, and hashes identically](/test/property/semantic-batching.property.test.ts#L340)
 
@@ -2219,96 +1353,72 @@ WHEN an attached claim has no `claim.id`, THE spec-check tool SHALL serialize it
 **Postcondition:** Missing IDs are explicit in the context file and never fabricated.
 
 ##### Evidence
-- Implementation: [batch-transport.ts:219 buildBatchContextFile()](/src/domain/formal/batch-transport.ts#L219)
+- Implementation: [batch-transport.ts:222 buildBatchContextFile()](/src/domain/formal/batch-transport.ts#L222)
 - Test: [semantic-batching.test.ts:128 serializes deterministic UTF-8 context bytes with null IDs and verbatim paths](/test/contract/semantic-batching.test.ts#L128)
 
 #### Requirement model
 
 ```alloy
-// --- File-attached batch context transport: arity determines transport ---
-// Transport is a pure function of batch arity: a physical batch attaches a
-// context file exactly when it carries two or more claims, and a single-claim
-// batch stays inline. JSON shape and byte serialization are contract-test
-// obligations outside the model. Because only attached batches write a temp
-// context file, an inline batch has no temp-directory lifecycle at all.
-
-// A batch is Attached exactly when it carries two or more claims
-// [FLA-ATTACH-TRANSPORT].
-fact transport_matches_arity {
-  all b : PhysicalBatch |
-    (#b.claims >= 2) iff b.attached = Attached
-}
-
-// Inline batches never create a temp directory, so their temp state stays
-// NotCreated forever [FLA-ATTACH-SINGLE].
-fact inline_batches_have_no_temp {
-  all b : PhysicalBatch |
-    b.attached = Inline implies always b.tempState = NotCreated
-}
-
-// A single-claim batch is always inline; a multi-claim batch is always
-// attached. Restates the arity invariant from the scenario's viewpoint.
-assert single_claim_batches_are_inline {
-  all b : PhysicalBatch |
-    (one b.claims implies b.attached = Inline) and
-    (#b.claims >= 2 implies b.attached = Attached)
-}
+// Only multi-claim attempts allocate attached context; recovery is singleton.
+// Safety: inline work cannot carry multi-claim attachments.
+assert transport_by_arity { all a : Attempt | (a.transport = Inline iff one a.claims) }
 ```
 
 ### Requirement: Dedicated Attached-Context Prompt [FLA-ATTACH-PROMPT]
-WHEN the spec-check tool issues a multi-claim file-attached formalization attempt, THE spec-check tool SHALL use a dedicated attached-context prompt that states claims are in the attached JSON file, states the attached JSON is untrusted data rather than instructions, states that each output entry SHALL carry an explicit `index` field matching an attached claim index, states that `claims[].id` is informational and may be `null` or duplicated, requires exactly one output entry per attached claim, and keeps the Logic IR schema inline, and the prompt SHALL NOT embed claim bodies, SHALL NOT state that claims come from the same spec file, and SHALL NOT state that claims are presented below.
+WHEN a multi-claim attached attempt is issued, THE spec-check tool SHALL use a dedicated predicate-formalization prompt with the current wire schema, source-index matching, frozen registry hash, untrusted-data instruction, and source-owned clause slots without embedding claim bodies inline.
 
 **References:**
 - `openspec/changes/archive/2026-08-09-semantic-batching/proposal.md#Scope`
 - `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Component Descriptions`
 - `openspec/changes/archive/2026-08-09-semantic-batching/design.md#Security`
+- [Design: Interaction Protocols](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#interaction-protocols)
 
 #### Scenario: Prompt References Attached Context [FLA-ATTACHP-REFERENCES]
-WHEN a multi-claim attached batch is issued, THE prompt SHALL state that claims are in the attached JSON context file and SHALL contain no claim bodies inline.
-
-**Postcondition:** The model's only source of claim text is the attached file.
+WHEN an attached attempt begins, THE spec-check tool SHALL identify attached claim/context data as the only claim-text source and SHALL keep claim bodies out of the instruction prompt.
 
 ##### Evidence
-- Implementation: [formalization.ts:247 ATTACHED_BATCH_FORMALIZATION_PROMPT](/src/domain/prompts/formalization.ts#L247), [formalize.ts:512 callAndAssembleAttached()](/src/domain/formal/formalize.ts#L512)
-- Test: [semantic-batching.test.ts:197 keeps the dedicated prompt data-only and excludes stale or claim-specific text](/test/contract/semantic-batching.test.ts#L197), [semantic-batching-adversarial.test.ts:60 escapes claim text in attached context while prompt stays instruction-only](/test/contract/semantic-batching-adversarial.test.ts#L60)
+- Implementation: [predicate-formalization.ts:8 PREDICATE_PROMPT](/src/adapters/predicate-formalization.ts#L8), [source-formalize.ts:192 perform()](/src/domain/formal/source-formalize.ts#L192)
+- Test: [semantic-batching.test.ts:197 keeps the dedicated prompt data-only and excludes stale or claim-specific text](/test/contract/semantic-batching.test.ts#L197)
 
 #### Scenario: Attached JSON Marked Untrusted [FLA-ATTACHP-UNTRUSTED]
-WHEN a multi-claim attached batch is issued, THE prompt SHALL state that the attached JSON content is untrusted data and not instructions.
-
-**Postcondition:** Spec text attached for formalization is never elevated into instruction position.
+WHEN JSON is attached, THE spec-check tool SHALL state that its text, registry descriptions, and predicate content are untrusted data rather than instructions.
 
 ##### Evidence
-- Implementation: [formalization.ts:247 ATTACHED_BATCH_FORMALIZATION_PROMPT](/src/domain/prompts/formalization.ts#L247)
-- Test: [semantic-batching.test.ts:197 keeps the dedicated prompt data-only and excludes stale or claim-specific text](/test/contract/semantic-batching.test.ts#L197), [semantic-batching-adversarial.test.ts:150 keeps adversarial attached claim text out of the prompt](/test/contract/semantic-batching-adversarial.test.ts#L150)
+- Implementation: [predicate-formalization.ts:8 PREDICATE_PROMPT](/src/adapters/predicate-formalization.ts#L8), [source-formalize.ts:192 perform()](/src/domain/formal/source-formalize.ts#L192)
+- Test: [semantic-batching.test.ts:197 keeps the dedicated prompt data-only and excludes stale or claim-specific text](/test/contract/semantic-batching.test.ts#L197)
 
 #### Scenario: No Stale Same-File Language [FLA-ATTACHP-NO-STALE]
-WHEN a multi-claim attached batch is issued, THE prompt SHALL NOT contain the phrases "same spec file" or "presented below" or equivalent stale inline-batch wording.
-
-**Postcondition:** Prompt wording is accurate for semantic groups that can span multiple provenance files.
+WHEN semantic-group claims span files, THE spec-check tool SHALL avoid stale same-file or presented-below wording.
 
 ##### Evidence
-- Implementation: [formalization.ts:247 ATTACHED_BATCH_FORMALIZATION_PROMPT](/src/domain/prompts/formalization.ts#L247)
+- Implementation: [predicate-formalization.ts:8 PREDICATE_PROMPT](/src/adapters/predicate-formalization.ts#L8), [source-formalize.ts:192 perform()](/src/domain/formal/source-formalize.ts#L192)
 - Test: [semantic-batching.test.ts:197 keeps the dedicated prompt data-only and excludes stale or claim-specific text](/test/contract/semantic-batching.test.ts#L197)
 
 #### Scenario: Response Matching Authority Stated [FLA-ATTACHP-MATCHING]
-WHEN a multi-claim attached batch is issued, THE prompt SHALL state that each output entry must carry an explicit `index` field matching an attached claim index.
-
-**Postcondition:** Response-to-claim attribution is explicit; array position alone and `claim.id` are never authoritative.
+WHEN a batch is formalized, THE spec-check tool SHALL require exactly one entry per attached eligible index and SHALL state that display IDs and array position are not response-matching authority.
 
 ##### Evidence
-- Implementation: [formalization.ts:247 ATTACHED_BATCH_FORMALIZATION_PROMPT](/src/domain/prompts/formalization.ts#L247), [formalization-findings.ts:160 matchAttachedBatchResponse()](/src/domain/formal/formalization-findings.ts#L160)
-- Test: [semantic-batching.test.ts:197 keeps the dedicated prompt data-only and excludes stale or claim-specific text](/test/contract/semantic-batching.test.ts#L197)
-- Test (property): [formalization-matching.property.test.ts:161 envelope order and claim IDs cannot override explicit indexes](/test/property/formalization-matching.property.test.ts#L161)
+- Implementation: [predicate-formalization.ts:8 PREDICATE_PROMPT](/src/adapters/predicate-formalization.ts#L8), [source-formalize.ts:179 indexedEntries()](/src/domain/formal/source-formalize.ts#L179)
+- Test: [formalization-predicates.test.ts:84 uses a frozen registry for batched and additional samples](/test/contract/formalization-predicates.test.ts#L84)
+- Test (property): [formalization-matching.property.test.ts:160 on success the matched key set is exactly the claim index set](/test/property/formalization-matching.property.test.ts#L160)
 
 #### Scenario: Response Index Validated [FLA-ATTACHP-INDEX-VALID]
-IF a returned batch entry carries an `index` that is missing, duplicated, or does not match any attached claim index for that physical batch, or the number of returned entries differs from the attached claim count, THEN THE spec-check tool SHALL treat the response as a `schema_validation_error` failure and SHALL degrade to per-claim inline retry.
-
-**Postcondition:** Misattributed responses become detectable schema failures, never silent corruption.
+IF response indexes are missing, unknown, duplicated, or incomplete, THEN THE spec-check tool SHALL preserve the raw response and SHALL follow existing bounded schema-failure degradation without changing registry or source identity.
 
 ##### Evidence
-- Implementation: [formalization-findings.ts:160 matchAttachedBatchResponse()](/src/domain/formal/formalization-findings.ts#L160), [formalize.ts:619 acceptAttachedResponse()](/src/domain/formal/formalize.ts#L619)
-- Test: [semantic-batching.test.ts:220 degrades $name response indexes to inline claims](/test/contract/semantic-batching.test.ts#L220), [opencode.test.ts:271 rejects batch response with missing index](/test/contract/opencode.test.ts#L271)
-- Test (property): [formalization-matching.property.test.ts:130 response matching accepts exactly the attached index set](/test/property/formalization-matching.property.test.ts#L130)
+- Implementation: [source-formalize.ts:179 indexedEntries()](/src/domain/formal/source-formalize.ts#L179), [source-formalize.ts:132 recoverClaimSamples()](/src/domain/formal/source-formalize.ts#L132)
+- Test: [semantic-batching.test.ts:224 degrades $name response indexes to inline claims](/test/contract/semantic-batching.test.ts#L224)
+- Test (property): [formalization-matching.property.test.ts:133 envelope fails iff the entry count differs or an index is unsafe/unknown/duplicated](/test/property/formalization-matching.property.test.ts#L133)
+
+#### Requirement model
+
+```alloy
+// Explicit bindings model source-index authority. Concrete prompt bytes and
+// JSON serialization remain differential/contract-test boundaries.
+// Safety: indexes bound before acceptance.
+assert indexes_bound_before_acceptance { always (all s : Run.accepted |
+  s.attempt.boundIndexes[s.claim] = s.claim.index) }
+```
 
 ### Requirement: Temp Context File Lifecycle [FLA-TEMP-LIFECYCLE]
 WHILE a multi-claim attached batch is in flight on a handled execution path, THE spec-check tool SHALL manage the temp context file through the explicit lifecycle `not_created`, `dir_created`, `file_written`, `cleanup_succeeded`, or `cleanup_failed`, SHALL create the directory with `mkdtemp()` using the prefix `spec-check-batch-` separately from file writing, SHALL write the fixed filename `batch-context.json` with UTF-8 encoding, mode `0o600`, and exclusive flag `wx`, and SHALL attempt cleanup after success, graceful model failure, adapter-return failure, thrown adapter failure, and partial write failure when execution reaches lifecycle finalization. THE spec-check tool SHALL NOT claim a SIGINT or SIGTERM cleanup guarantee; process termination MAY leave temp artifacts, and the absent final manifest SHALL identify the run as incomplete.
@@ -2324,9 +1434,9 @@ WHEN an attached batch attempt completes successfully, THE spec-check tool SHALL
 **Postcondition:** No temp context directory survives a successful attempt.
 
 ##### Evidence
-- Implementation: [formalize.ts:415 runAttachedAttempt()](/src/domain/formal/formalize.ts#L415), [batch-transport.ts:451 cleanupBatchContext()](/src/domain/formal/batch-transport.ts#L451)
+- Implementation: [formalize.ts:430 runAttachedAttempt()](/src/domain/formal/formalize.ts#L430), [batch-transport.ts:423 cleanupBatchContext()](/src/domain/formal/batch-transport.ts#L423)
 - Test: [semantic-batching-failures.test.ts:400 removes the temporary context after a successful attached response](/test/contract/semantic-batching-failures.test.ts#L400), [batch-evidence.test.ts:121 records complete pointer-only evidence, cleans up, and persists no claim text](/test/contract/batch-evidence.test.ts#L121)
-- Test (property): [batch-transport.property.test.ts:178 cleanup failure never masks the attempt outcome and never skips the attempt](/test/property/batch-transport.property.test.ts#L178)
+- Test (property): [batch-transport.property.test.ts:177 cleanup failure never masks the attempt outcome and never skips the attempt](/test/property/batch-transport.property.test.ts#L177)
 
 #### Scenario: Directory Creation Failure Yields Claim Errors [FLA-TEMP-DIRFAIL]
 IF temp directory creation fails for a physical batch, THEN THE spec-check tool SHALL return claim-level `FormalizationError` values for every claim in that physical batch.
@@ -2334,7 +1444,7 @@ IF temp directory creation fails for a physical batch, THEN THE spec-check tool 
 **Postcondition:** The failure surfaces as claim errors; no claim is silently dropped.
 
 ##### Evidence
-- Implementation: [formalize.ts:312 formalizeAttachedBatch()](/src/domain/formal/formalize.ts#L312), [batch-transport.ts:337 createBatchContextDirectory()](/src/domain/formal/batch-transport.ts#L337)
+- Implementation: [formalize.ts:327 formalizeAttachedBatch()](/src/domain/formal/formalize.ts#L327), [batch-transport.ts:340 createBatchContextDirectory()](/src/domain/formal/batch-transport.ts#L340)
 - Test: [semantic-batching-failures.test.ts:341 turns an unwritable temp directory into errors for every claim](/test/contract/semantic-batching-failures.test.ts#L341), [batch-evidence.test.ts:276 returns claim errors without cleanup when temp directory creation fails](/test/contract/batch-evidence.test.ts#L276)
 - Test (property): [batch-transport.property.test.ts:145 cleanup is attempted iff a directory was created, and evidence matches the terminal state](/test/property/batch-transport.property.test.ts#L145)
 
@@ -2344,7 +1454,7 @@ IF the context file write fails after the temp directory was created, THEN THE s
 **Postcondition:** A `dir_created` state never leaks when writing fails.
 
 ##### Evidence
-- Implementation: [formalize.ts:371 transportWriteFailureResult()](/src/domain/formal/formalize.ts#L371), [batch-transport.ts:371 writeBatchContextFile()](/src/domain/formal/batch-transport.ts#L371)
+- Implementation: [formalize.ts:386 transportWriteFailureResult()](/src/domain/formal/formalize.ts#L386), [batch-transport.ts:377 writeBatchContextFile()](/src/domain/formal/batch-transport.ts#L377)
 - Test: [semantic-batching-failures.test.ts:361 cleans a created directory before reporting a context write failure](/test/contract/semantic-batching-failures.test.ts#L361), [batch-evidence.test.ts:303 reports write and cleanup failures without masking either](/test/contract/batch-evidence.test.ts#L303)
 - Test (property): [batch-transport.property.test.ts:203 a write failure still attempts cleanup exactly once before returning evidence](/test/property/batch-transport.property.test.ts#L203)
 
@@ -2354,7 +1464,7 @@ IF cleanup after a partial write failure also fails, THEN THE spec-check tool SH
 **Postcondition:** The primary failure remains the reported cause.
 
 ##### Evidence
-- Implementation: [formalize.ts:371 transportWriteFailureResult()](/src/domain/formal/formalize.ts#L371), [batch-transport.ts:451 cleanupBatchContext()](/src/domain/formal/batch-transport.ts#L451)
+- Implementation: [formalize.ts:386 transportWriteFailureResult()](/src/domain/formal/formalize.ts#L386), [batch-transport.ts:423 cleanupBatchContext()](/src/domain/formal/batch-transport.ts#L423)
 - Test: [semantic-batching-failures.test.ts:377 preserves the write failure when partial-state cleanup also fails](/test/contract/semantic-batching-failures.test.ts#L377), [batch-evidence.test.ts:303 reports write and cleanup failures without masking either](/test/contract/batch-evidence.test.ts#L303)
 - Test (property): [batch-transport.property.test.ts:203 a write failure still attempts cleanup exactly once before returning evidence](/test/property/batch-transport.property.test.ts#L203)
 
@@ -2364,7 +1474,7 @@ IF `callOpencode()` throws during an attached batch attempt, THEN THE spec-check
 **Postcondition:** Temp cleanup does not depend on the adapter returning normally.
 
 ##### Evidence
-- Implementation: [formalize.ts:415 runAttachedAttempt()](/src/domain/formal/formalize.ts#L415), [formalize.ts:512 callAndAssembleAttached()](/src/domain/formal/formalize.ts#L512)
+- Implementation: [formalize.ts:430 runAttachedAttempt()](/src/domain/formal/formalize.ts#L430), [formalize.ts:527 callAndAssembleAttached()](/src/domain/formal/formalize.ts#L527)
 - Test: [semantic-batching-failures.test.ts:493 normalizes an attached adapter throw and still cleans its temporary context](/test/contract/semantic-batching-failures.test.ts#L493), [batch-evidence.test.ts:256 cleans up and normalizes a thrown attached adapter failure](/test/contract/batch-evidence.test.ts#L256)
 
 #### Scenario: Cleanup Failure After Success Is A Warning [FLA-TEMP-CLEANUP-WARN]
@@ -2373,9 +1483,9 @@ IF cleanup fails after a successful model response, THEN THE spec-check tool SHA
 **Postcondition:** Successful formalization evidence is never discarded due to cleanup failure, and the failure is diagnosable.
 
 ##### Evidence
-- Implementation: [formalize.ts:469 applyCleanupOutcome()](/src/domain/formal/formalize.ts#L469), [formalization-findings.ts:376 buildCleanupWarning()](/src/domain/formal/formalization-findings.ts#L376)
+- Implementation: [formalize.ts:484 applyCleanupOutcome()](/src/domain/formal/formalize.ts#L484), [formalization-findings.ts:376 buildCleanupWarning()](/src/domain/formal/formalization-findings.ts#L376)
 - Test: [semantic-batching-failures.test.ts:467 preserves successful candidates and emits evidence when cleanup fails](/test/contract/semantic-batching-failures.test.ts#L467), [batch-evidence.test.ts:326 preserves candidates and emits a warning when success cleanup fails](/test/contract/batch-evidence.test.ts#L326)
-- Test (property): [batch-transport.property.test.ts:178 cleanup failure never masks the attempt outcome and never skips the attempt](/test/property/batch-transport.property.test.ts#L178)
+- Test (property): [batch-transport.property.test.ts:177 cleanup failure never masks the attempt outcome and never skips the attempt](/test/property/batch-transport.property.test.ts#L177)
 
 #### Scenario: OS Temp Unwritable Yields Claim Errors [FLA-TEMP-OSUNWRITABLE]
 IF the OS temp directory is not writable and `mkdtemp()` fails, THEN THE spec-check tool SHALL return claim-level `FormalizationError` values for every claim in the physical batch.
@@ -2383,7 +1493,7 @@ IF the OS temp directory is not writable and `mkdtemp()` fails, THEN THE spec-ch
 **Postcondition:** Environment failures surface as ordinary claim errors, not crashes.
 
 ##### Evidence
-- Implementation: [formalize.ts:312 formalizeAttachedBatch()](/src/domain/formal/formalize.ts#L312), [batch-transport.ts:337 createBatchContextDirectory()](/src/domain/formal/batch-transport.ts#L337)
+- Implementation: [formalize.ts:327 formalizeAttachedBatch()](/src/domain/formal/formalize.ts#L327), [batch-transport.ts:340 createBatchContextDirectory()](/src/domain/formal/batch-transport.ts#L340)
 - Test: [semantic-batching-failures.test.ts:341 turns an unwritable temp directory into errors for every claim](/test/contract/semantic-batching-failures.test.ts#L341), [batch-evidence.test.ts:276 returns claim errors without cleanup when temp directory creation fails](/test/contract/batch-evidence.test.ts#L276)
 
 #### Scenario: Outcomes Assigned After Cleanup Terminal State [FLA-TEMP-ORDER]
@@ -2392,7 +1502,7 @@ WHEN an attached batch attempt resolves (success, model failure, or infrastructu
 **Postcondition:** On handled paths, the temp lifecycle always precedes outcome assignment when a directory exists. Process termination can bypass this postcondition and is governed by [FLA-TEMP-TERMINATION]; any already finalized evidence audits attempts but does not prove completion.
 
 ##### Evidence
-- Implementation: [formalize.ts:415 runAttachedAttempt()](/src/domain/formal/formalize.ts#L415), [formalize.ts:371 transportWriteFailureResult()](/src/domain/formal/formalize.ts#L371)
+- Implementation: [formalize.ts:430 runAttachedAttempt()](/src/domain/formal/formalize.ts#L430), [formalize.ts:386 transportWriteFailureResult()](/src/domain/formal/formalize.ts#L386)
 - Test: [semantic-batching-failures.test.ts:413 waits for cleanup to terminate before resolving claim outcomes](/test/contract/semantic-batching-failures.test.ts#L413), [semantic-batching-failures.test.ts:361 cleans a created directory before reporting a context write failure](/test/contract/semantic-batching-failures.test.ts#L361)
 
 #### Scenario: Process Termination May Leave Temp Artifacts [FLA-TEMP-TERMINATION]
@@ -2401,54 +1511,61 @@ IF the process terminates before an attached batch lifecycle reaches its handled
 **Postcondition:** No cleanup guarantee is attributed to SIGINT, SIGTERM, or other process termination; manifest absence distinguishes the incomplete run from success.
 
 ##### Evidence
-- Test: [semantic-batching-failures.test.ts:413 waits for cleanup to terminate before resolving claim outcomes](/test/contract/semantic-batching-failures.test.ts#L413)
+
 
 #### Requirement model
 
 ```alloy
-// --- Temp context file lifecycle: cleanup safety and liveness ---
-// An attached batch drives its temp directory through the TempState lifecycle
-// NotCreated -> DirCreated -> FileWritten -> (CleanupSucceeded | CleanupFailed).
-// The lifecycle transitions are realized by the shared events create_dir_*,
-// write_file_*, and cleanup_* in the transition system; the properties this
-// requirement guarantees are stated here.
-//
-// A directory is "cleanup-owed" once an attached batch that reached DirCreated
-// or FileWritten resolves; cleanup is terminal once it succeeds or fails.
-
-pred cleanupOwed [b : PhysicalBatch] {
-  b.attached = Attached
-  b.resolution != Unresolved
-  b.tempState in DirCreated + FileWritten
+// Event: allocate a context directory, recording transport failure explicitly.
+pred prepare[a : Attempt] {
+  Run.phase = Sampling and a not in Run.captured + Run.settled and a.(Run.stages) = NotCreated
+  a.batch.group in Run.frozen
+  a.earlier in Run.settled
+  some a.recoveryOf implies a.recoveryOf in Run.settled and degradable[a.recoveryOf]
+  Run.stages' = Run.stages ++ a ->
+    (a.transport = Inline => FileWritten else (a.transportFailure = DirectoryFailure => CleanupSucceeded else DirCreated))
+  Run.captured' = Run.captured + (a.transportFailure = DirectoryFailure => a else none)
+  keep_attempts_except_transport
+  Run.phase' = Run.phase
+  Run.frozen' = Run.frozen
+  keep_queries
 }
-
-pred cleanupTerminal [b : PhysicalBatch] {
-  b.tempState in CleanupSucceeded + CleanupFailed
+pred write_context[a : Attempt] {
+  Run.phase = Sampling and a.(Run.stages) = DirCreated
+  Run.stages' = Run.stages ++ a -> (a.transportFailure = WriteFailure => ProcessSettled else FileWritten)
+  Run.captured' = Run.captured + (a.transportFailure = WriteFailure => a else none)
+  keep_attempts_except_transport
+  Run.phase' = Run.phase
+  Run.frozen' = Run.frozen
+  keep_queries
 }
-
-// Safety: a failed cleanup after a successful attempt never discards the
-// candidates that attempt produced [FLA-TEMP-CLEANUP-WARN].
-assert cleanup_failure_preserves_candidates {
-  always (all b : PhysicalBatch, c : b.claims |
-    (b.resolution = BatchSuccess and b.outcomes[c] = CandidateOutcome)
-    implies b.outcomes'[c] = CandidateOutcome)
+pred capture[a : Attempt, t : EvidenceToken] {
+  Run.phase = Sampling and a.(Run.stages) = FileWritten and a not in Run.captured
+  t not in (Attempt + Query).(Run.reservations)
+  Run.reservations' = Run.reservations + a -> t
+  Run.captured' = Run.captured + a
+  Run.spawned' = Run.spawned + a
+  Run.stages' = Run.stages ++ a -> ProcessSettled
+  Run.phase' = Run.phase
+  Run.frozen' = Run.frozen
+  Run.settled' = Run.settled
+  Run.accepted' = Run.accepted
+  Run.errors' = Run.errors
+  Run.selected' = Run.selected
+  keep_queries_except_reservations
 }
-
-// Liveness: under fairness on the cleanup events, every cleanup-owed batch
-// eventually reaches a terminal cleanup state, so no temp directory owed
-// cleanup is abandoned on a handled path [FLA-TEMP-SUCCESS, FLA-TEMP-ORDER].
-pred cleanupFairness {
-  all b : PhysicalBatch |
-    (eventually always cleanupOwed[b])
-    implies
-    (always eventually (cleanup_succeeds[b] or cleanup_fails[b]))
+pred cleanup[a : Attempt] {
+  Run.phase = Sampling and a.(Run.stages) = ProcessSettled
+  Run.stages' = Run.stages ++ a -> (a.cleanupFails = True => CleanupFailed else CleanupSucceeded)
+  Run.captured' = Run.captured
+  keep_attempts_except_transport
+  Run.phase' = Run.phase
+  Run.frozen' = Run.frozen
+  keep_queries
 }
-
-assert cleanup_attempted_after_terminal {
-  cleanupFairness implies
-    always (all b : PhysicalBatch |
-      cleanupOwed[b] implies eventually cleanupTerminal[b])
-}
+// Safety: accepted outcomes follow capture and terminal cleanup.
+assert cleanup_before_outcome { always (all s : Run.accepted |
+  s.attempt in Run.captured & Run.settled and s.attempt.(Run.stages) in CleanupSucceeded + CleanupFailed) }
 ```
 
 ### Requirement: Graceful Degradation By Adapter Error Kind [FLA-DEGRADE-KIND]
@@ -2465,7 +1582,7 @@ IF an attached batch attempt fails with `timeout`, THEN THE spec-check tool SHAL
 **Postcondition:** Smaller work is attempted before claims are declared failed.
 
 ##### Evidence
-- Implementation: [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80), [formalize.ts:568 recoverAttachedFailure()](/src/domain/formal/formalize.ts#L568)
+- Implementation: [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80), [formalize.ts:583 recoverAttachedFailure()](/src/domain/formal/formalize.ts#L583)
 - Test: [semantic-batching-failures.test.ts:241 degrades attached %s to one inline call per claim](/test/contract/semantic-batching-failures.test.ts#L241), [formalize.test.ts:283 degrades attached timeout failures to bounded inline claims](/test/contract/formalize.test.ts#L283)
 - Test (property): [degradation.property.test.ts:66 covers every adapter error kind exactly once across the decision table](/test/property/degradation.property.test.ts#L66)
 
@@ -2475,7 +1592,7 @@ IF an attached batch attempt fails with `invalid_json`, THEN THE spec-check tool
 **Postcondition:** Model response failures consume the existing bounded retry budget per claim.
 
 ##### Evidence
-- Implementation: [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80), [formalize.ts:568 recoverAttachedFailure()](/src/domain/formal/formalize.ts#L568)
+- Implementation: [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80), [formalize.ts:583 recoverAttachedFailure()](/src/domain/formal/formalize.ts#L583)
 - Test: [semantic-batching-failures.test.ts:241 degrades attached %s to one inline call per claim](/test/contract/semantic-batching-failures.test.ts#L241)
 - Test (property): [degradation.property.test.ts:66 covers every adapter error kind exactly once across the decision table](/test/property/degradation.property.test.ts#L66)
 
@@ -2485,8 +1602,8 @@ IF an attached batch attempt fails with `schema_validation_error`, THEN THE spec
 **Postcondition:** Model response failures consume the existing bounded retry budget per claim.
 
 ##### Evidence
-- Implementation: [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80), [formalize.ts:619 acceptAttachedResponse()](/src/domain/formal/formalize.ts#L619), [formalize.ts:568 recoverAttachedFailure()](/src/domain/formal/formalize.ts#L568)
-- Test: [semantic-batching-failures.test.ts:241 degrades attached %s to one inline call per claim](/test/contract/semantic-batching-failures.test.ts#L241), [semantic-batching.test.ts:220 degrades $name response indexes to inline claims](/test/contract/semantic-batching.test.ts#L220)
+- Implementation: [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80), [formalize.ts:634 acceptAttachedResponse()](/src/domain/formal/formalize.ts#L634), [formalize.ts:583 recoverAttachedFailure()](/src/domain/formal/formalize.ts#L583)
+- Test: [semantic-batching-failures.test.ts:241 degrades attached %s to one inline call per claim](/test/contract/semantic-batching-failures.test.ts#L241), [semantic-batching.test.ts:224 degrades $name response indexes to inline claims](/test/contract/semantic-batching.test.ts#L224)
 - Test (property): [degradation.property.test.ts:66 covers every adapter error kind exactly once across the decision table](/test/property/degradation.property.test.ts#L66)
 
 #### Scenario: Spawn Error Does Not Degrade [FLA-DEGRADE-SPAWN]
@@ -2495,7 +1612,7 @@ IF an attached batch attempt fails with `spawn_error`, THEN THE spec-check tool 
 **Postcondition:** OS/process boundary failures are not retried per claim.
 
 ##### Evidence
-- Implementation: [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80), [formalize.ts:568 recoverAttachedFailure()](/src/domain/formal/formalize.ts#L568)
+- Implementation: [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80), [formalize.ts:583 recoverAttachedFailure()](/src/domain/formal/formalize.ts#L583)
 - Test: [semantic-batching-failures.test.ts:258 does not fallback after attached %s](/test/contract/semantic-batching-failures.test.ts#L258)
 - Test (property): [degradation.property.test.ts:66 covers every adapter error kind exactly once across the decision table](/test/property/degradation.property.test.ts#L66)
 
@@ -2505,7 +1622,7 @@ IF an attached batch attempt fails with `invalid_files`, THEN THE spec-check too
 **Postcondition:** Attachment validation failures surface immediately as claim errors.
 
 ##### Evidence
-- Implementation: [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80), [formalize.ts:568 recoverAttachedFailure()](/src/domain/formal/formalize.ts#L568)
+- Implementation: [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80), [formalize.ts:583 recoverAttachedFailure()](/src/domain/formal/formalize.ts#L583)
 - Test: [semantic-batching-failures.test.ts:258 does not fallback after attached %s](/test/contract/semantic-batching-failures.test.ts#L258)
 - Test (property): [degradation.property.test.ts:66 covers every adapter error kind exactly once across the decision table](/test/property/degradation.property.test.ts#L66)
 
@@ -2515,7 +1632,7 @@ IF an attached batch attempt fails with `invalid_timeout`, THEN THE spec-check t
 **Postcondition:** Invalid invocation options are never retried.
 
 ##### Evidence
-- Implementation: [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80), [formalize.ts:568 recoverAttachedFailure()](/src/domain/formal/formalize.ts#L568)
+- Implementation: [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80), [formalize.ts:583 recoverAttachedFailure()](/src/domain/formal/formalize.ts#L583)
 - Test: [semantic-batching-failures.test.ts:258 does not fallback after attached %s](/test/contract/semantic-batching-failures.test.ts#L258)
 - Test (property): [degradation.property.test.ts:66 covers every adapter error kind exactly once across the decision table](/test/property/degradation.property.test.ts#L66)
 
@@ -2525,40 +1642,19 @@ IF an attached batch attempt fails with `prompt_too_large`, THEN THE spec-check 
 **Postcondition:** Fallback is attempted only when it can succeed; no budget is spent on fallback calls guaranteed to fail.
 
 ##### Evidence
-- Implementation: [degradation.ts:51 inlinePromptsFitOpencodeLimit()](/src/domain/formal/degradation.ts#L51), [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80), [formalize.ts:568 recoverAttachedFailure()](/src/domain/formal/formalize.ts#L568)
+- Implementation: [degradation.ts:51 inlinePromptsFitOpencodeLimit()](/src/domain/formal/degradation.ts#L51), [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80), [formalize.ts:583 recoverAttachedFailure()](/src/domain/formal/formalize.ts#L583)
 - Test: [semantic-batching-failures.test.ts:277 falls back from prompt_too_large when every inline prompt fits](/test/contract/semantic-batching-failures.test.ts#L277), [semantic-batching-failures.test.ts:297 does not fallback from prompt_too_large when one complete inline prompt cannot fit](/test/contract/semantic-batching-failures.test.ts#L297)
 - Test (property): [degradation.property.test.ts:90 fit check is bounded by the adapter byte limit and respects the boundary](/test/property/degradation.property.test.ts#L90)
 
 #### Requirement model
 
 ```alloy
-// --- Graceful degradation by adapter error kind ---
-// A terminal attached-batch attempt resolves to one of the shared Resolution
-// values, and the transition system realizes each kind:
-//   * BatchSuccess    -> resolve_batch_success (all claims become candidates);
-//   * ModelFailure    -> degrade_to_per_claim when the inline fallback fits,
-//                        else resolve_batch_errors (claim errors);
-//   * InfraFailure    -> resolve_batch_errors, never degraded (no per-claim
-//                        fallback for spawn/invalid-files/invalid-timeout);
-//   * TransportFailure -> resolve_batch_errors after any owed cleanup.
-// The properties this requirement guarantees about that decision are below.
-
-// Safety: degradation to per-claim retry happens only for a model failure whose
-// inline fallback fits; infrastructure failures never degrade
-// [FLA-DEGRADE-TOOLARGE, FLA-DEGRADE-SPAWN, FLA-DEGRADE-FILES, FLA-DEGRADE-INVTIMEOUT].
-assert degrade_only_when_model_failure_fits {
-  always (all b : PhysicalBatch |
-    degrade_to_per_claim[b] implies
-      (b.resolution = ModelFailure and b.fallbackFits = FallbackFits))
+pred degradable[a : Attempt] {
+  a.transportFailure = NoTransportFailure
+  a.result = ModelFailure or (a.result = PromptTooLarge and a.fallbackFits = True)
 }
-
-// Safety: an infrastructure failure is always resolved as claim errors without
-// per-claim fallback, so no infra failure is ever marked Degraded.
-assert infra_failure_never_degrades {
-  always (all b : PhysicalBatch |
-    (b.resolution = InfraFailure and some c : b.claims | b.outcomes[c] = NoOutcome)
-    implies not degrade_to_per_claim[b])
-}
+// Safety: infrastructure failures and overflow admit no recovery spawn.
+assert no_infrastructure_degradation { always (all a : Run.spawned | some a.recoveryOf implies degradable[a.recoveryOf]) }
 ```
 
 ### Requirement: Claim Partition And Terminal Outcomes [FLA-CLAIM-PARTITION]
@@ -2574,7 +1670,7 @@ IF a `mapBounded` worker throws while processing a physical batch, THEN THE spec
 **Postcondition:** Every eligible claim in the failed batch reaches a terminal outcome, and one batch's failure never abandons unstarted claims in other batches.
 
 ##### Evidence
-- Implementation: [formalize.ts:129 formalizeClaims()](/src/domain/formal/formalize.ts#L129), [formalization-findings.ts:412 workerFailureResult()](/src/domain/formal/formalization-findings.ts#L412)
+- Implementation: [formalize.ts:132 formalizeClaims()](/src/domain/formal/formalize.ts#L132), [formalization-findings.ts:412 workerFailureResult()](/src/domain/formal/formalization-findings.ts#L412)
 - Test: [semantic-batching-failures.test.ts:527 keeps sibling outcomes and loses no claims when one fallback worker throws](/test/contract/semantic-batching-failures.test.ts#L527)
 - Test (property): [semantic-batching.property.test.ts:370 yields identical terminal outcome sets under shuffled completion order](/test/property/semantic-batching.property.test.ts#L370)
 
@@ -2584,7 +1680,7 @@ IF the adapter throws during a single-claim inline attempt, THEN THE spec-check 
 **Postcondition:** Thrown infrastructure failures become ordinary claim outcomes.
 
 ##### Evidence
-- Implementation: [formalize.ts:842 sampleFormalizationsForClaim()](/src/domain/formal/formalize.ts#L842)
+- Implementation: [formalize.ts:857 sampleFormalizationsForClaim()](/src/domain/formal/formalize.ts#L857)
 - Test: [semantic-batching-failures.test.ts:511 normalizes a single-claim inline adapter throw without creating temporary state](/test/contract/semantic-batching-failures.test.ts#L511)
 
 #### Scenario: All-Error Output Aborts Pipeline [FLA-PARTITION-ABORT]
@@ -2593,8 +1689,8 @@ IF formalization returns zero candidates and one or more errors, THEN THE spec-c
 **Postcondition:** Existing abort behavior for total formalization failure is preserved.
 
 ##### Evidence
-- Implementation: [run-cli.ts:398 runFormalizationPhase()](/src/cli/run-cli.ts#L398)
-- Test (integration): [merge-liveness.integration.test.ts:409 rejects with FormalizationError when formalization produces only errors](/test/integration/merge-liveness.integration.test.ts#L409)
+- Implementation: [run-cli.ts:482 runFormalizationPhaseWithEvidence()](/src/cli/run-cli.ts#L482)
+- Test (integration): [semantic-pipeline.integration.test.ts:116 all rejected predicate attempts retain raw evidence and fail formalization with exit category 9](/test/integration/semantic-pipeline.integration.test.ts#L116)
 
 #### Scenario: Additional-Sample Failure Preserves Candidate [FLA-PARTITION-ADDITIONAL-WARN]
 IF a claim already has a valid candidate and a later additional-sample attempt fails or exhausts its bounded retry budget, THEN THE spec-check tool SHALL preserve the candidate and all samples already collected, SHALL emit a warning finding describing the sample shortfall, and SHALL NOT emit a claim-level `FormalizationError` for that additional-sample failure.
@@ -2602,64 +1698,37 @@ IF a claim already has a valid candidate and a later additional-sample attempt f
 **Postcondition:** The claim remains in `C` and not in `R`; additional sampling can reduce confidence but cannot revoke a valid candidate or violate the disjoint partition.
 
 ##### Evidence
-- Implementation: [formalize.ts:762 addAdditionalSamples()](/src/domain/formal/formalize.ts#L762), [formalization-findings.ts:344 buildAdditionalSampleFailureFinding()](/src/domain/formal/formalization-findings.ts#L344)
-- Test: [semantic-batching-failures.test.ts:317 retains an attached candidate when its requested additional sample terminally fails](/test/contract/semantic-batching-failures.test.ts#L317)
+- Implementation: [source-formalize.ts:132 recoverClaimSamples()](/src/domain/formal/source-formalize.ts#L132), [source-formalize.ts:104 processBatch()](/src/domain/formal/source-formalize.ts#L104), [formalize.ts:777 addAdditionalSamples()](/src/domain/formal/formalize.ts#L777)
+- Test: [formalization-predicates.test.ts:138 recovery feedback and rejected samples survive later candidate shortfalls](/test/contract/formalization-predicates.test.ts#L138), [semantic-batching-failures.test.ts:317 retains an attached candidate when its requested additional sample terminally fails](/test/contract/semantic-batching-failures.test.ts#L317)
 
 #### Requirement model
 
 ```alloy
-// --- Claim partition and terminal outcomes ---
-// Each claim carries a per-batch Outcome (NoOutcome, CandidateOutcome, or
-// ClaimErrorOutcome). The shared resolve_* events assign terminal outcomes; the
-// disjoint physical-batch partition comes from the domain facts. The three
-// guarantees this requirement makes -- disjoint partition, outcome stability,
-// and eventual assignment -- are stated here.
-
-// Safety: no claim appears in two physical batches, so the batch partition of
-// the eligible claim set is disjoint at all times [FLA-CLAIM-PARTITION].
-assert no_cross_batch_outcomes {
-  always (all disj b1, b2 : PhysicalBatch, c : Claim |
-    not (c in b1.claims and c in b2.claims))
+pred close_claim[c : Claim] {
+  Run.phase = Sampling and c in eligible and c not in Run.errors
+  all a : Attempt | c in a.claims implies a in Run.settled
+  c not in candidates
+  Run.errors' = Run.errors + c
+  Run.phase' = Run.phase
+  Run.frozen' = Run.frozen
+  Run.stages' = Run.stages
+  Run.spawned' = Run.spawned
+  Run.captured' = Run.captured
+  Run.settled' = Run.settled
+  Run.accepted' = Run.accepted
+  Run.selected' = Run.selected
+  keep_queries
 }
-
-// Safety: an assigned outcome is stable -- a claim only moves from NoOutcome to
-// a terminal value, never back and never between terminal values. This follows
-// from the event frame conditions (resolve_* rewrite only NoOutcome claims and
-// frame the rest; non-batch events freeze batch state via batchStateFrozen), so
-// the check fails if any event breaks it.
-assert outcomes_are_stable {
-  always (all b : PhysicalBatch, c : b.claims |
-    b.outcomes[c] != NoOutcome implies b.outcomes'[c] = b.outcomes[c])
+pred end_sampling {
+  Run.phase = Sampling and Attempt = Run.settled and candidates + Run.errors = eligible
+  Run.phase' = (no candidates => Aborted else Selecting)
+  Run.frozen' = Run.frozen
+  keep_attempts
+  keep_queries
 }
-
-// Liveness: under handled-execution fairness, every eligible claim eventually
-// reaches a terminal outcome (candidate or claim error), so no claim is left
-// unresolved [FLA-CLAIM-PARTITION]. The fairness premise excludes an execution
-// that stutters forever while a batch still owes work.
-pred progressFairness {
-  all b : PhysicalBatch |
-    (eventually always (
-      (b.attached = Attached and
-        ( (b.tempState = NotCreated and b.resolution = Unresolved)
-          or (b.tempState = DirCreated)
-          or (b.tempState = FileWritten and b.resolution = Unresolved)
-          or (b.tempState in DirCreated + FileWritten and b.resolution != Unresolved)
-          or (b.degraded = Degraded and some c : b.claims | b.outcomes[c] = NoOutcome)
-          or (b.degraded = NotDegraded and b.resolution != Unresolved
-              and some c : b.claims | b.outcomes[c] = NoOutcome)))
-      or (b.attached = Inline and
-        (b.resolution = Unresolved
-         or (b.resolution != Unresolved and some c : b.claims | b.outcomes[c] = NoOutcome)))
-    ))
-    implies
-    (always eventually not stutter)
-}
-
-assert all_claims_reach_terminal_outcome {
-  progressFairness implies
-    always eventually (all b : PhysicalBatch, c : b.claims |
-      b.outcomes[c] != NoOutcome)
-}
+// Safety: candidate/error attribution is disjoint and complete at sampling exit.
+assert claim_partition { always (no candidates & Run.errors and candidates + Run.errors in eligible and
+  (Run.phase in Selecting + Analyzing + Complete implies candidates + Run.errors = eligible)) }
 ```
 
 ### Requirement: Original Eligible Index Is Authoritative Identity [FLA-IDENTITY-INDEX]
@@ -2675,7 +1744,7 @@ WHEN two distinct claims share the same `claim.id` and `samplesPerClaim` is grea
 **Postcondition:** Duplicate IDs cannot corrupt candidate identity.
 
 ##### Evidence
-- Implementation: [grouping.ts:73 IndexedFormalizationClaim](/src/domain/formal/grouping.ts#L73), [formalize.ts:762 addAdditionalSamples()](/src/domain/formal/formalize.ts#L762)
+- Implementation: [grouping.ts:73 IndexedFormalizationClaim](/src/domain/formal/grouping.ts#L73), [formalize.ts:777 addAdditionalSamples()](/src/domain/formal/formalize.ts#L777)
 - Test: [formalize.test.ts:321 merges additional samples by eligible index when claim IDs are duplicated](/test/contract/formalize.test.ts#L321)
 - Test (property): [semantic-batching.property.test.ts:276 keeps candidates distinct when claim IDs are duplicate or missing](/test/property/semantic-batching.property.test.ts#L276)
 
@@ -2685,7 +1754,7 @@ WHEN one or more claims lack `claim.id` and `samplesPerClaim` is greater than `1
 **Postcondition:** Missing IDs are ordinary input, not an identity hazard.
 
 ##### Evidence
-- Implementation: [grouping.ts:73 IndexedFormalizationClaim](/src/domain/formal/grouping.ts#L73), [formalize.ts:762 addAdditionalSamples()](/src/domain/formal/formalize.ts#L762)
+- Implementation: [grouping.ts:73 IndexedFormalizationClaim](/src/domain/formal/grouping.ts#L73), [formalize.ts:777 addAdditionalSamples()](/src/domain/formal/formalize.ts#L777)
 - Test: [semantic-batching.test.ts:296 accepts any attached sample claimId when the source ID is missing](/test/contract/semantic-batching.test.ts#L296)
 - Test (property): [semantic-batching.property.test.ts:276 keeps candidates distinct when claim IDs are duplicate or missing](/test/property/semantic-batching.property.test.ts#L276)
 
@@ -2695,9 +1764,16 @@ WHEN formalization emits candidates and errors, THE spec-check tool SHALL emit t
 **Postcondition:** Output attribution is always recoverable independent of emission order.
 
 ##### Evidence
-- Implementation: [formalize.ts:129 formalizeClaims()](/src/domain/formal/formalize.ts#L129), [formalization-findings.ts:464 compareCandidates()](/src/domain/formal/formalization-findings.ts#L464), [formalization-findings.ts:482 compareErrors()](/src/domain/formal/formalization-findings.ts#L482)
+- Implementation: [formalize.ts:132 formalizeClaims()](/src/domain/formal/formalize.ts#L132), [formalization-findings.ts:464 compareCandidates()](/src/domain/formal/formalization-findings.ts#L464), [formalization-findings.ts:482 compareErrors()](/src/domain/formal/formalization-findings.ts#L482)
 - Test: [formalize.test.ts:228 groups semantically, matches attached responses by index, and restores eligible order](/test/contract/formalize.test.ts#L228)
 - Test (property): [semantic-batching.property.test.ts:370 yields identical terminal outcome sets under shuffled completion order](/test/property/semantic-batching.property.test.ts#L370)
+
+#### Requirement model
+
+```alloy
+// Safety: accepted samples belong to their exact source claim, never an ID join.
+assert samples_keep_identity { always (all s : Run.accepted | s.claim in s.attempt.claims) }
+```
 
 ### Requirement: Batch Attempt Evidence Preservation [FLA-BATCH-EVIDENCE]
 WHEN the spec-check tool performs a formalization invocation, THE spec-check tool SHALL produce one `FormalizationAttemptSet` envelope containing schema version, an invocation `claimSet`, and the invocation's attached attempt entries. The `claimSet` SHALL be either `specs_forward` or `generated_spec` with a zero-based invocation ordinal and capability. Each attempt entry SHALL contain batch key, ordered claim indexes local to that `claimSet`, claim IDs when present, claim provenance files, the SHA-256 hash over the exact serialized UTF-8 context bytes, prompt variant/version, model, the physical sub-batch ordinal within the logical group, the response/failure classification, and the cleanup outcome. Evidence SHALL NOT duplicate claim text; each envelope SHALL be persisted as a separate atomically finalized evidence file.
@@ -2722,7 +1798,7 @@ WHEN the spec-check tool computes the context hash, THE hash SHALL be SHA-256 ov
 **Postcondition:** The hash is reproducible from the deterministic serialization.
 
 ##### Evidence
-- Implementation: [batch-transport.ts:289 hashBatchContext()](/src/domain/formal/batch-transport.ts#L289), [batch-transport.ts:312 prepareBatchContextData()](/src/domain/formal/batch-transport.ts#L312)
+- Implementation: [batch-transport.ts:292 hashBatchContext()](/src/domain/formal/batch-transport.ts#L292), [batch-transport.ts:315 prepareBatchContextData()](/src/domain/formal/batch-transport.ts#L315)
 - Test: [batch-evidence.test.ts:175 hashes the exact canonical UTF-8 context bytes](/test/contract/batch-evidence.test.ts#L175)
 
 #### Scenario: Deleted Context Is Byte-Reconstructable [FLA-EVIDENCE-RECONSTRUCT]
@@ -2731,7 +1807,7 @@ WHEN a temp context file has been deleted, selecting the claim array identified 
 **Postcondition:** Auditability survives temp-file deletion without duplicating claim text, and indexes from one invocation are never resolved against another invocation's claim set.
 
 ##### Evidence
-- Implementation: [batch-transport.ts:219 buildBatchContextFile()](/src/domain/formal/batch-transport.ts#L219), [batch-transport.ts:270 serializeBatchContextFile()](/src/domain/formal/batch-transport.ts#L270), [batch-transport.ts:289 hashBatchContext()](/src/domain/formal/batch-transport.ts#L289)
+- Implementation: [batch-transport.ts:222 buildBatchContextFile()](/src/domain/formal/batch-transport.ts#L222), [batch-transport.ts:273 serializeBatchContextFile()](/src/domain/formal/batch-transport.ts#L273), [batch-transport.ts:292 hashBatchContext()](/src/domain/formal/batch-transport.ts#L292)
 - Test: [batch-evidence.test.ts:215 reconstructs deleted context bytes only within the envelope claim set](/test/contract/batch-evidence.test.ts#L215)
 
 #### Scenario: Attempt Evidence Does Not Mark Completion [FLA-EVIDENCE-NOT-COMPLETE]
@@ -2740,1219 +1816,489 @@ IF a run fails or the process terminates after one or more `FormalizationAttempt
 **Postcondition:** Attempt evidence audits work performed; only a successful final manifest marks completion.
 
 ##### Evidence
-- Implementation: [formalization-evidence.ts:205 writeFormalizationAttemptSet()](/src/domain/reporting/formalization-evidence.ts#L205)
+- Implementation: [formalization-evidence.ts:208 writeFormalizationAttemptSet()](/src/domain/reporting/formalization-evidence.ts#L208)
 
 #### Requirement model
 
 ```alloy
-// --- Batch attempt evidence preservation ---
-// Every attached batch attempt that reaches a terminal resolution is recorded
-// in Pipeline.attemptEvidence. The shared events that resolve an attached batch
-// (create_dir_fail, write_file_fail, attempt_success, attempt_model_failure,
-// attempt_infra_failure, attempt_prompt_too_large) each add the batch to
-// attemptEvidence, so the model guarantees no terminal attached attempt goes
-// unrecorded. Envelope shape, hashes, atomic persistence, and manifest
-// semantics are evidence-contract obligations outside the model.
+// Safety: any accepted or rejected settled attempt retains captured evidence.
+assert attempt_evidence_total { always (Run.settled in Run.captured) }
+```
 
-// Safety: any attached batch with a terminal resolution has recorded evidence.
-assert evidence_recorded_for_every_attached_attempt {
-  always (all b : PhysicalBatch |
-    (b.attached = Attached and b.resolution != Unresolved)
-    implies b in Pipeline.attemptEvidence)
+### Requirement: Freeze Evidence-Backed Capability Concepts [FLA-CONCEPT-FREEZE]
+WHEN eligible claims are prepared for formalization, THE spec-check tool SHALL perform one bounded discovery pass per semantic group and source side, reconcile candidates deterministically, and freeze a registry before dependent batches start.
+
+**References:**
+- [Design: Concepts and assumptions](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#concepts-and-assumptions)
+
+#### Scenario: Every Sample Uses The Same Registry [FLA-CONCEPT-SHARED]
+WHEN batches, inline calls, retries, fallbacks, or additional samples run, THE spec-check tool SHALL supply the same immutable registry and content hash for their semantic group.
+
+##### Evidence
+- Implementation: [source-formalize.ts:80 processGroup()](/src/domain/formal/source-formalize.ts#L80), [source-formalize.ts:132 recoverClaimSamples()](/src/domain/formal/source-formalize.ts#L132), [concepts.ts:126 freezeRegistry()](/src/domain/formal/concepts.ts#L126)
+- Test: [formalization-predicates.test.ts:22 actor swaps change context and actor context survives batch recovery and additional samples](/test/contract/formalization-predicates.test.ts#L22), [formalization-predicates.test.ts:84 uses a frozen registry for batched and additional samples](/test/contract/formalization-predicates.test.ts#L84), [concept-registry.test.ts:83 frozen evidence and authored arrays cannot alias caller mutation](/test/contract/concept-registry.test.ts#L83)
+- Test (property): [concepts.property.test.ts:12 physical completion permutations do not change registry bytes or IDs](/test/property/concepts.property.test.ts#L12)
+
+#### Scenario: Missing Concepts Do Not Mutate Frozen State [FLA-CONCEPT-MISSING]
+IF a predicate proposes an undeclared concept, THEN THE spec-check tool SHALL preserve the proposal and SHALL mark dependent formal scope unresolved without extending the frozen registry.
+
+##### Evidence
+- Implementation: [predicate-lowering.ts:89 lowerPredicates()](/src/domain/formal/predicate-lowering.ts#L89), [expressions.ts:24 validateExpression()](/src/domain/formal/expressions.ts#L24), [source-formalize.ts:160 rejectSample()](/src/domain/formal/source-formalize.ts#L160)
+- Test: [concept-registry.test.ts:57 does not create private symbols for missing or removed source grounding](/test/contract/concept-registry.test.ts#L57), [formalization-predicates.test.ts:22 actor swaps change context and actor context survives batch recovery and additional samples](/test/contract/formalization-predicates.test.ts#L22)
+
+#### Scenario: Discovery Completion Order Is Irrelevant [FLA-CONCEPT-ORDER]
+WHEN fixed discovery responses complete in different worker orders, THE spec-check tool SHALL produce identical registry bytes and identity-resolution outcomes using source-order reconciliation.
+
+##### Evidence
+- Implementation: [concepts.ts:126 freezeRegistry()](/src/domain/formal/concepts.ts#L126), [concept-discovery.ts:35 discoverGroup()](/src/domain/formal/concept-discovery.ts#L35)
+- Test: [concept-registry.test.ts:47 freezes declarations and grounds retries against the same scoped hash](/test/contract/concept-registry.test.ts#L47)
+- Test (property): [concepts.property.test.ts:12 physical completion permutations do not change registry bytes or IDs](/test/property/concepts.property.test.ts#L12)
+
+#### Scenario: Conflicting Explicit Concepts Are Not First-Wins [FLA-CONCEPT-COLLISION]
+IF explicit concept keys have incompatible signatures, roles, scope, or units, THEN THE spec-check tool SHALL report a model-validation conflict and SHALL block dependent bindings rather than silently select one.
+
+##### Evidence
+- Implementation: [concepts.ts:85 decodeAuthoredModel()](/src/domain/formal/concepts.ts#L85), [concepts.ts:126 freezeRegistry()](/src/domain/formal/concepts.ts#L126)
+- Test: [concept-registry.test.ts:31 rejects incompatible explicit keys rather than choosing the first](/test/contract/concept-registry.test.ts#L31), [concept-registry.test.ts:40 retains unresolved identity collisions instead of equating meanings](/test/contract/concept-registry.test.ts#L40)
+
+#### Requirement model
+
+```alloy
+// Frozen registries are immutable input values; dependent attempts must name
+// that exact registry rather than mutate it during parallel completion.
+// Safety: samples use frozen registry.
+assert samples_use_frozen_registry { always (all a : Run.spawned | a.batch.group in Run.frozen) }
+```
+
+### Requirement: Separate Identity From Assumption Authority [FLA-PREMISE-AUTHORITY]
+WHEN concept or background candidates are considered, THE spec-check tool SHALL distinguish explicit identities, grounded model-proposed identities, unresolved identities, and explicitly admitted domain premises.
+
+**References:**
+- [Design: Concepts and assumptions](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#concepts-and-assumptions)
+
+#### Scenario: Plausible Domain Knowledge Remains A Proposal [FLA-PREMISE-INFERRED]
+IF discovery proposes positivity, mode exclusivity, exhaustive alternatives, or other domain facts without explicit authority, THEN THE spec-check tool SHALL preserve them as proposals without adding them to background B.
+
+##### Evidence
+- Implementation: [concepts.ts:126 freezeRegistry()](/src/domain/formal/concepts.ts#L126)
+- Test: [concept-registry.test.ts:14 grounds proposals in selected source without admitting background guesses](/test/contract/concept-registry.test.ts#L14), [concept-registry.test.ts:64 preserves explicit configuration authority against model-proposed changes](/test/contract/concept-registry.test.ts#L64)
+
+#### Scenario: Enum Requires Declared Meaning [FLA-PREMISE-ENUM]
+WHEN finite enum encoding is selected, THE spec-check tool SHALL require explicit evidence of exclusivity and exhaustiveness and SHALL otherwise retain a weaker or unresolved representation.
+
+##### Evidence
+- Implementation: [concepts.ts:85 decodeAuthoredModel()](/src/domain/formal/concepts.ts#L85), [concepts.ts:126 freezeRegistry()](/src/domain/formal/concepts.ts#L126)
+- Test: [concept-registry.test.ts:24 does not accept model-invented exhaustive enums](/test/contract/concept-registry.test.ts#L24)
+
+#### Scenario: Proposed Identity Qualifies Stability [FLA-PREMISE-CONDITIONAL]
+WHEN a registry accepts grounded model-proposed identity alignment, THE spec-check tool SHALL label dependent interpretation agreement and conclusions conditional on that alignment rather than independently validated natural-language fidelity.
+
+##### Evidence
+- Implementation: [predicate-lowering.ts:89 lowerPredicates()](/src/domain/formal/predicate-lowering.ts#L89), [static-context.ts:74 diagnose()](/src/domain/formal/static-context.ts#L74), [interpretation-assessment.ts:21 interpretationNotes()](/src/domain/formal/interpretation-assessment.ts#L21)
+
+#### Requirement model
+
+```alloy
+sig Premise { explicitAuthority : one Bool, values : set Valuation }
+fun admitted_background[p : set Premise] : set Premise { { a : p | a.explicitAuthority = True } }
+// Safety: discovery-proposed facts cannot silently harden the background.
+assert assumptions_need_authority { all p : set Premise | admitted_background[p].explicitAuthority in True }
+```
+
+### Requirement: Enforce A Conservative Typed Solver Fragment [FLA-TYPED-FRAGMENT]
+WHEN expressions or assembled queries are admitted, THE spec-check tool SHALL enforce the supported quantifier-free Boolean, finite-enum, exact linear integer/real, and typed uninterpreted-function fragment with explicit sort coercions and units.
+
+**References:**
+- [Design: Expression and semantic IR](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#expression-and-semantic-ir)
+- [Design: Resource bounds and encoding](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#resource-bounds-and-encoding)
+
+#### Scenario: Numeric Values Remain Exact [FLA-TYPED-EXACT]
+WHEN an integer, rational, or unit conversion is processed, THE spec-check tool SHALL preserve exact canonical values without JavaScript floating-point rounding.
+
+##### Evidence
+- Implementation: [rational.ts:9 rational()](/src/domain/formal/rational.ts#L9), [rational.ts:30 numericAtom()](/src/domain/formal/rational.ts#L30), [expressions.ts:193 checkQuantity()](/src/domain/formal/expressions.ts#L193)
+- Test: [typed-expressions.test.ts:47 preserves exact integers, decimals and reduced rationals](/test/contract/typed-expressions.test.ts#L47), [typed-expressions.test.ts:57 requires explicit unit annotations and exact conversion](/test/contract/typed-expressions.test.ts#L57)
+- Test (integration): [static-semantics.integration.test.ts:36 explicit exact unit conversion preserves integer measurement meaning](/test/integration/static-semantics.integration.test.ts#L36)
+
+#### Scenario: Unsupported Meaning Is Not Approximated [FLA-TYPED-UNSUPPORTED]
+IF a claim requires nonlinear products, division/remainder, strings, quantifiers, collections, recursive datatypes, or temporal timing, THEN THE spec-check tool SHALL report unsupported scope rather than replace the required meaning with an opaque proposition or weaker arithmetic.
+
+##### Evidence
+- Implementation: [expression-parser.ts:22 parseExpressionSyntax()](/src/domain/formal/expression-parser.ts#L22), [expressions.ts:24 validateExpression()](/src/domain/formal/expressions.ts#L24), [fragment.ts:15 classifyFragment()](/src/domain/formal/fragment.ts#L15)
+- Test: [typed-expressions.test.ts:28 rejects %s](/test/contract/typed-expressions.test.ts#L28), [typed-expressions.test.ts:33 rejects division outside the exact rational-literal contract: %s](/test/contract/typed-expressions.test.ts#L33), [typed-expressions.test.ts:38 lexes string punctuation literally and rejects the unsupported theory](/test/contract/typed-expressions.test.ts#L38)
+
+#### Scenario: Whole Query Features Are Checked [FLA-TYPED-COMBINED]
+WHEN individually accepted expressions are combined, THE spec-check tool SHALL classify and validate the assembled feature set before invoking Z3.
+
+##### Evidence
+- Implementation: [fragment.ts:15 classifyFragment()](/src/domain/formal/fragment.ts#L15), [query-executor.ts:124 execute()](/src/domain/formal/query-executor.ts#L124)
+- Test: [typed-expressions.test.ts:78 classifies the assembled query and bounds syntax nodes/depth](/test/contract/typed-expressions.test.ts#L78)
+
+#### Requirement model
+
+```alloy
+// Byte/node/depth limits and type/unit/arity observations are checked by the
+// independent expression oracle; valid_attempt gates their use here.
+// Safety: only typed samples.
+assert only_typed_samples { always (all s : Run.accepted | s.attempt.expressionsValid = True and s.attempt.fragmentValid = True) }
+```
+
+### Requirement: Separate Mandatory Advisory And Permission Tracks [FLA-MODAL-TRACKS]
+WHEN rules are analyzed, THE spec-check tool SHALL place only mandatory obligations in C and SHALL evaluate advisory obligations and explicit permissions in separate tracks.
+
+**References:**
+- [Design: Static query contracts](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#static-query-contracts)
+
+#### Scenario: Advisory Conflict Does Not Poison Mandatory Model [FLA-MODAL-ADVISORY]
+WHEN an advisory extension conflicts with a satisfiable mandatory baseline, THE spec-check tool SHALL issue a warning-scoped advisory conflict without claiming mandatory global inconsistency.
+
+##### Evidence
+- Implementation: [static-analysis.ts:84 checkRuleResponses()](/src/domain/formal/static-analysis.ts#L84), [static-analysis.ts:161 checkAdvisories()](/src/domain/formal/static-analysis.ts#L161)
+- Test: [static-queries.test.ts:45 separates advisory and permission conflicts from mandatory satisfiability](/test/contract/static-queries.test.ts#L45)
+
+#### Scenario: Permission Is Not Required Action [FLA-MODAL-PERMISSION]
+WHEN a `MAY` response is absent from a satisfying mandatory valuation, THE spec-check tool SHALL omit a missing-response violation for that permission.
+
+##### Evidence
+- Implementation: [static-context.ts:54 StaticAnalysisContext](/src/domain/formal/static-context.ts#L54), [predicate-lowering.ts:89 lowerPredicates()](/src/domain/formal/predicate-lowering.ts#L89), [typed-smtlib.ts:20 compileTypedClaim()](/src/domain/formal/typed-smtlib.ts#L20)
+
+#### Scenario: Permission Conflicting With Prohibition Is Visible [FLA-MODAL-PROHIBITION]
+WHEN `B and G_p` is SAT but `B and G_p and C and R_p` is UNSAT, THE spec-check tool SHALL report permission infeasibility with its admitted premises and conflicting evidence.
+
+##### Evidence
+- Implementation: [static-analysis.ts:84 checkRuleResponses()](/src/domain/formal/static-analysis.ts#L84)
+- Test: [static-queries.test.ts:45 separates advisory and permission conflicts from mandatory satisfiability](/test/contract/static-queries.test.ts#L45)
+
+#### Requirement model
+
+```alloy
+// Safety: advisory and permission rules do not constrain the mandatory baseline.
+assert permissions_not_required {
+  always (all g : Group | (no c : candidates & members[g] | c.modal = Mandatory and c.form = Refinement)
+    implies mandatory[g] = Valuation)
 }
+```
+
+### Requirement: Check Individual Rule Activation Feasibility [FLA-RULE-ACTIVATION]
+WHEN mandatory rule checks are planned, THE spec-check tool SHALL test guard satisfiability, self-response feasibility, and full-set activation feasibility under explicit background premises.
+
+**References:**
+- [Design: Static query contracts](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#static-query-contracts)
+
+#### Scenario: Guard Against Unconditional Prohibition [FLA-ACTIVATE-UBIQUITOUS]
+WHEN a satisfiable guard demands a response forbidden by an unconditional mandatory rule, THE spec-check tool SHALL report the activation conflict even when the unforced global model is SAT.
+
+##### Evidence
+- Implementation: [static-analysis.ts:84 checkRuleResponses()](/src/domain/formal/static-analysis.ts#L84)
+- Test: [static-queries.test.ts:28 detects guarded/unconditional conflict and attributes only the sufficient core](/test/contract/static-queries.test.ts#L28)
+
+#### Scenario: Self-Conflict Needs No Cross-Claim Pair [FLA-ACTIVATE-SELF]
+WHEN `B and G_i` is SAT but adding the rule's response is UNSAT, THE spec-check tool SHALL report the self-response conflict without requiring another claim or a shared-symbol pair.
+
+##### Evidence
+- Implementation: [static-analysis.ts:84 checkRuleResponses()](/src/domain/formal/static-analysis.ts#L84)
+
+#### Scenario: Multi-Rule Conflict Is Attributed Honestly [FLA-ACTIVATE-MULTI]
+WHEN activation is infeasible because of three or more mandatory rules, THE spec-check tool SHALL preserve the actual sufficient core rather than require a contradictory pair.
+
+##### Evidence
+- Implementation: [static-analysis.ts:84 checkRuleResponses()](/src/domain/formal/static-analysis.ts#L84), [static-context.ts:93 coreIds()](/src/domain/formal/static-context.ts#L93)
+- Test: [static-queries.test.ts:38 detects three-rule conflicts through constraint dependency closure](/test/contract/static-queries.test.ts#L38)
+
+#### Scenario: Impossible Guard Is Static Vacuity [FLA-ACTIVATE-VACUOUS]
+WHEN `B and G_i` is UNSAT, THE spec-check tool SHALL report static guard vacuity under B without claiming temporal unreachability.
+
+##### Evidence
+- Implementation: [static-analysis.ts:84 checkRuleResponses()](/src/domain/formal/static-analysis.ts#L84)
+- Test: [static-queries.test.ts:81 reports script budget exhaustion and static guard vacuity explicitly](/test/contract/static-queries.test.ts#L81)
+
+#### Requirement model
+
+```alloy
+// Activation, guard and self-response formulas above distinguish static vacuity
+// from full-set response infeasibility, without inventing temporal reachability.
+// Safety: activation subset global.
+assert activation_subset_global { all q : Query | q.kind = Activation implies formula[q] in mandatory[q.group] }
+```
+
+### Requirement: Preserve Scenario Logical Meaning [FLA-SCENARIO-MEANING]
+WHEN scenario artifacts are formalized, THE spec-check tool SHALL preserve refinement, example, and prohibited-example semantics with scenario-scoped postconditions.
+
+**References:**
+- [Design: Static query contracts](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#static-query-contracts)
+
+#### Scenario: Example Does Not Assert A Global Fact [FLA-SCENARIO-WITNESS]
+WHEN a concrete positive example is checked, THE spec-check tool SHALL query `B and C and input and expected` as a witness without adding its concrete input or expected response to every valuation.
+
+##### Evidence
+- Implementation: [predicate-lowering.ts:89 lowerPredicates()](/src/domain/formal/predicate-lowering.ts#L89), [static-analysis.ts:133 checkScenarios()](/src/domain/formal/static-analysis.ts#L133)
+- Test: [static-queries.test.ts:90 every production query family agrees with the independent finite evaluator](/test/contract/static-queries.test.ts#L90)
+
+#### Scenario: Prohibited Example Checks Allowed Bad Behavior [FLA-SCENARIO-PROHIBITED]
+WHEN a prohibited example is checked, THE spec-check tool SHALL report SAT of `B and C and input and forbidden` as allowed prohibited behavior and SHALL report UNSAT only as exclusion within the admitted scope.
+
+##### Evidence
+- Implementation: [predicate-lowering.ts:89 lowerPredicates()](/src/domain/formal/predicate-lowering.ts#L89), [static-analysis.ts:133 checkScenarios()](/src/domain/formal/static-analysis.ts#L133)
+
+#### Requirement model
+
+```alloy
+// Concrete examples are query-local; mandatory excludes their concrete inputs.
+// Safety: examples are query local.
+assert examples_are_query_local { all q : Query | q.kind in PositiveExample + NegativeExample implies
+  formula[q] in q.first.input & q.first.outcome & q.first.postcondition }
+```
+
+### Requirement: Bound Every New Analysis Stage [FLA-ANALYSIS-BOUNDS]
+WHEN discovery, expression processing, query planning, or evidence-producing solver work begins, THE spec-check tool SHALL enforce the effective named count, byte, depth, time, and concurrency limits documented in the design.
+
+**References:**
+- [Design: Resource bounds and encoding](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#resource-bounds-and-encoding)
+
+#### Scenario: Enumeration And Solver Work Remain Bounded [FLA-BOUNDS-QUERIES]
+WHEN the per-group script ceiling of 1,000 or run-wide solver concurrency ceiling of 16 applies, THE spec-check tool SHALL count clustering, auxiliary, and comparison scripts within the same resource accounting and SHALL report unexecuted scope.
+
+**Postcondition:** The shared per-capability actual-script allowance and run-owned recorder also apply when all original statements are excluded and only generated typed artifacts exist. Empty generated scope executes no scripts.
+
+##### Evidence
+- Implementation: [query-executor.ts:124 execute()](/src/domain/formal/query-executor.ts#L124), [query-executor.ts:88 acquire()](/src/domain/formal/query-executor.ts#L88)
+- Test: [static-queries.test.ts:81 reports script budget exhaustion and static guard vacuity explicitly](/test/contract/static-queries.test.ts#L81), [static-queries.test.ts:107 shared executor enforces its process ceiling for concurrent callers](/test/contract/static-queries.test.ts#L107), [query-timeout-history.test.ts:16 releases slots after timeout, then preserves exact completed evidence: %s](/test/contract/query-timeout-history.test.ts#L16)
+- Test (integration): [generated-only-cli.integration.test.ts:40 %s shares evidence and capability budget when all originals are excluded](/test/integration/generated-only-cli.integration.test.ts#L40), [generated-only-cli.integration.test.ts:59 empty independent generation executes no solver queries](/test/integration/generated-only-cli.integration.test.ts#L59)
+
+#### Scenario: Expression Limits Precede Solver Work [FLA-BOUNDS-EXPRESSIONS]
+IF an expression exceeds its effective 65,536-byte, 8,192-node, or depth-128 default limit, THEN THE spec-check tool SHALL reject it with attributed evidence before compilation or solver execution.
+
+**Postcondition:** The effective configured limits apply equally to foreground predicates, authored background, and coverage applicability. Cached registry preparation must include the limit tuple or be bound to one limit set; reusing a registry cannot bypass a tighter limit.
+
+##### Evidence
+- Implementation: [expression-parser.ts:22 parseExpressionSyntax()](/src/domain/formal/expression-parser.ts#L22), [predicate-lowering.ts:44 PredicatePreparation](/src/domain/formal/predicate-lowering.ts#L44), [expressions.ts:24 validateExpression()](/src/domain/formal/expressions.ts#L24)
+- Test: [typed-expressions.test.ts:78 classifies the assembled query and bounds syntax nodes/depth](/test/contract/typed-expressions.test.ts#L78), [formal-preparation.test.ts:105 applies effective byte/node/depth limits to %s across cache reuse](/test/contract/formal-preparation.test.ts#L105)
+
+#### Scenario: Discovery Limits Are Not Silent Truncation [FLA-BOUNDS-DISCOVERY]
+IF discovery exceeds its default 1-MiB group context, 256-KiB chunk, 32-chunk, or 2,048-concept limits, THEN THE spec-check tool SHALL record affected unresolved scope instead of silently omitting concepts.
+
+##### Evidence
+- Implementation: [concept-discovery.ts:35 discoverGroup()](/src/domain/formal/concept-discovery.ts#L35), [concepts.ts:126 freezeRegistry()](/src/domain/formal/concepts.ts#L126)
+- Test: [concept-discovery.test.ts:46 does not call the model on a context that exceeds admission bounds](/test/contract/concept-discovery.test.ts#L46), [concept-registry.test.ts:75 exposes concept bounds instead of silently truncating discovery](/test/contract/concept-registry.test.ts#L75)
+
+#### Scenario: Disabling Physical Splitting Does Not Remove Bounds [FLA-BOUNDS-BATCH-ZERO]
+WHEN `maxBatchSize` is zero, THE spec-check tool SHALL preserve the single-chunk transport behavior while still enforcing semantic context, expression, query, and evidence bounds.
+
+##### Evidence
+- Implementation: [source-formalize.ts:80 processGroup()](/src/domain/formal/source-formalize.ts#L80), [concept-discovery.ts:35 discoverGroup()](/src/domain/formal/concept-discovery.ts#L35), [predicate-lowering.ts:89 lowerPredicates()](/src/domain/formal/predicate-lowering.ts#L89)
+- Test: [formalization-predicates.test.ts:114 maxBatchSize zero cannot bypass typed expression or context bounds](/test/contract/formalization-predicates.test.ts#L114)
+
+#### Requirement model
+
+```alloy
+pred issue[q : Query, s : ScriptToken, e : EvidenceToken] {
+  query_enabled[q]
+  s not in Query.(Run.usedScripts)
+  e not in (Attempt + Query).(Run.reservations)
+  Run.issued' = Run.issued + q
+  Run.usedScripts' = Run.usedScripts + q -> s
+  Run.reservations' = Run.reservations + q -> e
+  Run.persisted' = Run.persisted
+  Run.skipped' = Run.skipped
+  Run.outputFailed' = Run.outputFailed
+  Run.phase' = Run.phase
+  Run.frozen' = Run.frozen
+  keep_attempts
+}
+pred skip[q : Query] {
+  ((Run.phase = Selecting and q.stage = ClusteringQueries) or (Run.phase = Analyzing and q.stage = AnalysisQueries))
+  q not in Run.issued + Run.skipped
+  (q.prerequisites in Run.persisted + Run.skipped and not query_enabled[q]) or
+    some q.prerequisites & Run.skipped or
+    (some p : q.satPrerequisites & Run.persisted | verdict[p] != Sat) or
+    no ScriptToken - Query.(Run.usedScripts) or
+    no EvidenceToken - (Attempt + Query).(Run.reservations)
+  Run.skipped' = Run.skipped + q
+  Run.issued' = Run.issued
+  Run.persisted' = Run.persisted
+  Run.usedScripts' = Run.usedScripts
+  Run.reservations' = Run.reservations
+  Run.outputFailed' = Run.outputFailed
+  Run.phase' = Run.phase
+  Run.frozen' = Run.frozen
+  keep_attempts
+}
+// Safety: each actual script consumes a unique script and reserved capture token.
+assert scripts_are_charged { always (Run.usedScripts.ScriptToken = Run.issued and
+  all s : ScriptToken | lone (Run.usedScripts).s) }
 ```
 
 ### State machine and invariant checks
 
 ```alloy
-// ============================================================
-// FAILURE MODES — Explicit predicates with guard/effect/frame
-// ============================================================
-//
-// Each failure mode is modeled as a named predicate with:
-//   - Guard: phase and condition that triggers the failure
-//   - Effect: state changes (phase transition, findings, exit code)
-//   - Frame: all mutable relations not affected are preserved
-//
-// FM-1: Total formalization failure -> abort with exit code 2
-// (Already modeled above as formalize_abort)
-//
-// FM-2: Partial formalization failure -> continue with available candidates
-// (Already modeled above as formalize_partial)
-//
-// FM-3: Schema validation failure -> exclude bad sample, preserve as evidence
-// (Already modeled above as validate_reject)
-//
-// FM-4: Signature conflicts -> exclude conflicting claim, emit merge_conflict
-// (Already modeled above as emit_merge_conflict)
-//
-// FM-5: Clustering ambiguity -> emit ambiguity finding, no representative
-// (Already modeled above as cluster_divergent)
-//
-// FM-6: Solver timeout -> classify as inconclusive, emit warning, continue
-// (Already modeled above as solver_inconclusive)
-//
-// FM-7: Solver error -> emit solver_error finding, persist evidence
-// (Already modeled above as solver_error_found)
-
-// FM-8: Pair budget exhaustion -> stop checking, bounded termination
-pred pair_budget_exhausted {
-  // Guard: analysis phase, pairwise checks in progress
-  Pipeline.phase = AnalysisPh
-  // Effect: no additional pairwise findings emitted (budget spent)
-  // The pipeline continues to the next analysis step
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
+pred keep_attempts_except_selection {
+  Run.stages' = Run.stages
+  Run.spawned' = Run.spawned
+  Run.captured' = Run.captured
+  Run.settled' = Run.settled
+  Run.accepted' = Run.accepted
+  Run.errors' = Run.errors
 }
-
-// FM-9: Logical key collision -> abort pipeline before writing artifacts
-// (Already modeled above as collision_aborts_pipeline)
-
-// --- Compile-group preflight (FM-11, FM-12) ------------------------------
-// A compile group is the set of surviving claims for one merged capability
-// that the orchestrator preflights BEFORE combined SMT-LIB compilation and
-// before any solver invocation. Preflight rejection is a genuinely distinct
-// failure mode from merge-conflict exclusion (emit_merge_conflict): it emits
-// a `logic.invalid_group` finding (modeled by the InvalidGroup finding type),
-// skips compilation AND the solver for that group, and writes no solver
-// artifacts/evidence for it [FLA-SPEC-DUPLICATE-CLAIM-ID, FLA-SPEC-GROUP-BOUNDS].
-sig CompileGroup {
-  groupSpec  : one Spec,
-  members    : set Claim,
-  oversized  : one Bool     // group- or per-claim cardinality bound exceeded
-} {
-  some members
-  all c : members | c.spec = groupSpec
+pred keep_attempts { keep_attempts_except_selection and Run.selected' = Run.selected }
+pred keep_attempts_except_transport {
+  Run.spawned' = Run.spawned
+  Run.settled' = Run.settled
+  Run.accepted' = Run.accepted
+  Run.errors' = Run.errors
+  Run.selected' = Run.selected
 }
-
-// A group has a duplicate-identity collision when two distinct member claims
-// share one sanitized claimId.
-pred hasDuplicateClaimId [g : CompileGroup] {
-  some disj c1, c2 : g.members | c1.claimId = c2.claimId
+pred keep_queries_except_reservations {
+  Run.issued' = Run.issued
+  Run.persisted' = Run.persisted
+  Run.skipped' = Run.skipped
+  Run.usedScripts' = Run.usedScripts
+  Run.outputFailed' = Run.outputFailed
 }
-
-// A group is well-formed for the solver: distinct claim identities and within
-// cardinality bounds.
-pred groupPreflightOk [g : CompileGroup] {
-  not hasDuplicateClaimId[g]
-  g.oversized = False
+pred keep_queries { keep_queries_except_reservations and Run.reservations' = Run.reservations }
+pred keep_queries_except_persistence {
+  Run.issued' = Run.issued
+  Run.skipped' = Run.skipped
+  Run.usedScripts' = Run.usedScripts
+  Run.reservations' = Run.reservations
+  Run.outputFailed' = Run.outputFailed
 }
-
-// Shared rejection effect: emit one InvalidGroup finding over the group's
-// members, skip the solver (no evidence persisted for the group), and leave
-// every other pipeline relation fixed.
-pred reject_invalid_group [g : CompileGroup] {
-  Pipeline.phase = CompilationPh
-  some f : Finding {
-    f not in Pipeline.findings
-    f.findingType = InvalidGroup
-    f.severity = ErrorSev
-    f.involvedClaims = g.members
-    Pipeline.findings' = Pipeline.findings + f
-  }
-  // Solver skipped for this group: no evidence written for its spec on this
-  // event. (Sibling groups persist their own evidence via solver_* events.)
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
+pred begin_analysis {
+  Run.phase = Selecting and (Run.selected).Sample = candidates
+  { q : Query | q.stage = ClusteringQueries } in Run.persisted + Run.skipped
+  Run.phase' = (Config.artifactKeyCollision = True => Aborted else Analyzing)
+  Run.frozen' = Run.frozen
+  keep_attempts
+  keep_queries
 }
-
-// FM-11: Duplicate claim IDs -> invalid group, skip solver [FLA-SPEC-DUPLICATE-CLAIM-ID]
-pred duplicate_claim_id_rejected [g : CompileGroup] {
-  hasDuplicateClaimId[g]
-  reject_invalid_group[g]
+pred finish {
+  Run.phase = Analyzing and Query = Run.persisted + Run.skipped
+  Run.phase' = Complete
+  Run.frozen' = Run.frozen
+  keep_attempts
+  keep_queries
 }
-
-// FM-12: Oversized compile group -> invalid group, skip solver [FLA-SPEC-GROUP-BOUNDS]
-pred oversized_group_rejected [g : CompileGroup] {
-  g.oversized = True
-  reject_invalid_group[g]
+pred write_failure[q : Query] {
+  Run.phase in Selecting + Analyzing and q in Run.issued - Run.persisted and q.writeFails = True
+  Run.phase' = Aborted
+  Run.outputFailed' = True
+  Run.frozen' = Run.frozen
+  keep_attempts
+  Run.issued' = Run.issued
+  Run.persisted' = Run.persisted
+  Run.skipped' = Run.skipped
+  Run.usedScripts' = Run.usedScripts
+  Run.reservations' = Run.reservations
 }
-
-// FM-13: Dangling assertion reference -> solver error [FLA-SPEC-DANGLING-REF].
-// SUBSET of an already-modeled failure mode: a dangling reference (an assertion
-// pointing at a declaration made undefined by merge exclusion) surfaces through
-// the SAME handling as any other solver error -- a `logic.solver_error` finding
-// at error severity with persisted solver input/output. Its causal origin
-// (merge exclusion, an assertion-resolution detail below this model's
-// abstraction) does not change the state transition, so it is covered by
-// solver_error_found[sqr] above rather than duplicated as a distinct event.
-
-// FM-14: Comment injection -> sanitization keeps mapping comments inert
-// [FLA-SPEC-COMMENT-SAFE]. SUBSET / structural: this is not a distinct runtime
-// transition but a pure-function invariant on compiled output, already captured
-// by fact compilation_valid (art.hasMappingComments = True with an injective,
-// newline-escaping sanitizer). No separate event is warranted.
-
-// FM-15: Pairwise/completeness inconclusive -> aggregated warning
-// [FLA-PAIRWISE, FLA-COMPLETENESS]. SUBSET of solver_inconclusive: aggregating
-// several timeout/unknown verdicts into one `logic.inconclusive` warning is the
-// same state transition as the global inconclusive case (one Inconclusive
-// warning finding, evidence preserved, pipeline continues). The aggregation
-// bookkeeping (counts, sampled claim IDs) is below this model's abstraction, so
-// solver_inconclusive[sqr] above provides the coverage.
-
-// --- Semantic batching: temp lifecycle and batch resolution events ---
-// [FLA-TEMP-LIFECYCLE, FLA-CLAIM-PARTITION, FLA-DEGRADE-KIND, FLA-BATCH-EVIDENCE]
-
-// Frame-condition helper: batch state unchanged
-pred batch_frame [b : PhysicalBatch] {
-  tempState' = tempState
-  resolution' = resolution
-  degraded' = degraded
-  outcomes' = outcomes
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
+pred init {
+  Run.phase = Discover
+  no Run.frozen + Run.spawned + Run.captured + Run.settled + Run.accepted + Run.errors +
+    Run.issued + Run.persisted + Run.skipped
+  no Run.selected
+  no Run.usedScripts
+  no Run.reservations
+  Run.stages = Attempt -> NotCreated
+  Run.outputFailed = False
 }
-
-// Attached batch: create the temp directory (may fail, e.g. OS temp
-// unwritable) [FLA-TEMP-DIRFAIL, FLA-TEMP-OSUNWRITABLE].
-pred create_dir_ok [b : PhysicalBatch] {
-  b.attached = Attached
-  b.tempState = NotCreated
-  tempState' = tempState ++ b -> DirCreated
-  resolution' = resolution
-  degraded' = degraded
-  outcomes' = outcomes
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
+pred stutter { Run.phase' = Run.phase and Run.frozen' = Run.frozen and keep_attempts and keep_queries }
+fact behavior { init and always (stutter or begin_sampling or end_sampling or begin_analysis or finish or
+  (some g : Group | freeze[g]) or (some a : Attempt | prepare[a] or write_context[a] or cleanup[a] or settle[a]) or
+  (some a : Attempt, e : EvidenceToken | capture[a,e]) or (some c : eligible | close_claim[c]) or
+  (some c : Claim, s : Sample | choose[c,s]) or (some q : Query | persist[q] or skip[q] or write_failure[q]) or
+  (some q : Query, s : ScriptToken, e : EvidenceToken | issue[q,s,e])) }
+// Scheduler premises service actions, not the desired final outcome. Model
+// attempts have finite opportunity sets. Resource availability for model capture
+// is explicit; query refusal is a visible skip and needs no success assumption.
+pred fairness {
+  always (Run.phase = Discover implies eventually (begin_sampling or some g : Group | freeze[g]))
+  always (Run.phase = Sampling implies eventually (end_sampling or
+    (some a : Attempt | prepare[a] or write_context[a] or cleanup[a] or settle[a]) or
+    (some a : Attempt, e : EvidenceToken | capture[a,e]) or (some c : eligible | close_claim[c])))
+  always (Run.phase = Selecting implies eventually (begin_analysis or (some c : Claim, s : Sample | choose[c,s]) or
+    (some q : Query | persist[q] or skip[q] or write_failure[q]) or
+    (some q : Query, s : ScriptToken, e : EvidenceToken | issue[q,s,e])))
+  always (Run.phase = Analyzing implies eventually (finish or (some q : Query | persist[q] or skip[q] or write_failure[q]) or
+    (some q : Query, s : ScriptToken, e : EvidenceToken | issue[q,s,e])))
 }
-
-pred create_dir_fail [b : PhysicalBatch] {
-  b.attached = Attached
-  b.tempState = NotCreated
-  // Directory creation failed: transport failure, claim errors for the whole
-  // physical batch. No temp dir exists, so no cleanup is owed and outcomes
-  // may be assigned immediately [FLA-TEMP-ORDER].
-  tempState' = tempState
-  resolution' = resolution ++ b -> TransportFailure
-  degraded' = degraded
-  all c : b.claims |
-    b.outcomes[c] = NoOutcome implies b.outcomes'[c] = ClaimErrorOutcome
-  all c : b.claims |
-    b.outcomes[c] != NoOutcome implies b.outcomes'[c] = b.outcomes[c]
-  all c : Claim - b.claims | b.outcomes'[c] = b.outcomes[c]
-  all b2 : PhysicalBatch - b, c : Claim | b2.outcomes'[c] = b2.outcomes[c]
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence + b
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-// Attached batch: write the context file (may fail after dir creation)
-// [FLA-TEMP-WRITEFAIL].
-pred write_file_ok [b : PhysicalBatch] {
-  b.attached = Attached
-  b.tempState = DirCreated
-  tempState' = tempState ++ b -> FileWritten
-  resolution' = resolution
-  degraded' = degraded
-  outcomes' = outcomes
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-pred write_file_fail [b : PhysicalBatch] {
-  b.attached = Attached
-  b.tempState = DirCreated
-  // Write failed: transport failure; cleanup of the created directory is
-  // attempted in cleanup_* events. Claim errors after cleanup completes
-  // [FLA-TEMP-ORDER].
-  tempState' = tempState
-  resolution' = resolution ++ b -> TransportFailure
-  degraded' = degraded
-  outcomes' = outcomes
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence + b
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-// Attached batch: invoke the model with the attached context; terminal
-// outcomes cover success, model failure (degradable), and infrastructure
-// failure (no fallback) [FLA-DEGRADE-KIND].
-pred attempt_success [b : PhysicalBatch] {
-  b.attached = Attached
-  b.tempState = FileWritten
-  b.resolution = Unresolved
-  tempState' = tempState
-  resolution' = resolution ++ b -> BatchSuccess
-  degraded' = degraded
-  outcomes' = outcomes
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence + b
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-pred attempt_model_failure [b : PhysicalBatch] {
-  b.attached = Attached
-  b.tempState = FileWritten
-  b.resolution = Unresolved
-  tempState' = tempState
-  resolution' = resolution ++ b -> ModelFailure
-  degraded' = degraded
-  outcomes' = outcomes
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence + b
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-pred attempt_infra_failure [b : PhysicalBatch, k : ErrorKind] {
-  b.attached = Attached
-  b.tempState = FileWritten
-  b.resolution = Unresolved
-  k in SpawnError + InvalidFiles + InvalidTimeout
-  tempState' = tempState
-  resolution' = resolution ++ b -> InfraFailure
-  degraded' = degraded
-  outcomes' = outcomes
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence + b
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-// Attached batch: prompt too large. Modeled as a ModelFailure whose
-// degradation is gated by fallbackFits [FLA-DEGRADE-TOOLARGE].
-pred attempt_prompt_too_large [b : PhysicalBatch] {
-  b.attached = Attached
-  b.tempState = FileWritten
-  b.resolution = Unresolved
-  tempState' = tempState
-  resolution' = resolution ++ b -> ModelFailure
-  degraded' = degraded
-  outcomes' = outcomes
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence + b
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-// Cleanup after a terminal attempt state. Attempted for every attached batch
-// that created a directory, regardless of resolution [FLA-TEMP-LIFECYCLE].
-// On success with failed cleanup, candidates are preserved (outcomes
-// untouched) [FLA-TEMP-CLEANUP-WARN].
-pred cleanup_succeeds [b : PhysicalBatch] {
-  b.attached = Attached
-  b.tempState in DirCreated + FileWritten
-  b.resolution != Unresolved
-  tempState' = tempState ++ b -> CleanupSucceeded
-  resolution' = resolution
-  degraded' = degraded
-  outcomes' = outcomes
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-pred cleanup_fails [b : PhysicalBatch] {
-  b.attached = Attached
-  b.tempState in DirCreated + FileWritten
-  b.resolution != Unresolved
-  tempState' = tempState ++ b -> CleanupFailed
-  resolution' = resolution
-  degraded' = degraded
-  outcomes' = outcomes
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-// Degradation and terminal outcome assignment [FLA-DEGRADE-KIND,
-// FLA-CLAIM-PARTITION, FLA-TEMP-ORDER].
-
-// Model failure degrades to per-claim inline retry when the fallback fits.
-pred degrade_to_per_claim [b : PhysicalBatch] {
-  b.resolution = ModelFailure
-  b.degraded = NotDegraded
-  b.tempState in CleanupSucceeded + CleanupFailed
-  b.fallbackFits = FallbackFits
-  tempState' = tempState
-  resolution' = resolution
-  degraded' = degraded ++ b -> Degraded
-  outcomes' = outcomes
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-// Per-claim retry resolves each claim independently to candidate or error.
-pred resolve_degraded_claims [b : PhysicalBatch] {
-  b.degraded = Degraded
-  some c : b.claims | b.outcomes[c] = NoOutcome
-  tempState' = tempState
-  resolution' = resolution
-  degraded' = degraded
-  all c : b.claims |
-    b.outcomes[c] = NoOutcome implies
-      (b.outcomes'[c] = CandidateOutcome or b.outcomes'[c] = ClaimErrorOutcome)
-  all c : b.claims |
-    b.outcomes[c] != NoOutcome implies b.outcomes'[c] = b.outcomes[c]
-  all c : Claim - b.claims | b.outcomes'[c] = b.outcomes[c]
-  all b2 : PhysicalBatch - b, c : Claim | b2.outcomes'[c] = b2.outcomes[c]
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-// No degradation: all claims of the batch become claim errors. Applies to
-// infra failure, transport failure after cleanup (or with no dir created),
-// and model failure whose fallback does not fit.
-pred resolve_batch_errors [b : PhysicalBatch] {
-  b.degraded = NotDegraded
-  some c : b.claims | b.outcomes[c] = NoOutcome
-  {
-    b.resolution = InfraFailure
-    or (b.resolution = TransportFailure and b.tempState in CleanupSucceeded + CleanupFailed + NotCreated)
-    or (b.resolution = ModelFailure and b.fallbackFits = FallbackDoesNotFit
-        and b.tempState in CleanupSucceeded + CleanupFailed)
-  }
-  tempState' = tempState
-  resolution' = resolution
-  degraded' = degraded
-  all c : b.claims |
-    b.outcomes[c] = NoOutcome implies b.outcomes'[c] = ClaimErrorOutcome
-  all c : b.claims |
-    b.outcomes[c] != NoOutcome implies b.outcomes'[c] = b.outcomes[c]
-  all c : Claim - b.claims | b.outcomes'[c] = b.outcomes[c]
-  all b2 : PhysicalBatch - b, c : Claim | b2.outcomes'[c] = b2.outcomes[c]
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-// Successful batch: all claims become candidates, even if cleanup failed
-// [FLA-TEMP-CLEANUP-WARN]. Outcomes assigned only after a terminal cleanup
-// state [FLA-TEMP-ORDER].
-pred resolve_batch_success [b : PhysicalBatch] {
-  b.resolution = BatchSuccess
-  b.degraded = NotDegraded
-  some c : b.claims | b.outcomes[c] = NoOutcome
-  b.tempState in CleanupSucceeded + CleanupFailed
-  tempState' = tempState
-  resolution' = resolution
-  degraded' = degraded
-  all c : b.claims |
-    b.outcomes[c] = NoOutcome implies b.outcomes'[c] = CandidateOutcome
-  all c : b.claims |
-    b.outcomes[c] != NoOutcome implies b.outcomes'[c] = b.outcomes[c]
-  all c : Claim - b.claims | b.outcomes'[c] = b.outcomes[c]
-  all b2 : PhysicalBatch - b, c : Claim | b2.outcomes'[c] = b2.outcomes[c]
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-// Inline (single-claim) batch: resolve directly; no temp lifecycle.
-pred resolve_inline [b : PhysicalBatch] {
-  b.attached = Inline
-  b.resolution = Unresolved
-  tempState' = tempState
-  one r : BatchSuccess + ModelFailure + InfraFailure |
-    resolution' = resolution ++ b -> r
-  degraded' = degraded
-  outcomes' = outcomes
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-pred resolve_inline_outcome [b : PhysicalBatch] {
-  b.attached = Inline
-  b.resolution != Unresolved
-  some c : b.claims | b.outcomes[c] = NoOutcome
-  tempState' = tempState
-  resolution' = resolution
-  degraded' = degraded
-  all c : b.claims |
-    b.outcomes[c] = NoOutcome implies
-      (b.outcomes'[c] = CandidateOutcome or b.outcomes'[c] = ClaimErrorOutcome)
-  all c : b.claims |
-    b.outcomes[c] != NoOutcome implies b.outcomes'[c] = b.outcomes[c]
-  all c : Claim - b.claims | b.outcomes'[c] = b.outcomes[c]
-  all b2 : PhysicalBatch - b, c : Claim | b2.outcomes'[c] = b2.outcomes[c]
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-// FM-10: JSON extraction failure -> sample rejected before schema validation
-pred json_extraction_failure {
-  // Guard: formalization phase, LLM response is irrecoverable
-  Pipeline.phase = FormalizationPh
-  // Effect: no sample created from this response (state unchanged)
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-// --- Failure mode safety assertions ---
-
-// FM-8: pair budget exhaustion never produces false findings
-assert budget_exhaustion_no_false_findings {
-  always (pair_budget_exhausted implies Pipeline.findings' = Pipeline.findings)
-}
-
-// FM-9: collision abort always sets exit code 2
-assert collision_abort_sets_exit_code {
-  always (collision_aborts_pipeline implies Pipeline.exitCode' = 2)
-}
-
-// FM-10: JSON failures never corrupt pipeline state
-assert json_failure_no_state_corruption {
-  always (json_extraction_failure implies (
-    Pipeline.candidates' = Pipeline.candidates and
-    Pipeline.findings' = Pipeline.findings))
-}
-
-// Cross-cutting: every abort sets exit code 2
-assert all_aborts_set_exit_code {
-  always (Pipeline.phase' = AbortedPh implies Pipeline.exitCode' = 2)
-}
-
-// Cross-cutting: non-abort failures preserve phase
-assert non_abort_failures_preserve_phase {
-  always (
-    (pair_budget_exhausted or json_extraction_failure)
-    implies Pipeline.phase' != AbortedPh)
-}
-
-// FM-11: a duplicate-claim-id group always yields an InvalidGroup error
-// finding over exactly the group's members (and, by reject_invalid_group's
-// frame, persists no solver evidence -- the solver is skipped).
-assert duplicate_id_rejected_with_finding {
-  always (all g : CompileGroup |
-    duplicate_claim_id_rejected[g] implies
-      (some f : Pipeline.findings' - Pipeline.findings |
-        f.findingType = InvalidGroup and f.severity = ErrorSev and
-        f.involvedClaims = g.members))
-}
-
-// FM-12: an oversized group always yields an InvalidGroup error finding and
-// skips the solver.
-assert oversized_group_rejected_with_finding {
-  always (all g : CompileGroup |
-    oversized_group_rejected[g] implies
-      (some f : Pipeline.findings' - Pipeline.findings |
-        f.findingType = InvalidGroup and f.severity = ErrorSev and
-        f.involvedClaims = g.members))
-}
-
-// FM-11/FM-12 safety: an invalid-group rejection never invokes the solver, so
-// it persists no new evidence for the rejected group on that event.
-assert invalid_group_skips_solver {
-  always (all g : CompileGroup |
-    reject_invalid_group[g] implies Pipeline.evidence' = Pipeline.evidence)
-}
-
-// FM-11 safety: a solver-bound group never carries a duplicate claim identity.
-// (A well-formed group has one-to-one claim identity across its members.)
-assert solver_group_ids_unique {
-  all g : CompileGroup | groupPreflightOk[g] implies not hasDuplicateClaimId[g]
-}
-
-// ============================================================
-// TRANSITION SYSTEM
-// ============================================================
-
-pred advance_to_compilation {
-  Pipeline.phase = ClusteringPh
-  Pipeline.phase' = CompilationPh
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-pred advance_to_analysis {
-  Pipeline.phase = CompilationPh
-  not logical_key_collision
-  Pipeline.phase' = AnalysisPh
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-pred advance_to_reporting {
-  Pipeline.phase = AnalysisPh
-  Pipeline.phase' = ReportingPh
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-pred stutter {
-  batchStateFrozen
-  Pipeline.phase' = Pipeline.phase
-  Pipeline.candidates' = Pipeline.candidates
-  Pipeline.representatives' = Pipeline.representatives
-  Pipeline.findings' = Pipeline.findings
-  Pipeline.evidence' = Pipeline.evidence
-  Pipeline.attemptEvidence' = Pipeline.attemptEvidence
-  Pipeline.exitCode' = Pipeline.exitCode
-}
-
-pred init_state {
-  Pipeline.phase = FormalizationPh
-  no Pipeline.candidates
-  no Pipeline.representatives
-  no Pipeline.findings
-  no Pipeline.evidence
-  no Pipeline.attemptEvidence
-  no Pipeline.exitCode
-  // Semantic batching initial state
-  all b : PhysicalBatch | {
-    b.tempState = NotCreated
-    b.resolution = Unresolved
-    b.degraded = NotDegraded
-  }
-  all b : PhysicalBatch, c : b.claims | b.outcomes[c] = NoOutcome
-}
-
-// Frame helper: freeze every physical batch's mutable state. Conjoined with
-// each non-batch (pipeline/analysis) event so batch outcomes cannot change
-// during phase, formalization, clustering, or solver transitions. This is what
-// lets outcome stability follow from the event frame conditions instead of an
-// imposed fact.
-pred batchStateFrozen {
-  tempState' = tempState
-  resolution' = resolution
-  degraded' = degraded
-  outcomes' = outcomes
-}
-
-fact transitions {
-  init_state and always (
-    // --- Pipeline / analysis events (batch state frozen) ---
-    (batchStateFrozen and (
-      // Formalization events (including FM-1, FM-2, FM-10)
-      formalize_success or formalize_abort or formalize_partial
-      or json_extraction_failure
-      // Validation events (including FM-3)
-      or (some s : Sample | validate_accept[s] or validate_reject[s])
-      or validation_complete
-      // Clustering events (including FM-5)
-      or (some c : Claim, cl : Cluster | cluster_select_representative[c, cl])
-      or (some c : Claim | cluster_divergent[c])
-      // Compilation events (including FM-4, FM-9)
-      or (some disj c1, c2 : Claim | emit_merge_conflict[c1, c2])
-      or collision_aborts_pipeline
-      // Phase transitions
-      or advance_to_compilation or advance_to_analysis or advance_to_reporting
-      // Solver analysis events (including FM-6, FM-7; FM-13 covered here)
-      or (some sqr : SpecQueryResult |
-          solver_reports_contradiction[sqr] or solver_inconclusive[sqr] or
-          solver_sat_deeper[sqr] or solver_error_found[sqr])
-      // Pairwise events (including FM-8; FM-15 aggregation covered here)
-      or (some pc : PairwiseCheck | pairwise_contradiction[pc] or pairwise_compatible[pc])
-      or pair_budget_exhausted
-      // Completeness events
-      or (some gc : GapCheck | completeness_gap_detected[gc] or exhaustive_guards[gc])
-      or (some sp : Spec | completeness_gap_skipped[sp])
-      // Invalid-group preflight events (FM-11, FM-12)
-      or (some g : CompileGroup | duplicate_claim_id_rejected[g] or oversized_group_rejected[g])
-    ))
-    // --- Semantic batching: temp lifecycle and batch resolution events ---
-    // (each already freezes all Pipeline relations internally)
-    or (some b : PhysicalBatch | create_dir_ok[b] or create_dir_fail[b])
-    or (some b : PhysicalBatch | write_file_ok[b] or write_file_fail[b])
-    or (some b : PhysicalBatch |
-          attempt_success[b] or attempt_model_failure[b] or attempt_prompt_too_large[b])
-    or (some b : PhysicalBatch, k : ErrorKind | attempt_infra_failure[b, k])
-    or (some b : PhysicalBatch | cleanup_succeeds[b] or cleanup_fails[b])
-    or (some b : PhysicalBatch | degrade_to_per_claim[b])
-    or (some b : PhysicalBatch |
-          resolve_degraded_claims[b] or resolve_batch_errors[b] or resolve_batch_success[b])
-    or (some b : PhysicalBatch | resolve_inline[b] or resolve_inline_outcome[b])
-    // Stutter (required for deadlock-free infinite traces)
-    or stutter
-  )
-}
-
-// ============================================================
-// INDUCTIVE INVARIANT
-// ============================================================
-// A single structural-health invariant over the pipeline and batch state. Its
-// conjuncts are the cross-cutting safety properties that must hold in every
-// reachable state: only schema-valid samples are candidates, findings reference
-// real claims, no claim lands in two physical batches, assigned batch outcomes
-// are terminal, and every resolved attached attempt has recorded evidence.
-//
-// Following claim-graph-and-coverage, the invariant is checked in two fast,
-// bounded steps rather than by unrolling every trace:
-//   * initiation  -- the invariant holds in the initial state (1 step);
-//   * preservation -- any single transition preserves it (2 steps).
-// Together these imply the invariant holds at all reachable states, which keeps
-// verification cheap even as the combined phase/batch state space grows.
-pred pipeline_inv {
-  // Only schema-valid samples are candidates.
-  all s : Pipeline.candidates | s.schemaValid = True
-  // Findings only reference claims in the domain.
-  all f : Pipeline.findings | f.involvedClaims in Claim
-  // A claim never belongs to two physical batches.
-  all disj b1, b2 : PhysicalBatch | no (b1.claims & b2.claims)
-  // Every resolved attached batch has recorded attempt evidence.
-  all b : PhysicalBatch |
-    (b.attached = Attached and b.resolution != Unresolved)
-      implies b in Pipeline.attemptEvidence
-}
-
-// Initiation: the invariant holds in the initial state.
-assert pipeline_inv_initiation {
-  init_state implies pipeline_inv
-}
-
-// Preservation: because fact transitions constrains every adjacent state pair
-// in a trace to be a real transition (or stutter), checking that the invariant
-// carries from each state to the next over a 2-step trace establishes that no
-// single transition can break it.
-assert pipeline_inv_preservation {
-  always (pipeline_inv implies after pipeline_inv)
-}
-
-// ============================================================
-// GLOBAL SAFETY PROPERTIES
-// ============================================================
-
-// S1: Phases only advance forward (monotonic); abort is absorbing
-assert phase_monotonic {
-  always (Pipeline.phase = AbortedPh implies after always Pipeline.phase = AbortedPh)
-}
-
-// S2: Reporting is also absorbing (terminal state)
-assert reporting_absorbing {
-  always (Pipeline.phase = ReportingPh implies after always Pipeline.phase = ReportingPh)
-}
-
-// S3: Findings accumulate monotonically (never removed)
-assert findings_monotonic {
-  always (Pipeline.findings in Pipeline.findings')
-}
-
-// S4: Evidence accumulates monotonically (never removed)
-assert evidence_monotonic {
-  always (Pipeline.evidence in Pipeline.evidence')
-}
-
-// S5: Candidates accumulate monotonically during validation
-assert candidates_monotonic_in_validation {
-  always (Pipeline.phase = ValidationPh implies
-    Pipeline.candidates in Pipeline.candidates')
-}
-
-// S6: Representatives accumulate monotonically during clustering
-assert representatives_monotonic_in_clustering {
-  always (Pipeline.phase = ClusteringPh implies
-    Pipeline.representatives in Pipeline.representatives')
-}
-
-// S7: Pipeline reaches at most one terminal state
-assert single_terminal_state {
-  always (Pipeline.phase in (ReportingPh + AbortedPh) implies
-    after always Pipeline.phase' = Pipeline.phase)
-}
-
-// S8: No finding can reference a claim not in the pipeline domain
-assert findings_reference_valid_claims {
-  always (all f : Pipeline.findings | f.involvedClaims in Claim)
-}
-
-// S9: Exit code is only set when aborting
-assert exit_code_only_on_abort {
-  always (some Pipeline.exitCode' implies
-    (Pipeline.phase' = AbortedPh or some Pipeline.exitCode))
-}
-
-// ============================================================
-// LIVENESS PROPERTIES
-// ============================================================
-
-// L1: Pipeline eventually terminates given fair scheduling
-pred pipeline_fairness {
-  always eventually (Pipeline.phase' != Pipeline.phase or
-                     Pipeline.phase in (ReportingPh + AbortedPh))
-}
-
-assert pipeline_terminates {
-  pipeline_fairness implies eventually (Pipeline.phase in (ReportingPh + AbortedPh))
-}
-
-// L2: Every submitted solver query eventually resolves
-// Guaranteed by bounded timeout: no query runs longer than its budget.
-pred solver_fairness {
-  always (Pipeline.phase = AnalysisPh implies
-    eventually Pipeline.phase != AnalysisPh)
-}
-
-assert solver_queries_resolve {
-  (pipeline_fairness and solver_fairness) implies eventually (
-    Pipeline.phase in (ReportingPh + AbortedPh))
-}
-
-// L3: Merged capabilities eventually produce exactly one logic group
-// (given compilation phase is reached without collision)
-assert merged_cap_group_formation {
-  pipeline_fairness implies always (
-    (Pipeline.phase = CompilationPh and not logical_key_collision)
-    implies eventually Pipeline.phase = AnalysisPh)
-}
-
-// L4: Evidence is eventually persisted for every analysis event
-assert evidence_eventually_persisted {
-  pipeline_fairness implies always (
-    Pipeline.phase = AnalysisPh implies
-      eventually (Pipeline.evidence' != Pipeline.evidence or
-                  Pipeline.phase != AnalysisPh))
-}
-
-// L5: Collision detection terminates finitely. Like every liveness property
-// this needs a fairness premise: without it, infinite stuttering could pin the
-// pipeline in CompilationPh forever (and vacuously falsify termination).
-assert collision_check_terminates {
-  pipeline_fairness implies always (Pipeline.phase = CompilationPh implies
-    eventually (Pipeline.phase != CompilationPh))
-}
-
-// L6: Formalization phase eventually completes
-pred formalization_fairness {
-  always (Pipeline.phase = FormalizationPh implies
-    eventually Pipeline.phase != FormalizationPh)
-}
-
-assert formalization_eventually_resolves {
-  formalization_fairness implies eventually (
-    Pipeline.phase in (ValidationPh + AbortedPh))
-}
-
-// L7: Pairwise analysis terminates (bounded by pair budget)
-assert pairwise_terminates {
-  solver_fairness implies always (
-    Pipeline.phase = AnalysisPh implies
-      eventually (Pipeline.phase != AnalysisPh or pair_budget_exhausted))
-}
-
-// ============================================================
-// COMMANDS — Scenario exploration
-// ============================================================
-
-run show_pipeline {} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 4 Sample, 2 Cluster,
-  2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
-  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
-  2 LogicalGroup, 2 LogicalKey, 2 JsonExtraction, 4 JsonInput, 5 Int, 8 steps
-
-run scenario_contradiction {
-  eventually (some f : Pipeline.findings | f.findingType = Contradiction)
-} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 3 Sample, 2 Cluster, 2 Finding,
-  2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion, 2 Declaration,
-  2 DeclName, 2 DeclSignature, 1 CombinedSpec, 1 CompiledArtifact,
-  2 ClaimId, 2 ImplicationResult, 1 GapCheck,
-  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 10 steps
-
-run scenario_abort {
-  eventually (Pipeline.phase = AbortedPh and Pipeline.exitCode = 2)
-} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 1 Spec, 2 Sample, 1 Cluster, 1 Finding,
-  1 SpecQueryResult, 0 PairwiseCheck, 1 Assertion, 1 Declaration,
-  1 DeclName, 1 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact,
-  1 ClaimId, 0 ImplicationResult, 0 GapCheck,
-  0 LogicalGroup, 0 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 5 steps
-
-run scenario_collision_abort {
-  eventually collision_aborts_pipeline
-} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 2 Spec, 2 Sample, 1 Cluster, 1 Finding,
-  0 SpecQueryResult, 0 PairwiseCheck, 1 Assertion, 1 Declaration,
-  1 DeclName, 1 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact,
-  1 ClaimId, 0 ImplicationResult, 0 GapCheck,
-  2 LogicalGroup, 2 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 8 steps
-
-run scenario_json_recovery {
-  some je : JsonExtraction | je.input in MarkdownFenced and je.recovered = True
-  some je : JsonExtraction | je.input in Irrecoverable and je.recovered = False
-} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 0 Claim, 0 Spec, 0 Sample, 0 Cluster, 0 Finding,
-  0 SpecQueryResult, 0 PairwiseCheck, 0 Assertion, 0 Declaration,
-  0 DeclName, 0 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact,
-  0 ClaimId, 0 ImplicationResult, 0 GapCheck,
-  0 LogicalGroup, 0 LogicalKey, 3 JsonExtraction, 4 JsonInput, 5 Int, 1 steps
-
-run scenario_pairwise_budget {
-  eventually pair_budget_exhausted
-} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 3 Sample, 2 Cluster, 2 Finding,
-  1 SpecQueryResult, 2 PairwiseCheck, 3 Assertion, 2 Declaration,
-  2 DeclName, 2 DeclSignature, 1 CombinedSpec, 1 CompiledArtifact,
-  2 ClaimId, 2 ImplicationResult, 1 GapCheck,
-  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps
-
-// Witness: a malformed combined artifact (one sanitized symbol bound with two
-// sorts or kinds among included claims) is representable when the exclusion
-// policy is not applied. This is the failure mode the merge exclusion prevents;
-// modeling wellformedness as a predicate rather than a fact is what lets the
-// witness appear.
-run combined_malformed_witness {
-  some cs : CombinedSpec | not combined_wellformed[cs]
-} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 4 Sample, 2 Cluster, 2 Finding,
-  1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion, 2 Declaration,
-  2 DeclName, 2 DeclSignature, 1 CombinedSpec, 1 CompiledArtifact,
-  2 ClaimId, 2 ImplicationResult, 1 GapCheck,
-  2 LogicalGroup, 2 LogicalKey, 2 JsonExtraction, 4 JsonInput, 5 Int, 8 steps expect 1
-
-// Witness: a cross-claim conflict where the later claim is excluded leaves the
-// combined artifact wellformed (the intended merge outcome).
-run combined_conflict_with_exclusion {
-  some cs : CombinedSpec, disj c1, c2 : Claim |
-    conflict_detected[c1, c2, cs.specRef] and
-    c1 in cs.includedClaims and c2 in cs.excludedClaims and
-    conflicts_excluded[cs] and combined_wellformed[cs]
-} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 4 Sample, 2 Cluster, 2 Finding,
-  1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion, 3 Declaration,
-  2 DeclName, 2 DeclSignature, 1 CombinedSpec, 1 CompiledArtifact,
-  2 ClaimId, 2 ImplicationResult, 1 GapCheck,
-  2 LogicalGroup, 2 LogicalKey, 2 JsonExtraction, 4 JsonInput, 5 Int, 8 steps expect 0
-
-// Witness: a same-claim variable/function sanitizer collision (c1 = c2) is
-// representable and forces that claim's own exclusion.
-run same_claim_collision_witness {
-  some cs : CombinedSpec, c : Claim |
-    conflict_detected[c, c, cs.specRef] and c in cs.excludedClaims
-} for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 4 Sample, 2 Cluster, 2 Finding,
-  1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion, 2 Declaration,
-  2 DeclName, 2 DeclSignature, 1 CombinedSpec, 1 CompiledArtifact,
-  2 ClaimId, 2 ImplicationResult, 1 GapCheck,
-  2 LogicalGroup, 2 LogicalKey, 2 JsonExtraction, 4 JsonInput, 5 Int, 8 steps expect 1
-
-// --- Non-vacuity witnesses for the invalid-group preflight (FM-11, FM-12) ---
-// Proving the guarded antecedents are reachable, so the *_with_finding checks
-// above are not vacuously true.
-
-// FM-11: a compile group with two claims sharing one claimId is representable
-// and its rejection fires, emitting an InvalidGroup finding.
-run duplicate_claim_id_witness {
-  some g : CompileGroup | hasDuplicateClaimId[g]
-  eventually (some g : CompileGroup | duplicate_claim_id_rejected[g])
-} for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 2 ClaimId, 1 CompileGroup, 2 Finding, 6 steps expect 1
-
-// FM-12: an oversized compile group is representable and its rejection fires.
-run oversized_group_witness {
-  some g : CompileGroup | g.oversized = True
-  eventually (some g : CompileGroup | oversized_group_rejected[g])
-} for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 2 ClaimId, 1 CompileGroup, 2 Finding, 6 steps expect 1
-
-// --- Batch-lifecycle reachability witnesses (ported from the reference model) ---
-// Each proves a distinct handled path through the temp lifecycle is reachable,
-// so the batch safety/liveness checks below are not vacuously satisfied.
-
-// A single attached batch succeeds, cleans up, and all claims become candidates.
-run attached_success_witness {
-  some b : PhysicalBatch |
-    b.attached = Attached
-    and eventually (b.resolution = BatchSuccess
-                    and b.tempState = CleanupSucceeded
-                    and (all c : b.claims | b.outcomes[c] = CandidateOutcome))
-} for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 1 Spec, 1 ClaimId, 0 CompileGroup, 2 Finding, 0 Sample, 0 Cluster, 0 SpecQueryResult, 0 PairwiseCheck, 0 Assertion, 0 Declaration, 0 DeclName, 0 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact, 0 ImplicationResult, 0 GapCheck, 0 LogicalGroup, 0 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 10 steps expect 1
-
-// Write failure after directory creation still reaches a terminal cleanup and
-// assigns claim errors [FLA-TEMP-WRITEFAIL, FLA-TEMP-ORDER].
-run write_failure_then_cleanup_witness {
-  some b : PhysicalBatch |
-    b.attached = Attached
-    and eventually (b.resolution = TransportFailure
-                    and once b.tempState = DirCreated
-                    and eventually (b.tempState = CleanupSucceeded
-                                    and (all c : b.claims | b.outcomes[c] = ClaimErrorOutcome)))
-} for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 1 Spec, 1 ClaimId, 0 CompileGroup, 2 Finding, 0 Sample, 0 Cluster, 0 SpecQueryResult, 0 PairwiseCheck, 0 Assertion, 0 Declaration, 0 DeclName, 0 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact, 0 ImplicationResult, 0 GapCheck, 0 LogicalGroup, 0 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 1
-
-// Cleanup failure after a successful attempt keeps candidates [FLA-TEMP-CLEANUP-WARN].
-run cleanup_failure_after_success_witness {
-  some b : PhysicalBatch |
-    b.attached = Attached
-    and eventually (b.resolution = BatchSuccess
-                    and b.tempState = CleanupFailed
-                    and (all c : b.claims | b.outcomes[c] = CandidateOutcome))
-} for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 1 Spec, 1 ClaimId, 0 CompileGroup, 2 Finding, 0 Sample, 0 Cluster, 0 SpecQueryResult, 0 PairwiseCheck, 0 Assertion, 0 Declaration, 0 DeclName, 0 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact, 0 ImplicationResult, 0 GapCheck, 0 LogicalGroup, 0 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 1
-
-// Model failure with a fitting fallback degrades to per-claim retry [FLA-DEGRADE-TOOLARGE].
-run model_failure_degrades_witness {
-  some b : PhysicalBatch |
-    b.attached = Attached
-    and eventually (b.degraded = Degraded and once b.resolution = ModelFailure)
-} for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 1 Spec, 1 ClaimId, 0 CompileGroup, 2 Finding, 0 Sample, 0 Cluster, 0 SpecQueryResult, 0 PairwiseCheck, 0 Assertion, 0 Declaration, 0 DeclName, 0 DeclSignature, 0 CombinedSpec, 0 CompiledArtifact, 0 ImplicationResult, 0 GapCheck, 0 LogicalGroup, 0 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 14 steps expect 1
-
-// ============================================================
-// COMMANDS — Property verification (check)
-// ============================================================
-
-check abort_no_conclusions for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
-  2 Finding, 1 SpecQueryResult, 0 PairwiseCheck, 2 Assertion,
-  1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
-  0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck,
-  1 LogicalGroup, 1 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
-
-check only_valid_in_candidates for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 4 Sample, 2 Cluster,
-  2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
-  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
-  1 LogicalGroup, 1 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
-
-check symmetric_implication_same_cluster for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 5 Sample, 3 Cluster,
-  1 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
-  1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
-  0 CompiledArtifact, 1 ClaimId, 4 ImplicationResult, 0 GapCheck,
-  0 LogicalGroup, 0 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 1 steps expect 0
-
-check sat_no_global_contradiction for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
-  3 Finding, 2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
-  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
-  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
-
-check compatible_no_false_positive for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 3 Sample, 2 Cluster,
-  2 Finding, 1 SpecQueryResult, 2 PairwiseCheck, 3 Assertion,
-  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
-  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 10 steps expect 0
-
-check ubiquitous_no_spurious_gap for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
-  2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 3 Assertion,
-  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
-  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 10 steps expect 0
-
-check findings_monotonic for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 3 Sample, 2 Cluster,
-  3 Finding, 2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
-  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
-  1 LogicalGroup, 1 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 15 steps expect 0
-
-check phase_monotonic for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
-  2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
-  1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
-  0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck,
-  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 15 steps expect 0
-
-check reporting_absorbing for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
-  2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
-  1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
-  0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck,
-  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 15 steps expect 0
-
-check all_queries_persisted for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
-  3 Finding, 3 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
-  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
-  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
-
-check timeout_never_contradiction for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
-  3 Finding, 3 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
-  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
-  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
-
-check collision_implies_abort for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 2 Spec, 2 Sample, 1 Cluster,
-  1 Finding, 0 SpecQueryResult, 0 PairwiseCheck, 1 Assertion,
-  1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
-  0 CompiledArtifact, 1 ClaimId, 0 ImplicationResult, 0 GapCheck,
-  2 LogicalGroup, 2 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
-
-check all_aborts_set_exit_code for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 2 Spec, 3 Sample, 2 Cluster,
-  3 Finding, 2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
-  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
-  2 LogicalGroup, 2 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 15 steps expect 0
-
-check budget_exhaustion_no_false_findings for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 3 Claim, 1 Spec, 3 Sample, 2 Cluster,
-  2 Finding, 1 SpecQueryResult, 2 PairwiseCheck, 3 Assertion,
-  2 Declaration, 2 DeclName, 2 DeclSignature, 1 CombinedSpec,
-  1 CompiledArtifact, 2 ClaimId, 2 ImplicationResult, 1 GapCheck,
-  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 12 steps expect 0
-
-check pipeline_terminates for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 1 Spec, 2 Sample, 1 Cluster,
-  2 Finding, 1 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
-  1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
-  0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck,
-  1 LogicalGroup, 1 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 20 steps
-
-check solver_queries_resolve for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 1 Spec, 2 Sample, 1 Cluster,
-  2 Finding, 2 SpecQueryResult, 1 PairwiseCheck, 2 Assertion,
-  1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
-  0 CompiledArtifact, 1 ClaimId, 1 ImplicationResult, 0 GapCheck,
-  1 LogicalGroup, 1 LogicalKey, 0 JsonExtraction, 4 JsonInput, 5 Int, 20 steps
-
-check formalization_eventually_resolves for 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 Claim, 1 Spec, 3 Sample, 1 Cluster,
-  1 Finding, 0 SpecQueryResult, 0 PairwiseCheck, 1 Assertion,
-  1 Declaration, 1 DeclName, 1 DeclSignature, 0 CombinedSpec,
-  0 CompiledArtifact, 1 ClaimId, 0 ImplicationResult, 0 GapCheck,
-  0 LogicalGroup, 0 LogicalKey, 1 JsonExtraction, 4 JsonInput, 5 Int, 15 steps
-
-// ============================================================
-// COMMANDS — Remaining assertion coverage (every assert is checked)
-// ============================================================
-// The commands above check a representative subset. The commands below close
-// the gap so that ALL assertions declared in this module are machine-verified,
-// preventing silent drift (four assertions previously here were only fixed
-// because these checks were added). Scopes use the compact `for N` form; each
-// was chosen large enough for the relevant antecedent to be reachable (the run
-// scenarios above witness reachability of contradiction/abort/collision paths).
-
-// --- Structural (pure-function) assertions: no temporal unrolling ---
-check recovered_implies_valid_input for 4 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
-check irrecoverable_never_silent for 4 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
-check extraction_total for 4 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
-check no_checksat_in_compiled for 4 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
-check safe_ids_preserved for 4 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
-check exclusion_implies_wellformed for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
-check same_claim_collision_excluded for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
-check inconclusive_no_cluster_corruption for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
-check single_result_per_query for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
-check clusters_have_distinct_members for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
-check unsat_has_core for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
-
-// --- Temporal safety assertions: single-transition properties ---
-check zero_candidates_implies_abort for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check invalid_never_in_candidates for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check divergent_produces_finding for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check no_collision_no_grouping_abort for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check group_formation_complete for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check contradiction_severity_correct for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check advisory_only_not_error for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check inconclusive_never_silent for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check solver_error_surfaced for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check pairwise_severity_correct for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check exhaustive_no_gap for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check gap_requires_all_conditional for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check timeout_no_block for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check collision_abort_sets_exit_code for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check json_failure_no_state_corruption for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check non_abort_failures_preserve_phase for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check evidence_monotonic for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check candidates_monotonic_in_validation for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check representatives_monotonic_in_clustering for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check single_terminal_state for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check findings_reference_valid_claims for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-check exit_code_only_on_abort for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 6 steps expect 0
-
-// --- Liveness assertions: require fairness premises (checked, no expect) ---
-check merged_cap_group_formation for 2 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 12 steps
-check evidence_eventually_persisted for 2 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 12 steps
-check collision_check_terminates for 2 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 12 steps
-check pairwise_terminates for 2 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 12 steps
-
-// --- Semantic batching structural checks ---
-check groupingPartitioned for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
-check parityBySharedKey for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
-check kindIrrelevant for 3 but 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 5 Int expect 0
-check fallbackTotal for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup expect 0
-check batches_within_one_group for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 1 steps expect 0
-check single_claim_batches_are_inline for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 1 steps expect 0
-
-// --- Semantic batching safety checks ---
-check evidence_recorded_for_every_attached_attempt for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 10 steps expect 0
-check outcomes_are_stable for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 10 steps expect 0
-check no_cross_batch_outcomes for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 10 steps expect 0
-check cleanup_failure_preserves_candidates for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 10 steps expect 0
-check degrade_only_when_model_failure_fits for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 10 steps expect 0
-check infra_failure_never_degrades for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 10 steps expect 0
-
-// --- New failure-mode checks (FM-11, FM-12 invalid-group preflight) ---
-check duplicate_id_rejected_with_finding for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 2 ClaimId, 1 CompileGroup, 6 steps expect 0
-check oversized_group_rejected_with_finding for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 2 ClaimId, 1 CompileGroup, 6 steps expect 0
-check invalid_group_skips_solver for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 2 ClaimId, 1 CompileGroup, 6 steps expect 0
-check solver_group_ids_unique for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 2 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 2 Claim, 3 ClaimId, 2 CompileGroup expect 0
-
-// --- Semantic batching liveness (under fairness) ---
-check cleanup_attempted_after_terminal for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 15 steps expect 0
-check all_claims_reach_terminal_outcome for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 20 steps
-
-// --- Inductive invariant checks (fast, bounded: 1-step + 2-step) ---
-// Initiation shows the invariant holds at init; preservation shows any single
-// transition preserves it. Together they imply it holds in every reachable
-// state without unrolling long traces, keeping assurance cheap as the state
-// space grows.
-check pipeline_inv_initiation for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 1 steps expect 0
-check pipeline_inv_preservation for 3 but 5 Int, 1 Capability, 1 ProvFile, 1 LogicalFile, 1 SyntheticKey, 1 SemanticKey, 1 ClaimProvenance, 1 GroupingMap, 1 SemanticLogicalGroup, 1 ErrorKind, 1 FallbackFit, 1 TempState, 1 Resolution, 1 Outcome, 1 AttachedKind, 1 DegradedKind, 1 Presence, 1 MergedSpec, 1 BuiltMap, 1 PhysicalBatch, 0 CompileGroup, 2 steps expect 0
+// Safety: additional failures cannot revoke an already accepted candidate.
+assert candidates_never_revoked { always (candidates in candidates') }
+// Safety: complete/abort phases permit no later model or solver work.
+assert terminal_absorbing { always (Run.phase in Complete + Aborted implies Run.phase' = Run.phase and Run.spawned' = Run.spawned and Run.issued' = Run.issued) }
+// Safety: solver diagnostics override even a simultaneously printed SAT verdict.
+assert diagnostic_overrides_verdict { all q : Query | q.errorDiagnostic = True implies verdict[q] = SolverError }
+// Liveness: finite serviced work reaches an explicit terminal outcome.
+pred model_capture_capacity { #EvidenceToken >= #Attempt }
+assert pipeline_terminates { fairness and model_capture_capacity implies eventually Run.phase in Complete + Aborted }
+run all_ineligible { no eligible and fairness and eventually Run.phase = Complete } for 3 but 5 Int, 5 steps expect 1
+run total_failure { some eligible and no a : Attempt | valid_attempt[a]
+  eventually formalization_exit = 9 } for 3 but 5 Int, 20 steps expect 1
+run partial_success { eventually (Run.phase = Complete and some candidates and some Run.errors) } for 3 but 5 Int, 24 steps expect 1
+run attached_cleanup_failure { some a : Attempt | a.transport = Attached and a.cleanupFails = True and valid_attempt[a] and
+  eventually (a in Run.settled and some { s : Run.accepted | s.attempt = a }) } for 3 but 5 Int, 18 steps expect 1
+run multiple_keys { some disj g,h : Group | g.key != h.key and some members[g] and some members[h] } for 3 but 5 Int, 1 steps expect 1
+run extra_sample_failure { some disj a,b : Attempt | a in b.earlier and a.claims = b.claims and valid_attempt[a] and not valid_attempt[b] and
+  eventually (b in Run.settled and a.claims in candidates) } for 3 but 5 Int, 24 steps expect 1
+run error_alongside_sat { some q : Query | q.observed = Sat and q.errorDiagnostic = True and eventually q in Run.persisted } for 3 but 5 Int, 24 steps expect 1
+check rejected_response_not_accepted for 4 but 5 Int, 20 steps expect 0
+check no_eligible_no_calls for 4 but 5 Int, 20 steps expect 0
+check compiler_names_injective for 5 but 1 steps expect 0
+check singleton_not_stable for 4 but 5 Int, 20 steps expect 0
+check equivalence_symmetric for 4 but 5 Int, 20 steps expect 0
+check key_group_parity for 4 but 5 Int, 1 steps expect 0
+check pair_prerequisites for 4 but 5 Int, 20 steps expect 0
+check gaps_have_witnesses for 4 but 5 Int, 20 steps expect 0
+check timeouts_not_proofs for 4 but 5 Int, 20 steps expect 0
+check complete_requires_evidence for 4 but 5 Int, 20 steps expect 0
+check primary_outcome_retained for 4 but 5 Int, 20 steps expect 0
+check source_indexes_unique for 5 but 1 steps expect 0
+check batches_partition for 4 but 5 Int, 1 steps expect 0
+check transport_by_arity for 4 but 5 Int, 1 steps expect 0
+check indexes_bound_before_acceptance for 4 but 5 Int, 20 steps expect 0
+check cleanup_before_outcome for 4 but 5 Int, 20 steps expect 0
+check no_infrastructure_degradation for 4 but 5 Int, 20 steps expect 0
+check claim_partition for 4 but 5 Int, 20 steps expect 0
+check samples_keep_identity for 4 but 5 Int, 20 steps expect 0
+check attempt_evidence_total for 4 but 5 Int, 20 steps expect 0
+check samples_use_frozen_registry for 4 but 5 Int, 20 steps expect 0
+check assumptions_need_authority for 5 but 1 steps expect 0
+check only_typed_samples for 4 but 5 Int, 20 steps expect 0
+check permissions_not_required for 4 but 5 Int, 20 steps expect 0
+check activation_subset_global for 4 but 5 Int, 20 steps expect 0
+check examples_are_query_local for 4 but 5 Int, 20 steps expect 0
+check scripts_are_charged for 4 but 5 Int, 20 steps expect 0
+check candidates_never_revoked for 4 but 5 Int, 20 steps expect 0
+check terminal_absorbing for 4 but 5 Int, 20 steps expect 0
+check diagnostic_overrides_verdict for 5 but 1 steps expect 0
+check pipeline_terminates for 3 but 5 Int, 28 steps expect 0
+check compiler_exclusions_are_sound for 4 but 5 Int, 1 steps expect 0
+// Distinct source claims may share display IDs without sharing compile labels.
+run duplicate_display_ids_keep_identity { some disj a,b : eligible |
+  some a.displayId and a.displayId = b.displayId and a.compileLabel != b.compileLabel } for 4 but 5 Int, 1 steps expect 1
+run residual_conflict_exclusion { some g : CompileInput, disj a,b : g.claims |
+  checked_compilation[g] and some conflict_reason[a,b] and a in g.retained and b in g.excluded } for 4 but 5 Int, 1 steps expect 1
+run dangling_dependency_excluded_before_query { some g : CompileInput | checked_compilation[g] and some g.unresolved } for 4 but 5 Int, 1 steps expect 1
+run two_group_query_evidence {
+  some disj q,r : Query | q.group != r.group and eventually q + r in Run.persisted
+} for 4 but 5 Int, 5 EvidenceToken, 2 ScriptToken, 32 steps expect 1
+run bounded_model_recovery {
+  some a : Attempt | a.transport = Attached and a.result = ModelFailure and
+    eventually (a in Run.settled and (all child : recoveryOf.a | child in Run.settled))
+} for 4 but 5 Int, 5 Sample, 5 EvidenceToken, 32 steps expect 1
+// Nonvacuity: globally satisfiable mandatory rules may have a genuinely
+// three-rule activation conflict although every response pair is feasible.
+run three_rule_activation_with_query_evidence {
+  eventually (some disj a,b,c : candidates | {
+    (a+b+c).modal = Mandatory
+    (a+b+c).form = Refinement
+    a.guard = b.guard and b.guard = c.guard
+    a.postcondition = Valuation and b.postcondition = Valuation and c.postcondition = Valuation
+    some a.guard & semantic_response[a] & semantic_response[b]
+    some a.guard & semantic_response[a] & semantic_response[c]
+    some a.guard & semantic_response[b] & semantic_response[c]
+    no a.guard & semantic_response[a] & semantic_response[b] & semantic_response[c]
+    some global : Run.persisted | global.kind = Global and verdict[global] = Sat and a+b+c in global.owners
+    some activation : Run.persisted | activation.kind = Activation and activation.first = a and verdict[activation] = Unsat
+  })
+} for 4 but 5 Int, 4 Query, 4 ScriptToken, 8 EvidenceToken, 36 steps expect 1
 ```
+
+**Verification boundary:** All commands use explicit finite scopes. Concrete byte/order preservation and external-process deadlines require the referenced contract/property and integration tests. Passing bounded checks does not prove natural-language fidelity or production refinement.

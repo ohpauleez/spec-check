@@ -9,6 +9,9 @@ import type { OutputDirPath } from "../branded.js";
 import type { Finding } from "../findings.js";
 import { runLogicAnalysis, type SpecClaimGroup } from "../formal/logic-analysis.js";
 import type { LogicIrClaim } from "../logic-ir.js";
+import type { AnalysisConfig } from "../formal/analysis-config.js";
+import type { EvidenceRecorder } from "../formal/evidence.js";
+import type { QueryExecutor } from "../formal/query-executor.js";
 
 /**
  * Output from Z3 logic analysis of code-derived formalized claims.
@@ -41,6 +44,10 @@ export async function analyzeGeneratedLogic(input: {
   readonly claims: readonly { readonly capability: string; readonly representative: LogicIrClaim }[];
   readonly outputDir: OutputDirPath;
   readonly z3Path?: string;
+  readonly analysis?: AnalysisConfig;
+  readonly evidence?: EvidenceRecorder;
+  readonly executor?: QueryExecutor;
+  readonly pairBudget?: number;
 }): Promise<GeneratedLogicOutput> {
   // Group claims by capability for per-spec combined SMT-LIB.
   const groups = groupByCapability(input.claims);
@@ -49,6 +56,10 @@ export async function analyzeGeneratedLogic(input: {
     groups,
     outputDir: input.outputDir,
     ...(input.z3Path === undefined ? {} : { z3Path: input.z3Path }),
+    ...(input.analysis === undefined ? {} : { analysis: input.analysis }),
+    ...(input.evidence === undefined ? {} : { evidence: input.evidence }),
+    ...(input.executor === undefined ? {} : { executor: input.executor }),
+    ...(input.pairBudget === undefined ? {} : { pairBudget: input.pairBudget }),
   });
 
   return {

@@ -13,7 +13,7 @@ import { inspectEffectiveReportAgent, observedEffect, type ObservedPermission } 
 
 const liveIt = process.env.SPEC_CHECK_LIVE_TESTS === "1" ? it : it.skip;
 const binaryPath = process.env.SPEC_CHECK_OPENCODE_BINARY ?? "opencode";
-const model = process.env.SPEC_CHECK_LIVE_MODEL ?? "github-copilot/gpt-5.6-terra";
+const model = process.env.SPEC_CHECK_LIVE_MODEL ?? "github-copilot/gpt-6.1-sol";
 
 describe("explicitly opted-in OpenCode compatibility", () => {
   liveIt("returns a schema-valid ordinary payload using the selected real installation", async () => {

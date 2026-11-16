@@ -60,7 +60,7 @@ That matters because:
 
 This is why system boundaries and assumptions matter. If correctness depends on an operator behaving a certain way, or on middleware preserving an ordering guarantee, that belongs in the argument too.
 
-Where possible, capture these invariants in formats that can be machines verified. Results like bounded model checking, deductive verification, software modeling with a tool like Alloy, or an artifact that can be analyzed by an SMT solver should be pursued when possible.
+Where possible, capture these invariants in formats that can be machine verified. Results like bounded model checking, deductive verification, software modeling with a tool like Alloy, or an artifact that can be analyzed by an SMT solver should be pursued when possible.
 
 ## Build a small executable model
 

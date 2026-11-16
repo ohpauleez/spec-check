@@ -112,6 +112,9 @@ function copyAttemptEvidence(attempt: BatchAttemptEvidence): BatchAttemptEvidenc
     subBatchOrdinal: attempt.subBatchOrdinal,
     outcome: copyAttemptOutcome(attempt.outcome),
     cleanup: attempt.cleanup,
+    ...(attempt.registryHash === undefined ? {} : { registryHash: attempt.registryHash }),
+    ...(attempt.contextArtifact === undefined ? {} : { contextArtifact: attempt.contextArtifact }),
+    ...(attempt.responseArtifacts === undefined ? {} : { responseArtifacts: Object.freeze([...attempt.responseArtifacts]) }),
   });
 }
 

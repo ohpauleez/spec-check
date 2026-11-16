@@ -6,107 +6,168 @@ title: SourceTraceability
 
 Define the source traceability and code-backwards comparison behavior for the spec-check tool: relating requirements to source evidence, generating EARS-preferring code-derived specifications from source, formalizing code-derived specifications through the same sampling and clustering pipeline, using solver-backed cross-side implication as the primary strength classifier, and providing blind LLM comparison as the explanatory rationale layer.
 
+All Alloy fences below form one Alloy 6 module in document order. Source bytes, lexical correctness, OS effects, and concrete serialization are explicit implementation-test boundaries; the model checks relational preservation and analyzer control. Safety assertions permit stuttering. Liveness is conditional on the stated action scheduling and resource premises.
+
 ```alloy
 module SourceTraceability
 open util/boolean
+open util/ordering[Item] as sourceOrder
 
-// --- Domain vocabulary ---
-
-// Original claims (requirements/scenarios from parsed specs)
-sig Claim {
-  capability : one Capability
-}
-
-// Capability grouping shared between original and code-derived sides
+// --- Domain vocabulary: independent source sides and source-local identities ---
+abstract sig Side {}
+one sig OriginalSide, GeneratedSide extends Side {}
 sig Capability {}
-
-// Source files within the declared --src directory
-sig SourceFile {
-  inScope : one Bool,         // true if within declared --src boundary
-  evidenceKind : one EvidenceKind
-}
-
-// Evidence classification hierarchy
+sig Identifier {}
+sig Bytes {}
 abstract sig EvidenceKind {}
-one sig ImplEvidence, TestEvidence, DocEvidence extends EvidenceKind {}
-
-// Traceability strength classifications
-abstract sig TraceStrength {}
-one sig Supported, WeaklySupported, TraceMissing extends TraceStrength {}
-
-// Code-derived claims generated from source analysis
-sig GenClaim {
-  genCapability : one Capability,
-  earsConforming : one Bool    // true if generated in EARS format
+one sig Implementation, VerifiedContract, TracedTest, Documentation extends EvidenceKind {}
+sig SourceFile {
+  inScope : one Bool, readable : one Bool, kind : one EvidenceKind,
+  selectedWithinContentBudget : one Bool,
+  identifiers : set Identifier, var currentBytes : one Bytes
 }
-
-// Implication/comparison strength classifications
-abstract sig StrengthClass {}
-one sig Same, Stronger, Weaker, Different, Uncertain extends StrengthClass {}
-
-// Formalization status for code-derived claims
+abstract sig Modal {}
+one sig Mandatory, Advisory, Permission extends Modal {}
 abstract sig FormalStatus {}
-one sig FormalStable, FormalAmbiguous, FormalFailed extends FormalStatus {}
-
-// Analysis findings with classification
-sig Finding {
-  findingKind : one FindingKind
+one sig Single, Stable, Ambiguous, Failed, Excluded extends FormalStatus {}
+abstract sig Item { cap : one Capability, id : lone Identifier, modal : one Modal, plannedStatus : one FormalStatus }
+sig Original extends Item {}
+sig Generated extends Item {}
+sig TraceLink { claim : one Original, file : one SourceFile, behaviorVerified : one Bool }
+fact trace_links_are_observations {
+  all l : TraceLink | l.file.inScope = True and some l.claim.id and l.claim.id in l.file.identifiers
 }
-
-abstract sig FindingKind {}
-one sig TraceGapFinding, UnknownIdFinding, ScopeViolationFinding,
-        InsufficientEvFinding, AmbiguityFinding, FormalErrorFinding,
-        ContradictionFinding, TimeoutFinding, NovelCapFinding,
-        UnimplCapFinding, UnmatchedOrigFinding, UnmatchedGenFinding,
-        PairwiseSkippedFinding, DivergenceFinding, BlindBoundaryFinding,
-        TaskConflictFinding, LimitationFinding, ParseWarningFinding
-        extends FindingKind {}
-
-// Pipeline phases in execution order
+abstract sig TraceStrength {}
+one sig Supported, WeaklySupported, Missing extends TraceStrength {}
+sig Registry { side : one Side, cap : one Capability, hash : one Bytes }
+fact registries_independent {
+  all disj a, b : Registry | a.side != b.side or a.cap != b.cap
+  all c : Capability, s : Side | one r : Registry | r.cap = c and r.side = s
+}
+abstract sig Relation {}
+one sig Same, Stronger, Weaker, Different, Uncertain, Unmapped, Incompatible,
+  PermissionEquivalent, PermissionBroader, PermissionNarrower, PermissionDifferent extends Relation {}
+abstract sig MappingScope {}
+one sig CompleteScope, PartialScope extends MappingScope {}
+sig Valuation {}
+abstract sig SolverStatus {}
+one sig Sat, Unsat, Unknown, Timeout, SolverError extends SolverStatus {}
+sig Comparison {
+  cap : one Capability, modal : one Modal,
+  isAggregate : one Bool,
+  originalMeaning : set Valuation, generatedMeaning : set Valuation,
+  originalBackground : set Valuation, generatedBackground : set Valuation,
+  mapped : one Bool, compatible : one Bool, fullScope : one Bool,
+  originalPresent : one Bool, generatedPresent : one Bool,
+  originalUnstable : one Bool, generatedUnstable : one Bool,
+  precheck : one SolverStatus, forward : one SolverStatus, reverse : one SolverStatus
+}
+sig Pair { original : one Original, generated : one Generated, comparison : one Comparison }
+fact pair_shape {
+  all p : Pair | p.original.cap = p.generated.cap and p.comparison.cap = p.original.cap and
+    p.original.modal = p.generated.modal and p.comparison.modal = p.original.modal and p.comparison.isAggregate = False
+  all p : Pair | one c : Comparison | c.isAggregate = True and c.cap = p.original.cap and c.modal = p.original.modal
+  all disj p, q : Pair | p.original != q.original or p.generated != q.generated
+}
+fact comparison_presence {
+  all c : Comparison | {
+    (c.originalPresent = True iff some o : Original | o.cap = c.cap and o.modal = c.modal and o.plannedStatus not in Failed + Excluded)
+    (c.generatedPresent = True iff generation_blind and Config.sourceDirectoryReadable = True and
+      (some f : SourceFile | f.inScope = True and f.readable = True and f.selectedWithinContentBudget = True) and
+      (some g : Generated | g.cap = c.cap and g.modal = c.modal and g.plannedStatus not in Failed + Excluded))
+    (some o : Original | o.cap = c.cap and (o.modal = c.modal or (c.modal = Permission and o.modal = Mandatory)) and o.plannedStatus = Ambiguous)
+      implies c.originalUnstable = True
+    (some g : Generated | g.cap = c.cap and (g.modal = c.modal or (c.modal = Permission and g.modal = Mandatory)) and g.plannedStatus = Ambiguous)
+      implies c.generatedUnstable = True
+    (some i : Item | i.cap = c.cap and i.modal = c.modal and i.plannedStatus in Failed + Excluded)
+      implies c.fullScope = False
+  }
+}
+sig GenerationPlan { cap : one Capability, sufficient : one Bool, claims : set Generated }
+fact generation_plans {
+  all c : Capability | one p : GenerationPlan | p.cap = c
+  all p : GenerationPlan | p.claims = { g : Generated | g.cap = p.cap }
+  all p : GenerationPlan | p.sufficient = False implies no p.claims
+}
+one sig Config { sourceDirectoryReadable : one Bool, knownNames : set Capability, pairBudget : one Int }
+one sig GenerationBoundary { requestedOriginalText : set Original, requestedRegistries : set Registry }
+pred generation_blind { no GenerationBoundary.requestedOriginalText + GenerationBoundary.requestedRegistries }
+fact budget_shape { Config.pairBudget >= 0 }
 abstract sig Phase {}
-one sig SourceValidate, TracePhase, GenSpecs, FormalizeGen,
-        SolverAnalysisGen, CrossSideImply, BlindCompare,
-        EmitReport extends Phase {}
-
-// Phase ordering
-fun phase_order : Phase -> Phase {
-  SourceValidate -> TracePhase +
-  TracePhase -> GenSpecs +
-  GenSpecs -> FormalizeGen +
-  FormalizeGen -> SolverAnalysisGen +
-  SolverAnalysisGen -> CrossSideImply +
-  CrossSideImply -> BlindCompare +
-  BlindCompare -> EmitReport
+one sig ValidateSource, Trace, Generate, Formalize, Aggregate, Match, Explain, Complete, Aborted extends Phase {}
+one sig Run {
+  var phase : one Phase,
+  var scanned : set SourceFile,
+  var snapshot : SourceFile -> lone Bytes,
+  var attachments : SourceFile -> lone Bytes,
+  var generated : set Generated,
+  var traceResults : Original -> lone TraceStrength,
+  var frozen : set Registry,
+  var formalized : set Generated,
+  var aggregates : set Comparison,
+  var evaluatedPairs : set Pair,
+  var matches : set Pair,
+  var skippedCaps : set Capability,
+  var explanations : set Capability,
+  var writes : set SourceFile
 }
-
-// Command outcomes
-abstract sig Outcome {}
-one sig AnalysisSuccess, SrcInputError, SrcReadError extends Outcome {}
-
-// --- Mutable analysis state ---
-
-one sig AnalysisState {
-  var completedPhases : set Phase,
-  var traceResults : Claim -> lone TraceStrength,
-  var scannedFiles : set SourceFile,
-  var genClaims : set GenClaim,
-  var genFormalStatus : GenClaim -> lone FormalStatus,
-  var capAggregate : Capability -> lone StrengthClass,
-  var pairResult : Claim -> GenClaim -> lone StrengthClass,
-  var blindFallback : set Claim,       // claims where blind LLM was used as classifier
-  var findings : set Finding,
-  var lastOutcome : lone Outcome,
-  var sourceModified : one Bool,       // invariant: must always be False
-  var blindBoundaryViolated : one Bool // invariant: must always be False
+// Findings carry the actual affected source object/capability, not just a kind.
+fun trace_gaps : set Original { { c : Original | Run.traceResults[c] = Missing } }
+fun unknown_references : SourceFile -> Identifier {
+  { f : Run.scanned, i : f.identifiers | i not in Original.id }
 }
-
-// Pair budget configuration (modeled as a fixed threshold)
-one sig Config {
-  pairBudget : one BudgetLevel
+fun source_limitations : set Capability {
+  Run.phase in Formalize + Aggregate + Match + Explain + Complete =>
+    (Config.knownNames + Original.cap) - Run.generated.cap else none
 }
-
-abstract sig BudgetLevel {}
-one sig WithinBudget, OverBudget extends BudgetLevel {}
+fun selected_source_files : set SourceFile { { f : Run.scanned | f.selectedWithinContentBudget = True } }
+fun formal_errors : set Generated { { g : Run.formalized | g.plannedStatus = Failed } }
+fun qualified_scope[c : Comparison] : one MappingScope { c.fullScope = True => CompleteScope else PartialScope }
+pred comparison_missing[c : Comparison] { c.originalPresent = False or c.generatedPresent = False or c.mapped = False }
+pred comparison_incompatible[c : Comparison] { c.compatible = False or c.originalBackground != c.generatedBackground }
+pred comparison_uncertain[c : Comparison] {
+  c.precheck != Sat or no (c.originalMeaning & c.originalBackground) or no (c.generatedMeaning & c.generatedBackground) or
+    c.forward not in (Sat + Unsat) or c.reverse not in (Sat + Unsat)
+}
+fun original_values[c : Comparison] : set Valuation { c.originalMeaning & c.originalBackground }
+fun generated_values[c : Comparison] : set Valuation { c.generatedMeaning & c.generatedBackground }
+fact implication_observations {
+  all c : Comparison | {
+    c.forward = Unsat implies no original_values[c] - generated_values[c]
+    c.forward = Sat implies some original_values[c] - generated_values[c]
+    c.reverse = Unsat implies no generated_values[c] - original_values[c]
+    c.reverse = Sat implies some generated_values[c] - original_values[c]
+  }
+}
+fun relation[c : Comparison] : one Relation {
+  comparison_missing[c] => Unmapped else
+  (comparison_incompatible[c] => Incompatible else
+  (comparison_uncertain[c] => Uncertain else
+  (c.modal = Permission =>
+    (original_values[c] = generated_values[c] => PermissionEquivalent else
+      (original_values[c] in generated_values[c] => PermissionBroader else
+      (generated_values[c] in original_values[c] => PermissionNarrower else PermissionDifferent))) else
+    (original_values[c] = generated_values[c] => Same else
+      (generated_values[c] in original_values[c] => Stronger else
+      (original_values[c] in generated_values[c] => Weaker else Different))))))
+}
+pred credit[c : Comparison] {
+  qualified_scope[c] = CompleteScope
+  c.originalUnstable = False and c.generatedUnstable = False
+  relation[c] not in Unmapped + Incompatible
+}
+fun score[c : Comparison] : one Int {
+  not credit[c] => -1 else
+  (relation[c] in Same + PermissionEquivalent => 4 else
+  (relation[c] = Stronger => 3 else (relation[c] = Uncertain => 2 else
+  (relation[c] = Weaker => 1 else 0))))
+}
+pred preferred[p, q : Pair] {
+  score[p.comparison] > score[q.comparison] or
+  (score[p.comparison] = score[q.comparison] and
+    (p.original in sourceOrder/prevs[q.original] or
+      (p.original = q.original and p.generated in sourceOrder/prevs[q.generated])))
+}
 ```
 
 ## Requirements
@@ -147,45 +208,24 @@ IF a requirement or scenario cannot be traced to any source-backed evidence, THE
 #### Requirement model
 
 ```alloy
-// --- Trace requirements to source-backed evidence ---
-
-pred trace_phase {
-  // Guard: SourceValidate completed
-  SourceValidate in AnalysisState.completedPhases
-  TracePhase not in AnalysisState.completedPhases
-  // Every claim receives a trace classification
-  all c : Claim | one AnalysisState.traceResults'[c]
-  // Missing traces produce TraceGapFinding
-  all c : Claim | AnalysisState.traceResults'[c] = TraceMissing implies
-    (some f : AnalysisState.findings' - AnalysisState.findings |
-      f.findingKind = TraceGapFinding)
-  // Findings monotonic
-  AnalysisState.findings in AnalysisState.findings'
-  // Effect
-  AnalysisState.completedPhases' = AnalysisState.completedPhases + TracePhase
-  AnalysisState.scannedFiles' = AnalysisState.scannedFiles
-  AnalysisState.genClaims' = AnalysisState.genClaims
-  AnalysisState.genFormalStatus' = AnalysisState.genFormalStatus
-  AnalysisState.capAggregate' = AnalysisState.capAggregate
-  AnalysisState.pairResult' = AnalysisState.pairResult
-  AnalysisState.blindFallback' = AnalysisState.blindFallback
-  AnalysisState.lastOutcome' = AnalysisState.lastOutcome
-  AnalysisState.sourceModified' = False
-  AnalysisState.blindBoundaryViolated' = AnalysisState.blindBoundaryViolated
+fun observed_strength[c : Original] : one TraceStrength {
+  no { l : TraceLink | l.claim = c and l.file in Run.scanned } => Missing else
+  ((some l : TraceLink | l.claim = c and l.file in Run.scanned and l.file.kind != Documentation and l.behaviorVerified = True) => Supported else WeaklySupported)
 }
-
-// Safety: every claim gets exactly one classification after trace phase
-assert trace_total_classification {
-  always (TracePhase in AnalysisState.completedPhases implies
-    all c : Claim | one AnalysisState.traceResults[c])
+pred trace {
+  Run.phase = Trace
+  Run.traceResults' = { c : Original, s : TraceStrength | s = observed_strength[c] }
+  Run.phase' = Generate
+  Run.scanned' = Run.scanned
+  Run.snapshot' = Run.snapshot
+  Run.attachments' = Run.attachments
+  Run.writes' = Run.writes
+  keep_generation
+  keep_comparison
 }
-
-// Safety: missing traces always produce findings
-assert missing_trace_produces_finding {
-  always (TracePhase in AnalysisState.completedPhases implies
-    all c : Claim | AnalysisState.traceResults[c] = TraceMissing implies
-      (some f : AnalysisState.findings | f.findingKind = TraceGapFinding))
-}
+// Safety: each original claim receives exactly its own evidence classification.
+assert trace_total { always (Run.phase in Generate + Formalize + Aggregate + Match + Explain + Complete implies
+  all c : Original | one Run.traceResults[c] and Run.traceResults[c] = observed_strength[c]) }
 ```
 
 ### Requirement: Canonical Identifier Traceability [STC-TRACE-IDENTIFIERS]
@@ -225,16 +265,10 @@ IF a bracketed identifier is found in source that does not match any known requi
 #### Requirement model
 
 ```alloy
-// --- Canonical identifier traceability ---
-// Identifier matching is a syntactic operation; the model captures the
-// obligation that unknown identifiers produce findings.
-
-// Safety: unknown identifiers in source always produce findings
-assert unknown_id_surfaced {
-  always (TracePhase in AnalysisState.completedPhases implies
-    (some f : AnalysisState.findings | f.findingKind = UnknownIdFinding)
-      or no { sf : AnalysisState.scannedFiles | sf.inScope = True })
-}
+// Canonical-token lexing is external. Known IDs cannot create unknown findings.
+// Safety: unknown ids exact.
+assert unknown_ids_exact { always (all f : SourceFile, i : Identifier |
+  f -> i in unknown_references iff f in Run.scanned and i in f.identifiers and i not in Original.id) }
 ```
 
 ### Requirement: Source Scope Confinement [STC-SCOPE-CONFINE]
@@ -272,59 +306,20 @@ IF the `--src` path does not exist or is not readable, THEN THE spec-check tool 
 #### Requirement model
 
 ```alloy
-// --- Source scope confinement ---
-
-pred source_validate_success {
-  // Guard: initial state (no phases completed, no outcome yet)
-  no AnalysisState.completedPhases
-  no AnalysisState.lastOutcome
-  // Postcondition: only in-scope files are scanned
-  all sf : AnalysisState.scannedFiles' | sf.inScope = True
-  // At least one in-scope file exists
-  some AnalysisState.scannedFiles'
-  // Effect
-  AnalysisState.completedPhases' = AnalysisState.completedPhases + SourceValidate
-  AnalysisState.traceResults' = AnalysisState.traceResults
-  AnalysisState.genClaims' = AnalysisState.genClaims
-  AnalysisState.genFormalStatus' = AnalysisState.genFormalStatus
-  AnalysisState.capAggregate' = AnalysisState.capAggregate
-  AnalysisState.pairResult' = AnalysisState.pairResult
-  AnalysisState.blindFallback' = AnalysisState.blindFallback
-  AnalysisState.findings' = AnalysisState.findings
-  AnalysisState.lastOutcome' = AnalysisState.lastOutcome
-  AnalysisState.sourceModified' = False
-  AnalysisState.blindBoundaryViolated' = False
+pred validate_source {
+  Run.phase = ValidateSource
+  Run.phase' = (Config.sourceDirectoryReadable = False => Aborted else Trace)
+  Run.scanned' = (Config.sourceDirectoryReadable = True => { f : SourceFile | f.inScope = True and f.readable = True } else none)
+  Run.snapshot' = { f : Run.scanned', b : Bytes | f.selectedWithinContentBudget = True and b = f.currentBytes }
+  Run.attachments' = Run.attachments
+  Run.traceResults' = Run.traceResults
+  Run.writes' = Run.writes
+  keep_generation
+  keep_comparison
 }
-
-pred source_validate_fail {
-  // Guard: initial state, --src not readable (no outcome yet)
-  no AnalysisState.completedPhases
-  no AnalysisState.lastOutcome
-  // Effect: SrcInputError, pipeline stops
-  AnalysisState.completedPhases' = AnalysisState.completedPhases
-  AnalysisState.scannedFiles' = AnalysisState.scannedFiles
-  AnalysisState.traceResults' = AnalysisState.traceResults
-  AnalysisState.genClaims' = AnalysisState.genClaims
-  AnalysisState.genFormalStatus' = AnalysisState.genFormalStatus
-  AnalysisState.capAggregate' = AnalysisState.capAggregate
-  AnalysisState.pairResult' = AnalysisState.pairResult
-  AnalysisState.blindFallback' = AnalysisState.blindFallback
-  AnalysisState.findings' = AnalysisState.findings
-  AnalysisState.lastOutcome' = SrcInputError
-  AnalysisState.sourceModified' = False
-  AnalysisState.blindBoundaryViolated' = False
-}
-
-// Safety: only in-scope files are ever scanned
-assert scope_confinement {
-  always (all sf : AnalysisState.scannedFiles | sf.inScope = True)
-}
-
-// Safety: unreadable source stops the entire pipeline
-assert unreadable_src_stops_pipeline {
-  always (source_validate_fail implies
-    TracePhase not in AnalysisState.completedPhases')
-}
+// Safety: scanning includes all readable eligible files and excludes outside files.
+assert scope_exact { always (Run.phase != ValidateSource and Run.phase != Aborted implies
+  Run.scanned = { f : SourceFile | f.inScope = True and f.readable = True }) }
 ```
 
 ### Requirement: Source File Read-Only Treatment [STC-SOURCE-READONLY]
@@ -346,13 +341,9 @@ WHEN source-backed analysis completes, THE spec-check tool SHALL have made zero 
 #### Requirement model
 
 ```alloy
-// --- Source file read-only treatment ---
-// Modeled as a global invariant: sourceModified must always be False.
-
-// Safety: source directory is never modified
-assert source_never_modified {
-  always (AnalysisState.sourceModified = False)
-}
+// Environment edits are separate from writes performed by this analyzer.
+// Safety: source readonly.
+assert source_readonly { always no Run.writes }
 ```
 
 ### Requirement: Attach Large Source Context As Files [STC-SOURCE-FILE-CTX]
@@ -380,6 +371,28 @@ WHEN the spec-check tool attaches source files for code-derived generation, THE 
 ##### Evidence
 - Implementation: [derive.ts:330 buildInformalizationPrompt](/src/domain/code-backwards/derive.ts#L330)
 - Test: [derive.test.ts:109 generated output contains source-derived text only (no original requirements)](/test/contract/derive.test.ts#L109)
+
+#### Requirement model
+
+```alloy
+// Event: attach private copies of captured source bytes, never live original paths.
+pred generate {
+  Run.phase = Generate
+  Run.attachments' = Run.snapshot
+  Run.generated' = (generation_blind and some selected_source_files => GenerationPlan.claims else none)
+  Run.phase' = Formalize
+  Run.scanned' = Run.scanned
+  Run.snapshot' = Run.snapshot
+  Run.traceResults' = Run.traceResults
+  Run.writes' = Run.writes
+  Run.frozen' = Run.frozen
+  Run.formalized' = Run.formalized
+  keep_comparison
+}
+// Safety: selected context preserves exactly the captured bytes and source scope.
+assert attachments_are_snapshots { always (Run.phase in Formalize + Aggregate + Match + Explain + Complete implies
+  Run.attachments = Run.snapshot and Run.attachments.Bytes = selected_source_files) }
+```
 
 ### Requirement: Generate Code-Derived Specifications From Source [STC-GEN-SPECS]
 WHEN source-backed analysis is enabled, THE spec-check tool SHALL generate EARS-preferring behavioral specification files per declared capability using only source-scoped evidence, blind to original requirement text, SHALL persist the generated specifications as Markdown files in a `gen_specs/` directory under the configured output directory, and SHALL use the run-configured universal timeout for every external LLM generation invocation.
@@ -459,147 +472,71 @@ WHEN the spec-check tool invokes an external LLM to generate code-derived specif
 #### Requirement model
 
 ```alloy
-// --- Generate code-derived specifications from source ---
-
-pred gen_specs_phase {
-  // Guard: TracePhase completed
-  TracePhase in AnalysisState.completedPhases
-  GenSpecs not in AnalysisState.completedPhases
-  // Generated claims only reference capabilities with evidence
-  all gc : AnalysisState.genClaims' |
-    gc.genCapability in Claim.capability
-  // Capabilities without sufficient evidence produce limitation findings
-  all cap : Capability |
-    (cap in Claim.capability and no { gc : AnalysisState.genClaims' | gc.genCapability = cap })
-    implies (some f : AnalysisState.findings' - AnalysisState.findings |
-      f.findingKind = InsufficientEvFinding)
-  // Blind boundary: generation does not expose original text (modeled as invariant)
-  AnalysisState.blindBoundaryViolated' = False
-  // Findings monotonic
-  AnalysisState.findings in AnalysisState.findings'
-  // Effect
-  AnalysisState.completedPhases' = AnalysisState.completedPhases + GenSpecs
-  AnalysisState.traceResults' = AnalysisState.traceResults
-  AnalysisState.scannedFiles' = AnalysisState.scannedFiles
-  AnalysisState.genFormalStatus' = AnalysisState.genFormalStatus
-  AnalysisState.capAggregate' = AnalysisState.capAggregate
-  AnalysisState.pairResult' = AnalysisState.pairResult
-  AnalysisState.blindFallback' = AnalysisState.blindFallback
-  AnalysisState.lastOutcome' = AnalysisState.lastOutcome
-  AnalysisState.sourceModified' = False
-}
-
-// Safety: insufficient evidence always produces a finding (never silent)
-assert insufficient_evidence_surfaced {
-  always (GenSpecs in AnalysisState.completedPhases implies
-    all cap : Claim.capability |
-      (no { gc : AnalysisState.genClaims | gc.genCapability = cap })
-      implies (some f : AnalysisState.findings | f.findingKind = InsufficientEvFinding))
-}
-
-// Safety: blind boundary never violated during generation
-assert gen_blind_boundary {
-  always (GenSpecs in AnalysisState.completedPhases implies
-    AnalysisState.blindBoundaryViolated = False)
-}
+// GenerationPlan is a model-output observation, independent of original text.
+// Novel capabilities are permitted; name suggestions are metadata only.
+// Safety: insufficient no invention.
+assert insufficient_no_invention { always (all g : Run.generated |
+  some p : GenerationPlan | p.cap = g.cap and p.sufficient = True) }
 ```
 
 ### Requirement: Formalize Code-Derived Specifications [STC-GEN-FORMAL]
-WHEN code-derived specifications have been generated, THE spec-check tool SHALL formalize them using the same pipeline as specs-forward analysis: bounded LLM sampling, schema validation against the logic IR, equivalence clustering with solver-backed implication checks, and representative selection based on the configured stability threshold. THE spec-check tool SHALL persist the resulting SMT-LIB artifacts in a `gen_specs_smt/` directory under the output directory and SHALL use the run-configured universal timeout for every external LLM formalization invocation on generated claims.
+WHEN code-derived specifications are available, THE spec-check tool SHALL parse, admit, discover concepts for, and formalize them through the same structural, modal, typed-predicate, clustering, and evidence pipeline as original claims while using an independently derived registry.
 
 **References:**
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Scope`
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Quality Attributes`
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
+- [Design: Interaction Protocols](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#interaction-protocols)
+- [Design: Clustering and alignment](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#clustering-and-alignment)
 
 #### Scenario: Stable Code-Derived Formalization [STC-FORMAL-STABLE]
-WHEN formalization sampling for a code-derived claim produces an equivalence cluster that meets the configured stability threshold, THE spec-check tool SHALL select the highest-confidence sample as the representative formalization for that code-derived claim.
-
-**Postcondition:** Code-derived claims have representative formalizations suitable for cross-side implication analysis.
-
-##### Evidence
-- Implementation: [gen-formal.ts:71 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L71)
-- Test: [gen-formal.test.ts:58 applies formalizeClaims with schema validation (same pipeline as specs-forward)](/test/contract/gen-formal.test.ts#L58), [gen-formal.test.ts:83 applies clustering with stability threshold 0.6](/test/contract/gen-formal.test.ts#L83)
+WHEN compatible nonvacuous generated samples meet the stability threshold, THE spec-check tool SHALL select the highest-confidence representative with deterministic input-index tie-breaking and SHALL persist its qualifications and SMT artifact under `gen_specs_smt/`.
 
 #### Scenario: Ambiguous Code-Derived Formalization [STC-FORMAL-AMBIG]
-IF no equivalence cluster meets the stability threshold for a code-derived claim, THEN THE spec-check tool SHALL emit an ambiguity finding and SHALL preserve the distinct interpretations as evidence.
-
-**Postcondition:** Ambiguity in code-derived meaning is surfaced rather than hidden behind an arbitrary selection.
-
-##### Evidence
-- Implementation: [gen-formal.ts:71 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L71)
-- Test: [gen-formal.test.ts:133 with single sample clustering never produces ambiguity finding](/test/contract/gen-formal.test.ts#L133)
+IF no compatible nonvacuous cluster meets the threshold, THEN THE spec-check tool SHALL preserve alternative generated interpretations and SHALL mark dependent comparison scope interpretation-dependent.
 
 #### Scenario: Code-Derived Formalization Failure [STC-FORMAL-FAIL]
-IF all formalization samples for a code-derived claim are invalid after bounded retries, THEN THE spec-check tool SHALL record the failure as an error-severity finding for that capability and SHALL continue with remaining capabilities. THE tool SHALL NOT abort the entire pipeline for a per-capability formalization failure.
-
-**Postcondition:** Per-capability formalization failures are surfaced as error findings; remaining capabilities proceed to cross-side analysis.
-
-##### Evidence
-- Implementation: [gen-formal.ts:71 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L71)
-- Test: [gen-formal.test.ts:156 records error finding on formalization failure (all samples invalid)](/test/contract/gen-formal.test.ts#L156)
+IF generated claims exhaust formalization attempts without valid candidates, THEN THE spec-check tool SHALL persist their attempt evidence, report the affected capability's failure, and continue unaffected capabilities rather than abort the entire pipeline for that capability.
 
 #### Scenario: Universal LLM Timeout For Code-Derived Formalization [STC-FORMAL-TIMEOUT]
-WHEN the spec-check tool invokes an external LLM to formalize generated claims, THE spec-check tool SHALL use the run-configured universal timeout budget.
+WHEN generated discovery or formalization invokes the model, THE spec-check tool SHALL use the run-configured universal timeout and existing bounded retry policy.
 
-**Postcondition:** Indirect code-derived formalization follows the same timeout policy as direct specs-forward formalization.
+#### Scenario: Generated Modality Comes From Parsed Source [STC-FORMAL-MODAL]
+WHEN generated text uses `SHOULD` or `MAY`, THE spec-check tool SHALL preserve its advisory or permission meaning rather than unconditionally construct a mandatory synthetic claim.
 
-##### Evidence
+#### Scenario: Unsupported Generated Prose Is Explicit Scope [STC-FORMAL-ELIGIBILITY]
+IF a generated statement is malformed EARS or unsupported justified prose, THEN THE spec-check tool SHALL preserve it with an exclusion reason and SHALL qualify the capability's formal coverage.
+
+##### Historical verification evidence
+- Implementation: [gen-formal.ts:71 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L71)
+- Test: [gen-formal.test.ts:58 applies formalizeClaims with schema validation (same pipeline as specs-forward)](/test/contract/gen-formal.test.ts#L58), [gen-formal.test.ts:83 applies clustering with stability threshold 0.6](/test/contract/gen-formal.test.ts#L83)
+- Test: [gen-formal.test.ts:133 with single sample clustering never produces ambiguity finding](/test/contract/gen-formal.test.ts#L133)
+- Test: [gen-formal.test.ts:156 records error finding on formalization failure (all samples invalid)](/test/contract/gen-formal.test.ts#L156)
 - Implementation: [gen-formal.ts:71 formalizeGeneratedSpecs](/src/domain/code-backwards/gen-formal.ts#L71) (passes timeoutMs to formalizeClaims)
 - Test: [gen-formal.test.ts:58 applies formalizeClaims with schema validation (same pipeline as specs-forward)](/test/contract/gen-formal.test.ts#L58)
 
 #### Requirement model
 
 ```alloy
-// --- Formalize code-derived specifications ---
-
-pred formalize_gen_phase {
-  // Guard: GenSpecs completed
-  GenSpecs in AnalysisState.completedPhases
-  FormalizeGen not in AnalysisState.completedPhases
-  // Every generated claim gets a formalization status
-  all gc : AnalysisState.genClaims | one AnalysisState.genFormalStatus'[gc]
-  // Ambiguous claims produce AmbiguityFinding
-  all gc : AnalysisState.genClaims |
-    AnalysisState.genFormalStatus'[gc] = FormalAmbiguous implies
-      (some f : AnalysisState.findings' - AnalysisState.findings |
-        f.findingKind = AmbiguityFinding)
-  // Failed claims produce FormalErrorFinding
-  all gc : AnalysisState.genClaims |
-    AnalysisState.genFormalStatus'[gc] = FormalFailed implies
-      (some f : AnalysisState.findings' - AnalysisState.findings |
-        f.findingKind = FormalErrorFinding)
-  // Pipeline continues despite per-capability failures
-  // (FormalizeGen always completes, failures are findings not abort)
-  // Findings monotonic
-  AnalysisState.findings in AnalysisState.findings'
-  // Effect
-  AnalysisState.completedPhases' = AnalysisState.completedPhases + FormalizeGen
-  AnalysisState.traceResults' = AnalysisState.traceResults
-  AnalysisState.scannedFiles' = AnalysisState.scannedFiles
-  AnalysisState.genClaims' = AnalysisState.genClaims
-  AnalysisState.capAggregate' = AnalysisState.capAggregate
-  AnalysisState.pairResult' = AnalysisState.pairResult
-  AnalysisState.blindFallback' = AnalysisState.blindFallback
-  AnalysisState.lastOutcome' = AnalysisState.lastOutcome
-  AnalysisState.sourceModified' = False
-  AnalysisState.blindBoundaryViolated' = AnalysisState.blindBoundaryViolated
+pred formalize[g : Generated] {
+  Run.phase = Formalize and g in Run.generated - Run.formalized
+  Run.formalized' = Run.formalized + g
+  Run.frozen' = Run.frozen + { r : Registry | r.cap = g.cap and r.side = GeneratedSide }
+  Run.generated' = Run.generated
+  Run.phase' = Run.phase
+  keep_sources
+  keep_comparison
 }
-
-// Safety: ambiguous formalization always produces a finding
-assert ambiguity_surfaced {
-  always (FormalizeGen in AnalysisState.completedPhases implies
-    all gc : AnalysisState.genClaims |
-      AnalysisState.genFormalStatus[gc] = FormalAmbiguous implies
-        (some f : AnalysisState.findings | f.findingKind = AmbiguityFinding))
+pred end_formalization {
+  Run.phase = Formalize and Run.formalized = Run.generated
+  Run.phase' = Aggregate
+  keep_sources
+  keep_generation
+  keep_comparison
 }
-
-// Safety: formalization failure never aborts the pipeline
-assert formal_failure_nonblocking {
-  always (FormalizeGen in AnalysisState.completedPhases implies
-    AnalysisState.lastOutcome != SrcInputError)
-}
+// Safety: a failed generated interpretation cannot silently become stable.
+assert formal_status_retained { always (formal_errors in Run.generated) }
 ```
 
 ### Requirement: Solver Analysis Of Code-Derived Formalizations [STC-GEN-LOGIC]
@@ -640,269 +577,147 @@ IF the solver returns timeout or unknown for a code-derived query, THEN THE spec
 #### Requirement model
 
 ```alloy
-// --- Solver analysis of code-derived formalizations ---
-
-pred solver_analysis_gen_phase {
-  // Guard: FormalizeGen completed
-  FormalizeGen in AnalysisState.completedPhases
-  SolverAnalysisGen not in AnalysisState.completedPhases
-  // Contradictions produce ContradictionFinding
-  // Timeouts produce TimeoutFinding (but pipeline continues)
-  // Findings monotonic
-  AnalysisState.findings in AnalysisState.findings'
-  // Effect
-  AnalysisState.completedPhases' = AnalysisState.completedPhases + SolverAnalysisGen
-  AnalysisState.traceResults' = AnalysisState.traceResults
-  AnalysisState.scannedFiles' = AnalysisState.scannedFiles
-  AnalysisState.genClaims' = AnalysisState.genClaims
-  AnalysisState.genFormalStatus' = AnalysisState.genFormalStatus
-  AnalysisState.capAggregate' = AnalysisState.capAggregate
-  AnalysisState.pairResult' = AnalysisState.pairResult
-  AnalysisState.blindFallback' = AnalysisState.blindFallback
-  AnalysisState.lastOutcome' = AnalysisState.lastOutcome
-  AnalysisState.sourceModified' = False
-  AnalysisState.blindBoundaryViolated' = AnalysisState.blindBoundaryViolated
-}
-
-// Safety: solver timeout never blocks the pipeline
-assert solver_timeout_nonblocking {
-  always (SolverAnalysisGen in AnalysisState.completedPhases implies
-    AnalysisState.lastOutcome != SrcInputError)
-}
+// Generated solver statuses remain explicit observations; timeout/error is not
+// an implementation contradiction. Exact script persistence uses the shared
+// query/evidence workflow in formalization-and-logic-analysis.
+fun uncertain_comparisons : set Comparison { { c : Run.aggregates | relation[c] = Uncertain } }
+// Safety: inconclusive not alignment.
+assert inconclusive_not_alignment { always (no { c : uncertain_comparisons | relation[c] in Same + Stronger + PermissionEquivalent }) }
 ```
 
 ### Requirement: Cross-Side Implication Analysis [STC-CROSS-IMPLY]
-WHEN both original formalizations (from specs-forward) and code-derived formalizations (from source analysis) exist, THE spec-check tool SHALL run a two-tiered comparison: first a capability-level aggregate bidirectional implication check per matched capability, then bounded pairwise bidirectional implication checks with greedy bipartite matching within each capability, and SHALL use the implication results as the primary strength classification mechanism. IF any comparison step invokes an external LLM-backed fallback or explanation phase, THE spec-check tool SHALL use the run-configured universal timeout for each such LLM call.
+WHEN original and generated artifacts are available, THE spec-check tool SHALL check their independently frozen vocabularies, explicit alignment, modality, background assumptions, nonvacuity, and solver fragment before aggregate or bounded pairwise implication.
 
 **References:**
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Motivation`
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Quality Attributes`
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
+- [Design: Clustering and alignment](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#clustering-and-alignment)
 
 #### Scenario: Classify Same Guarantee [STC-IMPLY-SAME]
-WHEN the solver confirms that original claim A implies code-derived claim B and code-derived claim B implies original claim A, THE spec-check tool SHALL classify the relationship as `same`.
+WHEN fully mapped compatible satisfiable original and generated predicates mutually entail each other, THE spec-check tool SHALL classify their scoped relationship as `same` with the admitted assumptions and interpretation qualifications.
 
-**Postcondition:** Mutual implication produces a `same` classification with solver evidence.
+#### Scenario: Classify Stronger Code-Derived Guarantee [STC-IMPLY-STRONGER]
+WHEN compatible satisfiable generated predicates entail original predicates but not conversely, THE spec-check tool SHALL classify the generated formalization as `stronger` within the mapped scope without claiming independent proof of implemented behavior.
 
-##### Evidence
+#### Scenario: Classify Weaker Code-Derived Guarantee [STC-IMPLY-WEAKER]
+WHEN compatible satisfiable original predicates entail generated predicates but not conversely, THE spec-check tool SHALL classify the generated formalization as `weaker` within the mapped scope.
+
+#### Scenario: Classify Different Guarantee [STC-IMPLY-DIFFERENT]
+WHEN fully mapped compatible satisfiable artifacts fail implication in both directions, THE spec-check tool SHALL classify their scoped relationship as `different` rather than use that classification for unmapped or incompatible concepts.
+
+#### Scenario: Classify Uncertain When Solver Inconclusive [STC-IMPLY-UNCERTAIN]
+IF either required implication direction or nonvacuity precheck is inconclusive, THEN THE spec-check tool SHALL retain terminal formal status `uncertain` and SHALL preserve any qualitative explanation as separate nonauthoritative evidence.
+
+#### Scenario: Persist Implication Evidence [STC-IMPLY-PERSIST]
+WHEN a comparison query executes, THE spec-check tool SHALL persist its joint signature, alignment, assumptions, exact script, solver identity, outputs, and scope.
+
+#### Scenario: Single Solver Command Per Cross-Side Query [STC-IMPLY-QUERY]
+WHEN compatible premise A and target D are compared, THE spec-check tool SHALL declare every joint symbol once and SHALL execute `B and A and not(D)` with exactly one `check-sat` after successful background and premise satisfiability prechecks.
+
+#### Scenario: Capability-Level Aggregate Comparison [STC-IMPLY-AGGREGATE]
+WHEN matched capabilities have comparable artifacts, THE spec-check tool SHALL compare compatible modal tracks in aggregate before pairwise detail and SHALL retain unmapped, incompatible, excluded, unstable, or differing permission scope rather than claim whole-capability alignment from an obligation subset.
+
+#### Scenario: Pair Budget Controls Pairwise Scope [STC-IMPLY-BUDGET]
+WHEN original-count times generated-count exceeds effective `pairBudget`, THE spec-check tool SHALL report `pairwise_skipped` for that capability and SHALL preserve available aggregate results without running detailed pairwise comparison.
+
+#### Scenario: Greedy Bipartite Matching Within Budget [STC-IMPLY-GREEDY]
+WHEN pairwise comparison is within pair and total query budgets, THE spec-check tool SHALL evaluate compatible obligation pairs in deterministic `same`, `stronger`, `uncertain`, `weaker`, `different` score order and SHALL match permission pairs separately with equivalent relations preferred over non-equivalent relations and source-identity tie-breaking, producing at most one match per claim.
+
+**Postcondition:** Unmapped, incompatible, or partial results remain separate scope statuses and cannot be scored as semantic `different` or silently counted as aligned matches.
+
+#### Scenario: Report Unmatched Capabilities [STC-IMPLY-UNMATCHED-CAP]
+WHEN a capability exists on only one side, THE spec-check tool SHALL report `novel_capability` or `unimplemented_capability` with context and generation/coverage limitations rather than infer an implementation defect solely from missing comparison input.
+
+#### Scenario: Report Unmatched Claims Within Capability [STC-IMPLY-UNMATCHED-CLAIM]
+WHEN deterministic matching leaves claims unpaired, THE spec-check tool SHALL report the corresponding original/generated unmatched scope with alignment, eligibility, and budget reasons where applicable.
+
+**Postcondition:** An unstable selected sample on either side or a contributing mandatory permission baseline retains its conditional relation separately from mapped scope and receives no matching credit.
+
+#### Scenario: Inconsistent Premise Is Not Stronger [STC-IMPLY-VACUOUS]
+IF either side's comparison premise is inconsistent, THEN THE spec-check tool SHALL report its inconsistency and SHALL suppress favorable `same` or `stronger` classification derived from vacuous implication.
+
+#### Scenario: Assumption Mismatch Is Incompatible [STC-IMPLY-ASSUMPTIONS]
+IF background assumptions differ after checked alignment and normalization, THEN THE spec-check tool SHALL report `incompatible` rather than silently conjoin one side's stronger assumptions.
+
+##### Historical verification evidence
 - Implementation: [cross-implication-smt.ts:203 classifyRelationship](/src/domain/code-backwards/cross-implication-smt.ts#L203)
 - Test: [cross-implication.test.ts:39 mutual unsat classifies as same](/test/contract/cross-implication.test.ts#L39)
 - Test (property): [cross-implication.property.test.ts:8 classification is deterministic and symmetric by inverse strength labels](/test/property/cross-implication.property.test.ts#L8)
 - Test (integration): [safety-liveness.invariant.test.ts:386 LIVE-13: if z3 responds within timeout, cross-side implication completes](/test/invariant/safety-liveness.invariant.test.ts#L386)
-- Example:
-```typescript
-const { classifyRelationship } = await import("./src/domain/code-backwards/cross-implication-smt.ts");
-classifyRelationship("yes", "yes"); //=> same
-```
-
-#### Scenario: Classify Stronger Code-Derived Guarantee [STC-IMPLY-STRONGER]
-WHEN the solver confirms that code-derived claim B implies original claim A but original claim A does not imply code-derived claim B, THE spec-check tool SHALL classify the code-derived guarantee as `stronger` than the original.
-
-**Postcondition:** The code guarantees more than the spec requires, with formal evidence.
-
-##### Evidence
-- Implementation: [cross-implication-smt.ts:203 classifyRelationship](/src/domain/code-backwards/cross-implication-smt.ts#L203)
 - Test: [cross-implication.test.ts:59 forward-sat + reverse-unsat classifies as stronger](/test/contract/cross-implication.test.ts#L59)
-- Example:
-```typescript
-const { classifyRelationship } = await import("./src/domain/code-backwards/cross-implication-smt.ts");
-classifyRelationship("no", "yes"); //=> stronger
-```
-
-#### Scenario: Classify Weaker Code-Derived Guarantee [STC-IMPLY-WEAKER]
-WHEN the solver confirms that original claim A implies code-derived claim B but code-derived claim B does not imply original claim A, THE spec-check tool SHALL classify the code-derived guarantee as `weaker` than the original.
-
-**Postcondition:** The code guarantees less than the spec requires, with formal evidence.
-
-##### Evidence
-- Implementation: [cross-implication-smt.ts:203 classifyRelationship](/src/domain/code-backwards/cross-implication-smt.ts#L203)
 - Test: [cross-implication.test.ts:77 forward-unsat + reverse-sat classifies as weaker](/test/contract/cross-implication.test.ts#L77)
-- Example:
-```typescript
-const { classifyRelationship } = await import("./src/domain/code-backwards/cross-implication-smt.ts");
-classifyRelationship("yes", "no"); //=> weaker
-```
-
-#### Scenario: Classify Different Guarantee [STC-IMPLY-DIFFERENT]
-WHEN the solver determines that neither original claim A implies code-derived claim B nor code-derived claim B implies original claim A, THE spec-check tool SHALL classify the relationship as `different`.
-
-**Postcondition:** Non-comparable guarantees are explicitly identified with solver evidence.
-
-##### Evidence
-- Implementation: [cross-implication-smt.ts:203 classifyRelationship](/src/domain/code-backwards/cross-implication-smt.ts#L203)
 - Test: [cross-implication.test.ts:95 both sat classifies as different](/test/contract/cross-implication.test.ts#L95)
-- Example:
-```typescript
-const { classifyRelationship } = await import("./src/domain/code-backwards/cross-implication-smt.ts");
-classifyRelationship("no", "no"); //=> different
-```
-
-#### Scenario: Classify Uncertain When Solver Inconclusive [STC-IMPLY-UNCERTAIN]
-IF the solver returns timeout or unknown for either direction of an implication check, THEN THE spec-check tool SHALL classify the solver-layer result as `uncertain`, SHALL preserve the inconclusive result as evidence, and SHALL delegate final classification to the blind LLM comparison fallback as defined in [STC-COMPARE-FALLBACK].
-
-**Postcondition:** Inconclusive solver results are preserved as evidence and trigger fallback classification rather than producing a terminal `uncertain` verdict.
-
-##### Evidence
 - Implementation: [cross-implication-smt.ts:170 classifyDirection](/src/domain/code-backwards/cross-implication-smt.ts#L170), [cross-implication-smt.ts:203 classifyRelationship](/src/domain/code-backwards/cross-implication-smt.ts#L203)
 - Test: [cross-implication.test.ts:114 timeout in either direction classifies as uncertain](/test/contract/cross-implication.test.ts#L114)
-- Example:
-```typescript
-const { classifyDirection, classifyRelationship } = await import("./src/domain/code-backwards/cross-implication-smt.ts");
-classifyDirection("timeout"); //=> inconclusive
-classifyRelationship("inconclusive", "yes"); //=> uncertain
-```
-
-#### Scenario: Persist Implication Evidence [STC-IMPLY-PERSIST]
-WHEN cross-side implication checks complete, THE spec-check tool SHALL persist all implication queries and solver results verbatim under the output directory.
-
-**Postcondition:** Every cross-side classification is auditable through preserved solver evidence.
-
-##### Evidence
 - Implementation: [cross-implication.ts:66 runCrossImplication](/src/domain/code-backwards/cross-implication.ts#L66)
 - Test: [cross-implication.test.ts:131 persists forward/reverse queries and outputs](/test/contract/cross-implication.test.ts#L131)
-
-#### Scenario: Single Solver Command Per Cross-Side Query [STC-IMPLY-QUERY]
-WHEN the spec-check tool constructs a cross-side implication query to test whether original claim A entails code-derived claim B, THE query SHALL include declarations from both sides for shared context, SHALL assert A's assertions as the premise, SHALL assert the negation of the conjunction of B's assertions (i.e., `(assert (not (and b1 b2 ...)))`) as the consequent test, and SHALL contain exactly one `(check-sat)` command at the end. A result of `unsat` means A entails B; a result of `sat` means A does not entail B.
-
-**Postcondition:** Each cross-side implication query produces exactly one solver result with unambiguous interpretation.
-
-##### Evidence
 - Implementation: [cross-implication-smt.ts:130 buildImplicationQuery](/src/domain/code-backwards/cross-implication-smt.ts#L130)
 - Test: [implication-query.test.ts:79 contains exactly one (check-sat) command](/test/contract/implication-query.test.ts#L79), [implication-query.test.ts:87 negates the consequent (right-side) assertions](/test/contract/implication-query.test.ts#L87), [implication-query.test.ts:95 preserves left-side assertions directly](/test/contract/implication-query.test.ts#L95)
-
-#### Scenario: Capability-Level Aggregate Comparison [STC-IMPLY-AGGREGATE]
-WHEN a capability is present on both the original and code-derived sides, THE spec-check tool SHALL combine all SMT assertions from each side into a single conjunction per side and SHALL run a bidirectional implication check (2 Z3 calls) to produce a capability-level aggregate classification.
-
-**Postcondition:** Each matched capability receives an aggregate strength classification before pairwise detail is attempted.
-
-##### Evidence
 - Implementation: [cross-implication.ts:181 runCapabilityAggregateComparison](/src/domain/code-backwards/cross-implication.ts#L181)
 - Test: [cross-implication.test.ts:213 aggregate comparison combines per-capability assertions](/test/contract/cross-implication.test.ts#L213)
-
-#### Scenario: Pair Budget Controls Pairwise Scope [STC-IMPLY-BUDGET]
-WHEN the number of pairwise combinations (N original claims times M generated claims) within a capability exceeds the configured `--pair-budget`, THE spec-check tool SHALL emit a `pairwise_skipped` finding for that capability and SHALL NOT run detailed pairwise comparison for it.
-
-**Postcondition:** Pairwise analysis is bounded by configurable budget; over-budget capabilities are honestly reported rather than silently truncated.
-
-##### Evidence
 - Implementation: [cross-implication.ts:353 runBoundedPairwiseComparison](/src/domain/code-backwards/cross-implication.ts#L353)
 - Test: [cross-implication.test.ts:250 pairwise skips when pair count exceeds budget](/test/contract/cross-implication.test.ts#L250)
-
-#### Scenario: Greedy Bipartite Matching Within Budget [STC-IMPLY-GREEDY]
-WHEN pairwise comparison runs within budget for a capability, THE spec-check tool SHALL run all N times M bidirectional implication pairs and SHALL assign best matches using greedy bipartite matching sorted by classification score (same > stronger > uncertain > weaker > different), producing at most one matched pair per original claim and per generated claim.
-
-**Postcondition:** Greedy matching is deterministic given the same inputs and produces the highest-quality cross-side pairings available within the capability.
-
-##### Evidence
 - Implementation: [cross-implication.ts:428 runBoundedPairwiseComparison](/src/domain/code-backwards/cross-implication.ts#L428)
 - Test: [cross-implication.test.ts:273 pairwise uses greedy matching to assign best pairs](/test/contract/cross-implication.test.ts#L273)
-
-#### Scenario: Report Unmatched Capabilities [STC-IMPLY-UNMATCHED-CAP]
-WHEN a capability exists only on the generated side, THE spec-check tool SHALL emit a `novel_capability` finding. WHEN a capability exists only on the original side, THE spec-check tool SHALL emit an `unimplemented_capability` finding.
-
-**Postcondition:** Capabilities present on only one side are surfaced with explanatory context noting possible causes (code gap, context budget limitation, or naming mismatch).
-
-##### Evidence
 - Implementation: [cross-implication.ts:192 runCapabilityAggregateComparison](/src/domain/code-backwards/cross-implication.ts#L192)
 - Test: [cross-implication.test.ts:234 aggregate reports unmatched capabilities on each side](/test/contract/cross-implication.test.ts#L234)
-
-#### Scenario: Report Unmatched Claims Within Capability [STC-IMPLY-UNMATCHED-CLAIM]
-WHEN greedy matching within a capability leaves original claims unpaired, THE spec-check tool SHALL emit `unmatched_original` findings. WHEN generated claims remain unpaired, THE spec-check tool SHALL emit `unmatched_generated` findings.
-
-**Postcondition:** Claim-level pairing gaps within a capability are visible to reviewers.
-
-##### Evidence
 - Implementation: [cross-implication.ts:489 runBoundedPairwiseComparison](/src/domain/code-backwards/cross-implication.ts#L489)
 - Test: [cross-implication.test.ts:308 pairwise reports unmatched claims on both sides](/test/contract/cross-implication.test.ts#L308)
 
 #### Requirement model
 
 ```alloy
-// --- Cross-side implication analysis ---
-// Two-tiered: capability-level aggregate first, then bounded pairwise.
-
-pred cross_side_phase {
-  // Guard: SolverAnalysisGen completed
-  SolverAnalysisGen in AnalysisState.completedPhases
-  CrossSideImply not in AnalysisState.completedPhases
-  // Capability-level aggregate: every matched capability gets a classification
-  let matchedCaps = Claim.capability & AnalysisState.genClaims.genCapability |
-    all cap : matchedCaps | one AnalysisState.capAggregate'[cap]
-  // Unmatched capabilities produce findings
-  let origOnly = Claim.capability - AnalysisState.genClaims.genCapability |
-    some origOnly implies
-      (some f : AnalysisState.findings' - AnalysisState.findings |
-        f.findingKind = UnimplCapFinding)
-  let genOnly = AnalysisState.genClaims.genCapability - Claim.capability |
-    some genOnly implies
-      (some f : AnalysisState.findings' - AnalysisState.findings |
-        f.findingKind = NovelCapFinding)
-  // Pairwise within budget: each pair gets a classification
-  Config.pairBudget = WithinBudget implies {
-    // All pairwise results are populated for matched capabilities
-    let matchedCaps = Claim.capability & AnalysisState.genClaims.genCapability |
-      all c : Claim, gc : AnalysisState.genClaims |
-        (c.capability in matchedCaps and gc.genCapability = c.capability)
-        implies one AnalysisState.pairResult'[c][gc]
-    // Greedy matching: at most one match per original claim
-    // (modeled as functional constraint on best matches)
-  }
-  // Over budget: emit PairwiseSkippedFinding, no pairwise results
-  Config.pairBudget = OverBudget implies {
-    no AnalysisState.pairResult'
-    (some f : AnalysisState.findings' - AnalysisState.findings |
-      f.findingKind = PairwiseSkippedFinding)
-  }
-  // blindFallback: claims that need blind LLM comparison
-  // A claim falls back if ANY of its pairwise results are Uncertain
-  all c : Claim |
-    c in AnalysisState.blindFallback' iff
-      (some gc : AnalysisState.genClaims' | AnalysisState.pairResult'[c][gc] = Uncertain)
-  // Findings monotonic
-  AnalysisState.findings in AnalysisState.findings'
-  // Effect
-  AnalysisState.completedPhases' = AnalysisState.completedPhases + CrossSideImply
-  AnalysisState.traceResults' = AnalysisState.traceResults
-  AnalysisState.scannedFiles' = AnalysisState.scannedFiles
-  AnalysisState.genClaims' = AnalysisState.genClaims
-  AnalysisState.genFormalStatus' = AnalysisState.genFormalStatus
-  AnalysisState.lastOutcome' = AnalysisState.lastOutcome
-  AnalysisState.sourceModified' = False
-  AnalysisState.blindBoundaryViolated' = AnalysisState.blindBoundaryViolated
+pred aggregate[c : Comparison] {
+  Run.phase = Aggregate and c not in Run.aggregates
+  c.isAggregate = True
+  c.cap in Original.cap + Run.generated.cap
+  Run.aggregates' = Run.aggregates + c
+  Run.phase' = Run.phase
+  keep_sources
+  keep_generation
+  keep_comparison_except_aggregates
 }
-
-// Safety: matched capabilities always receive aggregate classification
-assert aggregate_before_pairwise {
-  always (CrossSideImply in AnalysisState.completedPhases implies
-    let matchedCaps = Claim.capability & AnalysisState.genClaims.genCapability |
-      all cap : matchedCaps | one AnalysisState.capAggregate[cap])
+fun ready_pairs : set Pair {
+  { p : Pair | p.generated in Run.formalized and p.original.plannedStatus not in Failed + Excluded and
+    p.generated.plannedStatus not in Failed + Excluded and
+    (some c : Run.aggregates | c.cap = p.original.cap and c.modal = p.original.modal) }
 }
-
-// Safety: over-budget capabilities produce a finding (never silently truncated)
-assert over_budget_reported {
-  always (CrossSideImply in AnalysisState.completedPhases implies
-    Config.pairBudget = OverBudget implies
-      (some f : AnalysisState.findings | f.findingKind = PairwiseSkippedFinding))
+pred begin_matching {
+  Run.phase = Aggregate
+  { c : Comparison | c.isAggregate = True and c.cap in Original.cap + Run.generated.cap } in Run.aggregates
+  Run.skippedCaps' = { c : Capability | (#(cap.c & Original)).mul[#(cap.c & Run.generated)] > Config.pairBudget }
+  Run.phase' = Match
+  keep_sources
+  keep_generation
+  Run.aggregates' = Run.aggregates
+  Run.evaluatedPairs' = Run.evaluatedPairs
+  Run.matches' = Run.matches
+  Run.explanations' = Run.explanations
 }
-
-// Safety: unmatched capabilities always produce findings
-assert unmatched_caps_surfaced {
-  always (CrossSideImply in AnalysisState.completedPhases implies (
-    (some Claim.capability - AnalysisState.genClaims.genCapability) implies
-      (some f : AnalysisState.findings | f.findingKind = UnimplCapFinding)
-    and
-    (some AnalysisState.genClaims.genCapability - Claim.capability) implies
-      (some f : AnalysisState.findings | f.findingKind = NovelCapFinding)))
+pred match_next[p : Pair] {
+  Run.phase = Match and p in ready_pairs - Run.evaluatedPairs
+  p.original.cap not in Run.skippedCaps
+  no q : ready_pairs - Run.evaluatedPairs | q.original.cap not in Run.skippedCaps and preferred[q,p]
+  Run.evaluatedPairs' = Run.evaluatedPairs + p
+  Run.matches' = Run.matches + (credit[p.comparison] and no p.original & Run.matches.original and
+    no p.generated & Run.matches.generated => p else none)
+  Run.phase' = Run.phase
+  keep_sources
+  keep_generation
+  Run.aggregates' = Run.aggregates
+  Run.skippedCaps' = Run.skippedCaps
+  Run.explanations' = Run.explanations
 }
-
-// Safety: uncertain solver results always trigger blind fallback
-assert uncertain_triggers_fallback {
-  always (CrossSideImply in AnalysisState.completedPhases implies
-    all c : Claim, gc : AnalysisState.genClaims |
-      AnalysisState.pairResult[c][gc] = Uncertain implies
-        c in AnalysisState.blindFallback)
-}
+fun novel_caps : set Capability { Run.generated.cap - Original.cap }
+fun unimplemented_caps : set Capability { Original.cap - Run.generated.cap }
+fun unmatched_original : set Original { Original - Run.matches.original }
+fun unmatched_generated : set Generated { Run.generated - Run.matches.generated }
+// Safety: aggregate evidence precedes pair evaluation; matching is one-to-one.
+assert aggregate_before_pairs { always ((all p : Run.evaluatedPairs | some c : Run.aggregates | c.cap = p.original.cap and c.modal = p.original.modal) and
+  all disj p,q : Run.matches | p.original != q.original and p.generated != q.generated) }
+assert budget_skips_pairs { always (no Run.evaluatedPairs.original.cap & Run.skippedCaps) }
 ```
 
 ### Requirement: Surface Semantic Divergence As First-Class Evidence [STC-DIVERGE-EVIDENCE]
@@ -933,150 +748,91 @@ WHEN a capability has all claims classified as `same` or `stronger`, THE spec-ch
 #### Requirement model
 
 ```alloy
-// --- Surface semantic divergence as first-class evidence ---
-// Divergence reporting is a derived property of cross-side results.
-
-// Helper: a capability is divergent if any pairwise result is Different or Weaker
-pred capability_divergent [cap : Capability] {
-  some c : Claim, gc : AnalysisState.genClaims |
-    c.capability = cap and gc.genCapability = cap and
-    AnalysisState.pairResult[c][gc] in (Different + Weaker)
+fun divergent_pairs[c : Capability] : set Pair { { p : Run.matches | p.original.cap = c and relation[p.comparison] in Different + Weaker } }
+fun prominent_divergence : set Capability {
+  { c : Capability | #divergent_pairs[c] > #(cap.c & Original) - #divergent_pairs[c] }
 }
-
-// Safety: divergent capabilities always produce divergence findings in the report
-assert divergence_surfaced {
-  always (EmitReport in AnalysisState.completedPhases implies
-    (some cap : Capability | capability_divergent[cap]) implies
-      (some f : AnalysisState.findings | f.findingKind = DivergenceFinding))
+fun wholly_aligned : set Capability {
+  { c : Original.cap & Run.generated.cap | (cap.c & Original) in Run.matches.original and
+    (cap.c & Run.generated) in Run.matches.generated and
+    all p : Run.matches | p.original.cap = c implies relation[p.comparison] in Same + Stronger + PermissionEquivalent }
 }
+// Safety: prominent divergence uses the declared majority, not any one pair.
+assert divergence_majority { always (all c : prominent_divergence | some divergent_pairs[c]) }
 ```
 
 ### Requirement: Two-Layer Comparison With Blind Boundary [STC-BLIND-COMPARE]
-WHEN comparing code-derived guarantees against original specifications, THE spec-check tool SHALL use solver-backed cross-side implication as the primary classification mechanism and SHALL use blind LLM comparison as the explanatory layer that provides human-readable rationale. THE spec-check tool SHALL NOT expose original requirement text to the code-derived side during any comparison phase, and SHALL use the run-configured universal timeout for every blind comparison invocation.
+WHEN formal and qualitative comparison evidence is produced, THE spec-check tool SHALL keep formal classification distinct from explanatory assessment and SHALL prevent original requirement text, registry contents, and assumptions from influencing source-derived generation or registry discovery.
 
 **References:**
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Failure Modes`
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/proposal.md#Quality Attributes`
 - `openspec/changes/archive/2026-06-20-prompt-file-input-timeout/design.md#Decision: Centralize universal LLM timeout policy in run configuration`
+- [Proposal: Constraints](../../changes/archive/2026-11-15-improve-ears-smt-analysis/proposal.md#constraints)
+- [Design: Clustering and alignment](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#clustering-and-alignment)
 
 #### Scenario: Solver Implication As Primary Classifier [STC-COMPARE-PRIMARY]
-WHEN cross-side implication results are available and conclusive (same, stronger, weaker, or different) for a claim pair, THE spec-check tool SHALL use the solver-backed classification as the final verdict.
-
-**Postcondition:** Conclusive formal classification takes precedence over qualitative assessment.
-
-##### Evidence
-- Implementation: [cross-implication-smt.ts:203 classifyRelationship](/src/domain/code-backwards/cross-implication-smt.ts#L203)
-- Test: [cross-implication.test.ts:39 mutual unsat classifies as same](/test/contract/cross-implication.test.ts#L39), [safety-liveness.invariant.test.ts:145 SAFE-7: no cross-side classification is produced from unvalidated inputs](/test/invariant/safety-liveness.invariant.test.ts#L145)
+WHEN a compatible nonvacuous comparison has a conclusive formal relationship, THE spec-check tool SHALL retain that scoped formal verdict independently of any qualitative explanation.
 
 #### Scenario: Blind Comparison As Explanatory Rationale [STC-COMPARE-EXPLAIN]
-WHEN both solver implication results and blind LLM comparison results are available, THE spec-check tool SHALL attach the blind comparison rationale as supporting evidence that explains the formal classification in human-readable terms.
+WHEN generated-only explanatory context is available, THE spec-check tool SHALL attach its rationale as supporting evidence without presenting it as independent proof that the original intent is satisfied.
 
-**Postcondition:** Reviewers receive both a formal verdict and a human-readable explanation.
+#### Scenario: Blind Comparison As Fallback Classifier [STC-COMPARE-FALLBACK]
+IF formal comparison is uncertain, unmapped, incompatible, or partial, THEN THE spec-check tool SHALL preserve that formal status and SHALL label any model assessment qualitative rather than promote it to a solver-established final equivalence verdict.
 
-##### Evidence
+**Postcondition:** The historical fallback-classifier behavior is intentionally replaced by evidence-separated assessment.
+
+#### Scenario: Universal LLM Timeout For Blind Comparison [STC-COMPARE-TIMEOUT]
+WHEN explanatory model calls execute, THE spec-check tool SHALL use the run-configured universal timeout.
+
+#### Scenario: Prevent Requirement-Text Leakage [STC-COMPARE-BLIND]
+IF a derivation or generated-side explanation path would receive original requirement text, registry content, or assumptions, THEN THE spec-check tool SHALL prevent that path and SHALL report the boundary violation.
+
+#### Scenario: Sanitize Untrusted Content In Code Fences [STC-COMPARE-FENCE]
+WHEN untrusted explanatory data is placed in a code fence, THE spec-check tool SHALL sanitize delimiter runs and SHALL keep the content in data position.
+
+##### Historical verification evidence
+- Implementation: [cross-implication-smt.ts:203 classifyRelationship](/src/domain/code-backwards/cross-implication-smt.ts#L203)
+- Test: [cross-implication.test.ts:39 mutual unsat classifies as same](/test/contract/cross-implication.test.ts#L39), [safety-liveness.invariant.test.ts:145 SAFE-7: no cross-side classification is produced from unvalidated inputs](/test/invariant/safety-liveness.invariant.test.ts#L145)
 - Implementation: [blind-compare.ts:54 runBlindComparison](/src/domain/code-backwards/blind-compare.ts#L54), [blind-compare.ts:156 extractRationale](/src/domain/code-backwards/blind-compare.ts#L156)
 - Test: [blind-compare.test.ts:32 attaches rationale finding with classification and LLM-extracted rationale](/test/contract/blind-compare.test.ts#L32), [blind-compare.test.ts:130 extractRationale returns rationale field, falls back to explanation, defaults](/test/contract/blind-compare.test.ts#L130)
 - Test (property): [blind-compare.property.test.ts:45 extractRationale never throws on arbitrary input](/test/property/blind-compare.property.test.ts#L45)
-- Example:
-```typescript
-const { extractRationale } = await import("./src/domain/code-backwards/blind-compare.ts");
-extractRationale({ rationale: "Both express the same constraint." }); //=> Both express the same constraint.
-extractRationale({ explanation: "Alternate field." }); //=> Alternate field.
-extractRationale(null); //=> No rationale provided
-```
-
-#### Scenario: Blind Comparison As Fallback Classifier [STC-COMPARE-FALLBACK]
-IF cross-side implication results are unavailable or the solver-layer classification is `uncertain` for a claim pair, THEN THE spec-check tool SHALL use the blind LLM comparison as the fallback classifier to produce the final verdict for that pair, and SHALL preserve the solver-layer `uncertain` evidence alongside the blind comparison result.
-
-**Postcondition:** Claims without conclusive formal evidence receive a final classification through the blind comparison layer; both the inconclusive solver evidence and the blind comparison verdict are preserved.
-
-##### Evidence
 - Implementation: [blind-compare.ts:54 runBlindComparison](/src/domain/code-backwards/blind-compare.ts#L54)
 - Test: [blind-compare.test.ts:55 uses warning severity for uncertain classifications, info for definitive](/test/contract/blind-compare.test.ts#L55)
-
-#### Scenario: Universal LLM Timeout For Blind Comparison [STC-COMPARE-TIMEOUT]
-WHEN the spec-check tool invokes blind comparison, THE spec-check tool SHALL use the run-configured universal timeout budget.
-
-**Postcondition:** Blind comparison timeout behavior matches all other LLM-backed phases.
-
-##### Evidence
 - Implementation: [blind-compare.ts:54 runBlindComparison](/src/domain/code-backwards/blind-compare.ts#L54) (passes timeoutMs to callOpencode)
 - Test: [blind-compare.test.ts:32 attaches rationale finding with classification and LLM-extracted rationale](/test/contract/blind-compare.test.ts#L32)
-
-#### Scenario: Prevent Requirement-Text Leakage [STC-COMPARE-BLIND]
-IF the blind comparison boundary would expose original requirement text to the code-derived comparison side, THEN THE spec-check tool SHALL prevent that comparison path and SHALL surface the boundary violation as an analysis defect.
-
-**Postcondition:** Blind comparison remains structurally separated from original requirement text.
-
-##### Evidence
 - Implementation: [blind-compare.ts:133 buildBlindPrompt](/src/domain/code-backwards/blind-compare.ts#L133)
 - Test: [blind-compare.test.ts:87 emits blind_boundary_violation error when generated context is missing](/test/contract/blind-compare.test.ts#L87), [blind-compare.test.ts:101 buildBlindPrompt contains only generated-side context](/test/contract/blind-compare.test.ts#L101)
 - Test (property): [blind-compare.property.test.ts:12 buildBlindPrompt never exposes original requirement text](/test/property/blind-compare.property.test.ts#L12)
 - Test (integration): [global.invariant.test.ts:180 INV-15: blind comparison prompts never expose original requirement text](/test/invariant/global.invariant.test.ts#L180), [safety-liveness.invariant.test.ts:127 SAFE-5: no blind comparison exposes original requirement text](/test/invariant/safety-liveness.invariant.test.ts#L127)
-
-#### Scenario: Sanitize Untrusted Content In Code Fences [STC-COMPARE-FENCE]
-WHEN the spec-check tool embeds untrusted document content inside markdown code fences for comparison prompts, THE spec-check tool SHALL sanitize runs of three or more backticks in the content to prevent premature fence closure.
-
-**Postcondition:** Untrusted content cannot break out of its code fence boundary, preserving prompt structure integrity.
-
-##### Evidence
 - Implementation: [fence.ts:12 sanitizeForCodeFence](/src/domain/fence.ts#L12)
 - Test: [blind-compare.test.ts:115 buildBlindPrompt escapes backtick runs in generatedSummary](/test/contract/blind-compare.test.ts#L115)
-- Example:
-```typescript
-const { sanitizeForCodeFence } = await import("./src/domain/fence.ts");
-sanitizeForCodeFence("safe content"); //=> safe content
-sanitizeForCodeFence("a```b").includes("```"); //=> false
-sanitizeForCodeFence("no backticks"); //=> no backticks
-```
 
 #### Requirement model
 
 ```alloy
-// --- Two-layer comparison with blind boundary ---
-
-pred blind_compare_phase {
-  // Guard: CrossSideImply completed
-  CrossSideImply in AnalysisState.completedPhases
-  BlindCompare not in AnalysisState.completedPhases
-  // Blind comparison runs for all claims in blindFallback set
-  // (those with Uncertain solver results)
-  // Blind boundary must not be violated
-  AnalysisState.blindBoundaryViolated' = False
-  // If boundary would be violated, emit BlindBoundaryFinding instead
-  // (modeled as: if violated is True, a finding is emitted)
-  // Findings monotonic
-  AnalysisState.findings in AnalysisState.findings'
-  // Effect
-  AnalysisState.completedPhases' = AnalysisState.completedPhases + BlindCompare
-  AnalysisState.traceResults' = AnalysisState.traceResults
-  AnalysisState.scannedFiles' = AnalysisState.scannedFiles
-  AnalysisState.genClaims' = AnalysisState.genClaims
-  AnalysisState.genFormalStatus' = AnalysisState.genFormalStatus
-  AnalysisState.capAggregate' = AnalysisState.capAggregate
-  AnalysisState.pairResult' = AnalysisState.pairResult
-  AnalysisState.blindFallback' = AnalysisState.blindFallback
-  AnalysisState.lastOutcome' = AnalysisState.lastOutcome
-  AnalysisState.sourceModified' = False
+// Boundary rejection is attributed to the actual forbidden original/registry
+// inputs. Rejection starts no generation and cannot be hidden by a false flag.
+fun blind_boundary_findings : set Original + Registry {
+  Run.phase in Formalize + Aggregate + Match + Explain + Complete =>
+    GenerationBoundary.requestedOriginalText + GenerationBoundary.requestedRegistries else none
 }
-
-// Safety: blind boundary is never violated in any state
-assert blind_boundary_never_violated {
-  always (AnalysisState.blindBoundaryViolated = False)
+// Safety: forbidden context cannot influence an issued generated artifact.
+assert generation_rejects_forbidden_context { always (not generation_blind implies no Run.generated) }
+pred explain {
+  Run.phase = Match and ready_pairs - { p : Pair | p.original.cap in Run.skippedCaps } in Run.evaluatedPairs
+  Run.phase' = Explain
+  Run.explanations' = Original.cap + Run.generated.cap
+  keep_sources
+  keep_generation
+  Run.aggregates' = Run.aggregates
+  Run.evaluatedPairs' = Run.evaluatedPairs
+  Run.matches' = Run.matches
+  Run.skippedCaps' = Run.skippedCaps
 }
-
-// Safety: conclusive solver results are never overridden by blind comparison
-// If ALL pairwise results for a claim are conclusive, blind is not needed
-assert solver_primary_over_blind {
-  always (BlindCompare in AnalysisState.completedPhases implies
-    all c : Claim |
-      (some gc : AnalysisState.genClaims | some AnalysisState.pairResult[c][gc])
-      and (all gc : AnalysisState.genClaims |
-        some AnalysisState.pairResult[c][gc] implies
-        AnalysisState.pairResult[c][gc] in (Same + Stronger + Weaker + Different))
-      implies c not in AnalysisState.blindFallback)
-}
+// Safety: qualitative explanation never overwrites formal relations or scope.
+assert explanation_does_not_promote { always (explain implies Run.aggregates' = Run.aggregates and Run.matches' = Run.matches) }
 ```
 
 ### Requirement: Evidence Hierarchy For Source Analysis [STC-EVIDENCE-HIERARCHY]
@@ -1105,33 +861,11 @@ IF a code-derived guarantee is supported only by documentation within the source
 #### Requirement model
 
 ```alloy
-// --- Evidence hierarchy for source analysis ---
-// Implementation > Tests > Documentation
-
-// Evidence strength ordering
-fun evidence_strength : EvidenceKind -> EvidenceKind {
-  DocEvidence -> TestEvidence +
-  TestEvidence -> ImplEvidence
-}
-
-// A claim has strong evidence if implementation or test evidence exists
-pred has_strong_evidence [c : Claim] {
-  some sf : AnalysisState.scannedFiles |
-    sf.evidenceKind in (ImplEvidence + TestEvidence)
-}
-
-// A claim has only documentation evidence
-pred doc_only_evidence [c : Claim] {
-  all sf : AnalysisState.scannedFiles |
-    sf.evidenceKind = DocEvidence
-}
-
-// Safety: documentation-only evidence always produces a limitation finding
-assert doc_only_flagged {
-  always (TracePhase in AnalysisState.completedPhases implies
-    doc_only_evidence[Claim] implies
-      (some f : AnalysisState.findings | f.findingKind = LimitationFinding))
-}
+fun evidence_for[c : Original] : set SourceFile { { l : TraceLink | l.claim = c }.file & Run.scanned }
+fun documentation_only : set Original { { c : Original | some evidence_for[c] and evidence_for[c].kind in Documentation } }
+// Safety: another claim's implementation link cannot strengthen this claim.
+assert support_is_claim_local { always (all c : Original | Run.traceResults[c] = Supported implies
+  some l : TraceLink | l.claim = c and l.file in evidence_for[c] and l.behaviorVerified = True) }
 ```
 
 ### Requirement: Task-to-Claim Consistency When Source Available [STC-TASK-SOURCE]
@@ -1162,157 +896,191 @@ IF a completed task change summary describes behavior that contradicts source-de
 #### Requirement model
 
 ```alloy
-// --- Task-to-claim consistency ---
-// Task consistency is checked as part of the report phase.
-// Contradictions produce TaskConflictFinding.
+sig TaskEvidence { related : one Original, conflicts : one Bool, source : one SourceFile }
+fun task_conflicts : set TaskEvidence { { t : TaskEvidence | t.conflicts = True and t.source in Run.scanned } }
+fun task_supporting : set TaskEvidence { { t : TaskEvidence | t.conflicts = False and t.source in Run.scanned } }
+// Safety: task discrepancy attribution retains both the task and source claim.
+assert task_evidence_attributed { always (all t : task_conflicts | some t.related and t.source in Run.scanned) }
+```
 
-pred emit_report_phase {
-  // Guard: BlindCompare completed
-  BlindCompare in AnalysisState.completedPhases
-  EmitReport not in AnalysisState.completedPhases
-  // Divergence must be surfaced as findings
-  (some cap : Capability | capability_divergent[cap]) implies
-    (some f : AnalysisState.findings' - AnalysisState.findings |
-      f.findingKind = DivergenceFinding)
-  // Findings monotonic
-  AnalysisState.findings in AnalysisState.findings'
-  // Effect: pipeline complete
-  AnalysisState.completedPhases' = AnalysisState.completedPhases + EmitReport
-  AnalysisState.traceResults' = AnalysisState.traceResults
-  AnalysisState.scannedFiles' = AnalysisState.scannedFiles
-  AnalysisState.genClaims' = AnalysisState.genClaims
-  AnalysisState.genFormalStatus' = AnalysisState.genFormalStatus
-  AnalysisState.capAggregate' = AnalysisState.capAggregate
-  AnalysisState.pairResult' = AnalysisState.pairResult
-  AnalysisState.blindFallback' = AnalysisState.blindFallback
-  AnalysisState.lastOutcome' = AnalysisSuccess
-  AnalysisState.sourceModified' = False
-  AnalysisState.blindBoundaryViolated' = False
-}
+### Requirement: Align Independent Frozen Vocabularies [STC-CONCEPT-ALIGNMENT]
+WHEN both source sides have independently frozen registries, THE spec-check tool SHALL persist a post-derivation alignment map recording identities, signatures, units, scope, and unresolved alternatives before constructing a joint comparison signature.
 
-// Safety: task contradictions are always surfaced (never silent)
-assert task_conflict_surfaced {
-  always (EmitReport in AnalysisState.completedPhases implies
-    AnalysisState.lastOutcome = AnalysisSuccess)
-}
+**References:**
+- [Design: Concepts and assumptions](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#concepts-and-assumptions)
+- [Design: Clustering and alignment](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#clustering-and-alignment)
+
+#### Scenario: Alias Alignment Uses A Checked Joint Signature [STC-ALIGN-ALIASES]
+WHEN different symbols denote a supported common concept, THE spec-check tool SHALL map both sides into one checked joint signature without duplicate declarations or changes to the previously frozen registries.
+
+#### Scenario: Unmapped And Incompatible Concepts Stay Distinct [STC-ALIGN-UNRESOLVED]
+IF a comparison lacks a concept map or has incompatible signatures, units, or scope, THEN THE spec-check tool SHALL record `unmapped` or `incompatible` respectively and SHALL avoid a semantic `different` verdict for that reason alone.
+
+#### Scenario: Alignment Does Not Feed Back Into Derivation [STC-ALIGN-BLIND]
+WHEN joint alignment is produced, THE spec-check tool SHALL keep it outside original/generated discovery and generation inputs and SHALL preserve independent input hashes proving those stages used their own evidence.
+
+**Postcondition:** Generation records selected source-byte snapshots, original path mappings and exact prompt/request identity before invocation. Private copies of those same captured bytes are attached across retries; original edits after capture cannot change generation input. Raw attempt/runtime/model/status evidence is managed and checksummed even on complete failure.
+
+#### Requirement model
+
+```alloy
+// Side-local registries freeze independently; alignment consumes their hashes
+// after derivation and is never part of generation input or attached snapshots.
+// Safety: independent registries.
+assert independent_registries { all c : Capability | no { r : Registry | r.cap = c and r.side = OriginalSide } &
+  { r : Registry | r.cap = c and r.side = GeneratedSide } }
+```
+
+### Requirement: Compare Permissions Separately From Obligations [STC-PERMISSION-RELATION]
+WHEN aligned explicit permissions are compared under compatible satisfiable premises, THE spec-check tool SHALL compare their allowed valuation relations using permission-specific verdicts rather than obligation stronger/weaker labels.
+
+**References:**
+- [Design: Clustering and alignment](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#clustering-and-alignment)
+- [Resolved permission decision](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design-issues.md#permission-track-cross-side-comparison)
+
+#### Scenario: Equal Permitted Sets [STC-PERMISSION-EQUIVALENT]
+WHEN permitted relations mutually include each other, THE spec-check tool SHALL report `permission-equivalent` within the admitted scope.
+
+#### Scenario: Generated Permissions Are Broader [STC-PERMISSION-BROADER]
+WHEN the original permitted relation is a strict subset of the generated relation, THE spec-check tool SHALL report `permission-broader` rather than an obligation `weaker` verdict.
+
+#### Scenario: Generated Permissions Are Narrower [STC-PERMISSION-NARROWER]
+WHEN the generated permitted relation is a strict subset of the original relation, THE spec-check tool SHALL report `permission-narrower` rather than an obligation `stronger` verdict.
+
+#### Scenario: Permitted Sets Differ In Both Directions [STC-PERMISSION-DIFFERENT]
+WHEN neither permitted relation includes the other, THE spec-check tool SHALL report `permission-different` with distinguishing valuation evidence.
+
+#### Scenario: Missing Permission Does Not Imply Prohibition [STC-PERMISSION-ABSENT]
+IF one side lacks an explicit comparable permission, THEN THE spec-check tool SHALL report unmapped permission scope instead of treating absence as an empty permitted set or proving whole-capability equivalence.
+
+#### Requirement model
+
+```alloy
+// Safety: permissions use set-inclusion polarity, never obligation strength names.
+assert permissions_separate { all c : Comparison | c.modal = Permission implies
+  relation[c] not in Same + Stronger + Weaker + Different }
+assert missing_permission_unmapped { all c : Comparison | c.modal = Permission and c.originalPresent = False implies relation[c] = Unmapped }
+assert unstable_no_credit { all c : Comparison | c.originalUnstable = True or c.generatedUnstable = True implies not credit[c] }
 ```
 
 ### State machine and invariant checks
+
 ```alloy
-// --- Transition system ---
-
-pred stutter {
-  AnalysisState.completedPhases' = AnalysisState.completedPhases
-  AnalysisState.traceResults' = AnalysisState.traceResults
-  AnalysisState.scannedFiles' = AnalysisState.scannedFiles
-  AnalysisState.genClaims' = AnalysisState.genClaims
-  AnalysisState.genFormalStatus' = AnalysisState.genFormalStatus
-  AnalysisState.capAggregate' = AnalysisState.capAggregate
-  AnalysisState.pairResult' = AnalysisState.pairResult
-  AnalysisState.blindFallback' = AnalysisState.blindFallback
-  AnalysisState.findings' = AnalysisState.findings
-  AnalysisState.lastOutcome' = AnalysisState.lastOutcome
-  AnalysisState.sourceModified' = AnalysisState.sourceModified
-  AnalysisState.blindBoundaryViolated' = AnalysisState.blindBoundaryViolated
+pred keep_sources {
+  Run.scanned' = Run.scanned
+  Run.snapshot' = Run.snapshot
+  Run.attachments' = Run.attachments
+  Run.traceResults' = Run.traceResults
+  Run.writes' = Run.writes
 }
-
-pred init_state {
-  no AnalysisState.completedPhases
-  no AnalysisState.traceResults
-  no AnalysisState.scannedFiles
-  no AnalysisState.genClaims
-  no AnalysisState.genFormalStatus
-  no AnalysisState.capAggregate
-  no AnalysisState.pairResult
-  no AnalysisState.blindFallback
-  no AnalysisState.findings
-  no AnalysisState.lastOutcome
-  AnalysisState.sourceModified = False
-  AnalysisState.blindBoundaryViolated = False
+pred keep_generation { Run.generated' = Run.generated and Run.frozen' = Run.frozen and Run.formalized' = Run.formalized }
+pred keep_comparison_except_aggregates {
+  Run.evaluatedPairs' = Run.evaluatedPairs
+  Run.matches' = Run.matches
+  Run.skippedCaps' = Run.skippedCaps
+  Run.explanations' = Run.explanations
 }
-
-fact transitions {
-  init_state and always (
-    // Source validation
-    source_validate_success
-    or source_validate_fail
-    // Traceability
-    or trace_phase
-    // Code-derived generation
-    or gen_specs_phase
-    // Formalization
-    or formalize_gen_phase
-    // Solver analysis
-    or solver_analysis_gen_phase
-    // Cross-side implication
-    or cross_side_phase
-    // Blind comparison
-    or blind_compare_phase
-    // Report emission
-    or emit_report_phase
-    // Stutter
-    or stutter
-  )
+pred keep_comparison { keep_comparison_except_aggregates and Run.aggregates' = Run.aggregates }
+pred finish {
+  Run.phase = Explain
+  Run.phase' = Complete
+  keep_sources
+  keep_generation
+  keep_comparison
 }
-
-// --- Global safety properties ---
-
-// Safety: findings only accumulate, never shrink
-assert findings_monotonic {
-  always (AnalysisState.findings in AnalysisState.findings')
+pred environment_edit[f : SourceFile, b : Bytes] {
+  currentBytes' = currentBytes ++ f -> b
+  Run.phase' = Run.phase
+  keep_sources
+  keep_generation
+  keep_comparison
 }
-
-// Safety: completed phases monotonically grow
-assert completed_phases_monotonic {
-  always (AnalysisState.completedPhases in AnalysisState.completedPhases')
+pred stutter { Run.phase' = Run.phase and keep_sources and keep_generation and keep_comparison }
+pred init {
+  Run.phase = ValidateSource
+  no Run.scanned + Run.generated + Run.formalized + Run.aggregates + Run.evaluatedPairs +
+    Run.matches + Run.skippedCaps + Run.explanations + Run.writes
+  no Run.snapshot
+  no Run.attachments
+  no Run.traceResults
+  Run.frozen = { r : Registry | r.side = OriginalSide }
 }
-
-// Safety: phase ordering is always respected
-assert phase_ordering_respected {
-  always (all p1, p2 : Phase |
-    (p1 -> p2) in ^phase_order and p2 in AnalysisState.completedPhases
-      implies p1 in AnalysisState.completedPhases)
+fact behavior {
+  init and always (validate_source or trace or generate or end_formalization or begin_matching or explain or finish or stutter or
+    (some g : Generated | formalize[g]) or (some c : Comparison | aggregate[c]) or
+    (some p : Pair | match_next[p]) or (some f : SourceFile, b : Bytes | environment_edit[f,b]))
 }
-
-// Liveness: if source validation succeeds, pipeline eventually completes
-// (without fairness, stutter can prevent progress -- expected counterexample)
-assert pipeline_progress_liveness {
-  always (
-    (SourceValidate in AnalysisState.completedPhases and
-     no AnalysisState.lastOutcome & (SrcInputError + SrcReadError))
-    implies eventually (EmitReport in AnalysisState.completedPhases))
+pred fairness {
+  always (Run.phase = ValidateSource implies eventually validate_source)
+  always (Run.phase = Trace implies eventually trace)
+  always (Run.phase = Generate implies eventually generate)
+  all g : Generated | always (Run.phase = Formalize and g in Run.generated - Run.formalized implies eventually formalize[g])
+  always (Run.phase = Formalize and Run.generated = Run.formalized implies eventually end_formalization)
+  all c : Comparison | always (Run.phase = Aggregate and c.isAggregate = True and c.cap in Original.cap + Run.generated.cap and c not in Run.aggregates implies eventually aggregate[c])
+  always (Run.phase = Aggregate and { c : Comparison | c.isAggregate = True and c.cap in Original.cap + Run.generated.cap } in Run.aggregates implies eventually begin_matching)
+  always (Run.phase = Match implies eventually (explain or some p : Pair | match_next[p]))
+  always (Run.phase = Explain implies eventually finish)
 }
-
-// --- Commands ---
-
-run show_source_traceability {} for 3 Claim, 2 Capability, 3 SourceFile, 3 GenClaim, 4 Finding, 8 steps
-
-run scenario_full_pipeline {
-  eventually (EmitReport in AnalysisState.completedPhases)
-} for 2 Claim, 2 Capability, 2 SourceFile, 2 GenClaim, 4 Finding, 10 steps
-
-run scenario_src_failure {
-  eventually (AnalysisState.lastOutcome = SrcInputError)
-} for 1 Claim, 1 Capability, 1 SourceFile, 1 GenClaim, 2 Finding, 3 steps
-
-check scope_confinement for 3 Claim, 2 Capability, 3 SourceFile, 3 GenClaim, 4 Finding, 10 steps expect 0
-check source_never_modified for 3 Claim, 2 Capability, 3 SourceFile, 3 GenClaim, 4 Finding, 10 steps expect 0
-check blind_boundary_never_violated for 3 Claim, 2 Capability, 3 SourceFile, 3 GenClaim, 4 Finding, 10 steps expect 0
-check trace_total_classification for 3 Claim, 2 Capability, 3 SourceFile, 3 GenClaim, 4 Finding, 10 steps expect 0
-check missing_trace_produces_finding for 3 Claim, 2 Capability, 3 SourceFile, 3 GenClaim, 4 Finding, 10 steps expect 0
-check unreadable_src_stops_pipeline for 2 Claim, 1 Capability, 2 SourceFile, 2 GenClaim, 3 Finding, 8 steps expect 0
-check insufficient_evidence_surfaced for 3 Claim, 2 Capability, 2 SourceFile, 2 GenClaim, 4 Finding, 10 steps expect 0
-check gen_blind_boundary for 3 Claim, 2 Capability, 2 SourceFile, 3 GenClaim, 4 Finding, 10 steps expect 0
-check ambiguity_surfaced for 2 Claim, 2 Capability, 2 SourceFile, 3 GenClaim, 4 Finding, 10 steps expect 0
-check formal_failure_nonblocking for 2 Claim, 2 Capability, 2 SourceFile, 3 GenClaim, 4 Finding, 10 steps expect 0
-check solver_timeout_nonblocking for 2 Claim, 2 Capability, 2 SourceFile, 2 GenClaim, 3 Finding, 10 steps expect 0
-check aggregate_before_pairwise for 3 Claim, 2 Capability, 2 SourceFile, 3 GenClaim, 4 Finding, 10 steps expect 0
-check over_budget_reported for 2 Claim, 2 Capability, 2 SourceFile, 2 GenClaim, 4 Finding, 10 steps expect 0
-check unmatched_caps_surfaced for 3 Claim, 2 Capability, 2 SourceFile, 3 GenClaim, 5 Finding, 10 steps expect 0
-check uncertain_triggers_fallback for 3 Claim, 2 Capability, 2 SourceFile, 3 GenClaim, 4 Finding, 10 steps expect 0
-check solver_primary_over_blind for 3 Claim, 2 Capability, 2 SourceFile, 3 GenClaim, 4 Finding, 10 steps expect 0
-check findings_monotonic for 3 Claim, 2 Capability, 3 SourceFile, 3 GenClaim, 5 Finding, 15 steps expect 0
-check completed_phases_monotonic for 2 Claim, 1 Capability, 2 SourceFile, 2 GenClaim, 3 Finding, 15 steps expect 0
-check phase_ordering_respected for 2 Claim, 1 Capability, 2 SourceFile, 2 GenClaim, 3 Finding, 15 steps expect 0
-check pipeline_progress_liveness for 2 Claim, 2 Capability, 2 SourceFile, 2 GenClaim, 4 Finding, 20 steps
+// Liveness: finite serviced source work terminates even with environment edits.
+assert pipeline_progress { fairness implies eventually Run.phase in Complete + Aborted }
+// Safety: source edits after capture cannot replace immutable generation input.
+assert snapshot_immutable { always (Run.phase != ValidateSource implies Run.snapshot' = Run.snapshot) }
+// Safety: terminal phases cannot start additional analysis or mutate outcomes.
+assert terminal_stable { always (Run.phase in Complete + Aborted implies Run.phase' = Run.phase and Run.matches' = Run.matches) }
+run empty_readable_source { no SourceFile and Config.sourceDirectoryReadable = True and fairness and eventually Run.phase = Complete } for 3 but 5 Int, 14 steps expect 1
+run invalid_source { Config.sourceDirectoryReadable = False and eventually Run.phase = Aborted } for 3 but 5 Int, 3 steps expect 1
+run novel_generated_capability { some Generated and no Original and eventually (Run.phase = Complete and some novel_caps) } for 3 but 5 Int, 20 steps expect 1
+run mixed_trace_strengths { eventually (Supported + WeaklySupported + Missing) in Run.traceResults[Original] } for 4 but 5 Int, 6 steps expect 1
+run known_identifier_no_warning {
+  eventually (Run.phase = Complete and some Run.scanned and no unknown_references and
+    (some link : TraceLink | link.file in Run.scanned and some link.claim.id))
+} for 3 but 5 Int, 20 steps expect 1
+run edited_after_capture { eventually (Run.phase = Complete and some f : Run.snapshot.Bytes | Run.snapshot[f] != f.currentBytes) } for 3 but 5 Int, 20 steps expect 1
+run sibling_formal_failure { some disj g,h : Generated | {
+  g.plannedStatus = Failed and h.plannedStatus = Stable
+  eventually (Run.phase = Complete and g + h in Run.formalized) } } for 4 but 5 Int, 24 steps expect 1
+run conditional_not_credited { some p : Pair | p.comparison.originalUnstable = True and eventually (Run.phase = Complete and p in Run.evaluatedPairs - Run.matches) } for 3 but 5 Int, 24 steps expect 1
+run broader_permission { some c : Comparison | relation[c] = PermissionBroader } for 3 but 5 Int, 1 steps expect 1
+run narrower_permission { some c : Comparison | relation[c] = PermissionNarrower } for 3 but 5 Int, 1 steps expect 1
+run incomparable_permission { some c : Comparison | relation[c] = PermissionDifferent } for 3 but 5 Int, 1 steps expect 1
+run different_obligations { some c : Comparison | relation[c] = Different } for 3 but 5 Int, 1 steps expect 1
+run same_obligations { some c : Comparison | relation[c] = Same } for 3 but 5 Int, 1 steps expect 1
+run stronger_obligations { some c : Comparison | relation[c] = Stronger } for 3 but 5 Int, 1 steps expect 1
+run weaker_obligations { some c : Comparison | relation[c] = Weaker } for 3 but 5 Int, 1 steps expect 1
+run unmapped_scope { some c : Comparison | relation[c] = Unmapped } for 3 but 5 Int, 1 steps expect 1
+run incompatible_assumptions { some c : Comparison | relation[c] = Incompatible and c.originalBackground != c.generatedBackground } for 3 but 5 Int, 1 steps expect 1
+run uncertain_formal_status { some c : Comparison | relation[c] = Uncertain and c.forward = Timeout } for 3 but 5 Int, 1 steps expect 1
+run novel_alongside_original { some Original and some Generated.cap - Original.cap
+  eventually (Run.phase = Complete and some novel_caps) } for 4 but 5 Int, 24 steps expect 1
+run forbidden_generation_context { some GenerationBoundary.requestedOriginalText
+  eventually (Run.phase = Complete and some blind_boundary_findings and no Run.generated) } for 3 but 5 Int, 24 steps expect 1
+run pair_budget_keeps_aggregate {
+  Config.pairBudget = 0
+  some p : Pair | p.original.plannedStatus = Stable and p.generated.plannedStatus = Stable and
+    eventually (Run.phase = Complete and p.original.cap in Run.skippedCaps and some Run.aggregates and no Run.evaluatedPairs)
+} for 3 but 5 Int, 24 steps expect 1
+check trace_total for 4 but 5 Int, 20 steps expect 0
+check unknown_ids_exact for 4 but 5 Int, 20 steps expect 0
+check scope_exact for 4 but 5 Int, 20 steps expect 0
+check source_readonly for 4 but 5 Int, 20 steps expect 0
+check attachments_are_snapshots for 4 but 5 Int, 20 steps expect 0
+check insufficient_no_invention for 4 but 5 Int, 20 steps expect 0
+check formal_status_retained for 4 but 5 Int, 20 steps expect 0
+check inconclusive_not_alignment for 4 but 5 Int, 20 steps expect 0
+check aggregate_before_pairs for 4 but 5 Int, 20 steps expect 0
+check budget_skips_pairs for 4 but 5 Int, 20 steps expect 0
+check divergence_majority for 4 but 5 Int, 20 steps expect 0
+check explanation_does_not_promote for 4 but 5 Int, 20 steps expect 0
+check support_is_claim_local for 4 but 5 Int, 20 steps expect 0
+check task_evidence_attributed for 4 but 5 Int, 20 steps expect 0
+check independent_registries for 4 but 5 Int, 1 steps expect 0
+check permissions_separate for 4 but 5 Int, 1 steps expect 0
+check missing_permission_unmapped for 4 but 5 Int, 1 steps expect 0
+check unstable_no_credit for 4 but 5 Int, 1 steps expect 0
+check pipeline_progress for 3 but 5 Int, 24 steps expect 0
+check snapshot_immutable for 4 but 5 Int, 20 steps expect 0
+check terminal_stable for 4 but 5 Int, 20 steps expect 0
+check generation_rejects_forbidden_context for 4 but 5 Int, 20 steps expect 0
 ```
+
+**Verification boundary:** All commands use explicit finite scopes. Concrete byte/order preservation and external-process deadlines require the referenced contract/property and integration tests. Passing bounded checks does not prove natural-language fidelity or production refinement.

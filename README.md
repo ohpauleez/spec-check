@@ -19,12 +19,106 @@ Canonical project docs:
 
 At a high level it supports:
 - **specs-forward analysis**: qualitative review, coverage analysis, formalization, and solver-backed logic checks across `proposal.md`, `design.md`, and active `spec.md` files (when delta specs are present, finalized and delta specs are merged per capability before analysis)
-- **formalization pipeline**: translates requirement and scenario claims into typed logic IR, clusters alternate interpretations, and generates SMT-LIB artifacts for Z3 analysis
+- **formalization pipeline**: extracts strict EARS clauses and scenario fields into a typed logic IR, freezes an evidence-backed capability vocabulary, validates typed clause predicates, clusters nonvacuous interpretations, and generates SMT-LIB artifacts for Z3 analysis
 - **optional source-backed analysis**: traces requirements to source evidence, generates EARS-preferring code-derived specifications, formalizes them through the same pipeline, and uses solver-backed cross-side implication (ie: how strongly aligned are the specs and code?)
 - **evidence-preserving reports**: bounded Markdown reports with provenance, intermediate artifacts, and manifest-based completion semantics
 - **final assessment**: after core completion, a read-only agent returns a cited synthesized assessment and `spec-check` validates and atomically publishes optional `report.md`; handled failure preserves the core run and is recorded as a warning
 
 For the full design rationale, see [docs/design.md](docs/design.md).
+
+### Static Analysis Semantics
+
+The source-based engine uses a simplified strict EARS profile: ubiquitous,
+state-driven, event-driven, IF/THEN unwanted-behavior, and WHILE/WHEN complex
+statements. Statements require ordered nonempty clauses, required commas, one
+structural modal, and a final period. `SHALL`/`MUST` are mandatory, `SHOULD` is
+advisory, and `MAY` grants permission without requiring the response. `WHERE`
+is an explicitly configured extension; ambiguous `MAY NOT` is diagnosed.
+
+Formal analysis initially admits Bool, explicitly exhaustive finite enums,
+exact linear Int/Real arithmetic, and typed uninterpreted functions. Strings,
+nonlinear arithmetic, quantifiers, collections, and temporal timing remain
+unsupported formal scope. Embedded Alloy models remain separate evidence.
+
+Z3 results concern **satisfying valuations under explicit assumptions and recorded
+interpretations**. They do not establish executable reachability, temporal
+safety, response completeness, or validity for every input. Reports retain
+excluded, unstable, skipped, and inconclusive scope. A single sample is a selected
+interpretation, not measured agreement between samples.
+
+Source-backed comparisons align independently derived registries after
+generation. Obligation tracks use same/stronger/weaker/different; permissions
+use permission-equivalent/broader/narrower/different. Missing or incompatible
+identity mappings remain explicit scope, and permission differences qualify
+capability alignment.
+
+Optional JSON configuration can provide explicit model context:
+
+```json
+{
+  "analysis": {
+    "earsExtensions": ["where"],
+    "models": {
+      "queue": {
+        "concepts": [
+          { "name": "Retries", "definition": "Retry count", "role": "state", "sort": "Int" }
+        ],
+        "background": ["(>= Retries 0)"]
+      }
+    },
+    "generatedModels": {},
+    "limits": { "queryScripts": 1000, "solverConcurrency": 16 }
+  }
+}
+```
+
+Original `models` are never supplied to generated discovery. Separately authored
+`generatedModels` are configured premises, not source-proven guarantees. Model
+keys are capability names or exact logical-file keys. Proposed domain assumptions
+are evidence and never silently become premises.
+
+Exact quantity predicates use `(quantity 200 ms)` and `(convert expression s)`
+with explicitly authored unit dimensions and rational scales. These semantic
+annotations lower to scalar SMT; they are not solver commands.
+
+Evidence under `semantic_evidence/` includes source mappings and hashes, frozen
+registries, normalized IR, exact captured model bytes, solver scripts/results,
+alignment maps, and scope ledgers. The manifest also checksums generated specs
+and SMT artifacts. Current numeric version identifiers remain; content hashes
+identify the exact prompts, runtime code, registry, and configuration.
+
+See [formal preparation optimizations](docs/formal-optimization.md) for cache
+boundaries, exact-output verification, and reproducible CPU benchmarks.
+
+Model decoding distinguishes complete, partial, and unavailable assignments for
+the explicitly requested scalar names; raw solver output is retained unchanged.
+Configured expression byte/node/depth limits apply to foreground, background,
+and coverage predicates alike. Pair budgets bound candidate examinations, not
+findings or conflict-query counts; actual solver scripts have a separate allowance.
+
+Before publishing a core manifest, semantic evidence files are reconciled with
+their recorded checksums. Missing, changed, unexpected, temporary, symlink, or
+unsupported evidence files prevent completion. Output directories are caller-owned,
+local, single-writer locations: path confinement is lexical and atomic publication
+uses rename, not hostile-directory/symlink-safe parent traversal. `--z3` selects
+an executable that runs with the caller's privileges.
+
+### Measure SMT Analysis Impact
+
+The [paired SMT experiment](experiments/smt-impact/README.md) compares the actual
+current bundle with the frozen `pasture/spec-check.older` executable using an
+independent finite oracle, fixed-interpretation and live-model runs, negative
+controls, evidence checks, and separately reported context-enabled cases.
+
+```sh
+make dist
+node dist/build/smt-impact.js --mode controlled --output /tmp/opencode/smt-impact-controlled
+# Uses the authenticated model provider; each arm keeps its own formalization:
+node dist/build/smt-impact.js --mode live --output /tmp/opencode/smt-impact-live
+```
+
+Output directories must be fresh. See the protocol for bounds, scoring, measured
+results, and limits on generalizing from the synthetic corpus.
 
 ## Runtime And Tooling
 
@@ -38,9 +132,10 @@ Notes:
 - `spec-check` does not manage `opencode` or `z3` configuration for you.
 - All output writes are confined to the configured output directory (default `./spec-check-output`).
 - `manifest.json` marks completion of the core evidence bundle. Optional `report.md` is generated afterward and is intentionally not listed in that manifest.
-- Luna and Terra models use fixed OpenCode reasoning variants:
+- The default is `github-copilot/gpt-6.1-sol#high`. Fixed OpenCode reasoning variants:
   `github-copilot/gpt-5.6-luna` uses `max`, and
-  `github-copilot/gpt-5.6-terra` uses `high`.
+  `github-copilot/gpt-5.6-terra` uses `high`, and
+  `github-copilot/gpt-6.1-sol` uses `high`.
 - Set `SPEC_CHECK_TELEMETRY=1` to write a checksummed `metrics.json` containing
   phase durations and per-attempt OpenCode token usage for evaluation runs.
 
@@ -74,7 +169,8 @@ node dist/spec-check.js \
   --src src
 ```
 
-That analysis will use 1M-2M tokens and cost ~$3.50 with the default model.
+Token usage and cost depend on the input and selected model; enable telemetry to
+record the usage reported by the provider.
 
 **Successful runs automatically attempt a decision-oriented `report.md` after the core manifest.** If this optional step fails, `report_summary.md` records `reporting.final_report_failed`, its manifest checksum is refreshed, and core analysis remains complete.
 
@@ -92,7 +188,7 @@ Surface all logical analysis findings from running `spec-check`. The artifact di
 |---|---|
 | `--output <dir>` | Output directory for reports and artifacts (default `./spec-check-output`) |
 | `--src <dir>` | Source directory; enables code-backwards analysis |
-| `--model <name>` | LLM model to use (default `github-copilot/gpt-5.6-terra` at `high`) |
+| `--model <name>` | LLM model to use (default `github-copilot/gpt-6.1-sol` at `high`) |
 | `--caps <file>` | Capability listing file; inferred from inputs by default |
 | `--z3 <path>` | Path to the Z3 binary (default: `z3` on PATH) |
 | `--config <file>` | JSON configuration file for model and prompt settings |

@@ -6,387 +6,111 @@ title: MergedCapabilityAnalysis
 
 Define the per-capability merge behavior for the spec-check tool: combining finalized capability specs with selected delta specs into one deterministic active merged capability view that downstream specs-forward analysis consumes.
 
+All Alloy fences below form one Alloy 6 module in document order. Source bytes, lexical correctness, OS effects, and concrete serialization are explicit implementation-test boundaries; the model checks relational preservation and analyzer control. Execution witnesses and temporal regressions explicitly use `execution`; no global fact forces initialization. This permits independent namespace induction over arbitrary current/next states. Safety assertions permit stuttering. Liveness is conditional on the stated action scheduling and resource premises.
+
 ```alloy
 module MergedCapabilityAnalysis
+open util/boolean
 
-// --- Domain vocabulary ---
-
-// Canonical requirement and scenario identifiers
+// --- Domain vocabulary: ordered requirement blocks and owned scenarios ---
+sig Capability { logicalFile : one LogicalKey, selectedDeltas : set DeltaFile }
+sig DeltaFile {}
+sig LogicalKey { sanitized : one ArtifactKey, nonempty : one Bool }
+sig ArtifactKey {}
 sig Identifier {}
-
-// Delta operations classify requirement blocks within a delta spec
-abstract sig DeltaOperation {}
-one sig Base, PreSection, Added, Modified, Removed, Renamed extends DeltaOperation {}
-
-// Source file provenance: the physical file a requirement originated from
 sig SourceFile {}
-
-// Namespace separation: requirement and scenario identifiers are distinct
-abstract sig Namespace {}
-one sig ReqNamespace, ScenNamespace extends Namespace {}
-
-// A parsed requirement block with provenance and delta classification
-sig Requirement {
-  identifier : lone Identifier,
-  deltaOp : one DeltaOperation,
-  scenarios : set Scenario,
-  sourceFile : one SourceFile,
-  namespace : one Namespace
-} {
-  namespace = ReqNamespace
+sig Payload {} // immutable spans, clauses, dispositions and supporting content
+abstract sig Operation {}
+one sig Base, Removed, Modified, Added, PreSection, Renamed extends Operation {}
+sig Block {
+  prior : set Block,
+  cap : one Capability, op : one Operation, identifier : lone Identifier,
+  file : one SourceFile, payload : one Payload,
+  scenarios : set Scenario, headedDeltaInFinal : one Bool,
+  formallyEligible : one Bool
 }
-
-// A parsed scenario within a requirement block
-sig Scenario {
-  scenarioId : lone Identifier,
-  parentReq : lone Requirement,
-  scenDeltaOp : one DeltaOperation,
-  scenSourceFile : one SourceFile,
-  scenNamespace : one Namespace
-} {
-  scenNamespace = ScenNamespace
+sig Scenario { parent : one Block, identifier : lone Identifier, file : one SourceFile, payload : one Payload, formallyEligible : one Bool }
+fact source_ownership {
+  no iden & ^prior
+  prior.prior in prior
+  all disj a,b : Block | a in b.prior or b in a.prior
+  all b : Block | b.scenarios = parent.b
+  all s : Scenario | s.file = s.parent.file
+  all disj c, d : Capability | c.logicalFile != d.logicalFile
 }
-
-// A parsed spec document (finalized or delta)
-sig ParsedSpec {
-  requirements : set Requirement,
-  source : one SourceFile,
-  deltaSections : set DeltaOperation    // which delta headings were found
-}
-
-// A capability: the unit of merge. At most one finalized, at most one delta.
-sig Capability {
-  finalized : lone ParsedSpec,
-  delta : lone ParsedSpec
-}
-
-// --- Merged output ---
-
-sig MergedCapability {
-  cap : one Capability,
-  mergedReqs : set Requirement,
-  mergedScenarios : set Scenario,
-  logicalKey : one LogicalKey,
-  sanitizedKey : one SanitizedKey,
-  findings : set Finding
-}
-
-// Synthetic logical key for artifact naming (distinct from source provenance)
-sig LogicalKey {}
-
-// Artifact-safe key derived from the logical key by sanitization. Distinct logical
-// keys MAY sanitize to the same SanitizedKey (a collision); the Artifact-Key Contract
-// makes such a collision a fatal, pipeline-aborting condition.
-sig SanitizedKey {}
-
-// --- Derived claims and compile groups (MCA-MERGE-GROUP-KEY) ---
-// Downstream claim identifiers grouped under one merged capability. All claims that
-// share one logical key form one compile group (one declaration namespace, one
-// assertion-label namespace, one conflict-preflight scope, one solver submission boundary).
-sig ClaimId {}
-sig SanitizedClaimId {}
-
-sig Claim {
-  rawClaimId : one ClaimId,           // canonical claim identifier
-  sanitizedClaimId : one SanitizedClaimId,  // artifact-safe form used for solver labels
-  claimCap : one MergedCapability,    // the compile group (logical-key boundary) owning this claim
-  derivedFrom : one Requirement       // provenance: the merged requirement this claim was extracted from
-}
-
-// --- Findings ---
-
 abstract sig FindingKind {}
-one sig DupBase, DupDelta, DupAdded, DupModifiedId,
-        ModNotFound, RemNotFound,
-        ModMissingId, RemMissingId,
-        PreSectionContent, StandaloneScenario,
-        RenameUnsupported, FinalizedDeltaHeadingIgnored,
-        EmptyCapSkipped,
-        DupRawClaimId, DupSanitizedClaimId extends FindingKind {}
-
-sig Finding {
-  kind : one FindingKind,
-  affectedReq : lone Requirement,
-  affectedScen : lone Scenario,
-  affectedClaim : lone Claim
+one sig DuplicateBase, DuplicateDelta, MissingId, MissingTarget, Collision,
+  PreSectionContent, RenameUnsupported extends FindingKind {}
+abstract sig Stage {}
+one sig Idle, RemoveStage, ModifyStage, AddStage, Handoff, Complete, Aborted extends Stage {}
+one sig Run {
+  var stage : one Stage,
+  var working : set Block,
+  var handled : set Block,
+  var applied : set Block,
+  var rejected : Block -> lone FindingKind,
+  var extracted : set Capability,
+  var covered : set Capability,
+  var analyzed : set Capability,
+  var solverSubmitted : set Capability
 }
-
-// --- Pipeline state (temporal: for liveness modeling) ---
-
-abstract sig Phase {}
-one sig Idle, Merging, ClaimExtraction, CoverageAnalysis,
-        LogicAnalysis, Complete, Aborted extends Phase {}
-
-// Fatal abort causes (design: Graceful Degradation -> PipelineAbortError, no fallback).
-// A merge failure is a pipeline failure; there is no fallback to per-file analysis.
-abstract sig AbortCause {}
-one sig DeltaCountViolation,      // > 1 delta selected for one capability (precondition)
-        ArtifactKeyCollision,     // two capabilities sanitize to one artifact key
-        InternalMergeError        // unexpected internal merge exception / assertion
-        extends AbortCause {}
-
-// Which fatal causes are actually present in a given run (possibly none).
-// ArtifactKeyCollision is tied to the structural sanitizedKey collision below;
-// the other two are opaque input/runtime faults the run may or may not exhibit.
-sig ActiveAbort in AbortCause {}
-
-one sig PipelineState {
-  var currentPhase : one Phase,
-  var processedCaps : set MergedCapability,    // caps submitted downstream
-  var mergeComplete : set MergedCapability,    // caps that completed merge
-  var solverSubmitted : set MergedCapability,  // groups that passed claim-ID preflight and reached the solver
-  var abortCause : set AbortCause              // fatal causes recorded when the pipeline aborts
+// Compile labels are separate from authored requirement identifiers.
+sig Claim { block : one Block, sourceScenario : lone Scenario, rawLabel : one Identifier, sanitizedLabel : one Identifier, payload : one Payload }
+fact claim_source {
+  all q : Claim | {
+    some q.sourceScenario implies q.sourceScenario.parent = q.block
+    q.payload = (some q.sourceScenario => q.sourceScenario.payload else q.block.payload)
+  }
 }
-
-// --- Ownership and well-formedness facts ---
-
-// [Precondition] At most one delta per capability
-fact atMostOneDelta {
-  all c : Capability | lone c.delta
+pred claim_eligible[q : Claim] {
+  (no q.sourceScenario and q.block.formallyEligible = True) or
+    (some q.sourceScenario and q.sourceScenario.formallyEligible = True)
 }
-
-// Every finding belongs to exactly one merged capability
-fact findingOwnership {
-  all f : Finding | one (findings.f)
+one sig Faults { internalError : one Bool }
+fun earlier[b : Block] : set Block { b.prior }
+fun bases : set Block { { b : Block | b.op = Base } }
+pred later_base_duplicate[b : Block] {
+  b.op = Base and some b.identifier
+  some p : earlier[b] & bases | p.cap = b.cap and p.identifier = b.identifier
 }
-
-// Requirements belong to exactly one parsed spec
-fact requirementOwnership {
-  all r : Requirement | one (requirements.r)
+fun authoritative_base : set Block { { b : bases | not later_base_duplicate[b] } }
+pred delta_duplicate[b : Block] {
+  b.op in Removed + Modified + Added and some b.identifier
+  some p : Block - b | p.cap = b.cap and p.op = b.op and p.identifier = b.identifier
 }
-
-// Scenarios belong to at most one requirement
-fact scenarioOwnership {
-  all s : Scenario | lone (scenarios.s)
+fun targets[b : Block] : set Block {
+  { p : Run.working | p.cap = b.cap and some b.identifier and p.identifier = b.identifier }
 }
-
-// Parsed specs belong to at most one capability role
-fact parsedSpecOwnership {
-  all p : ParsedSpec | lone (finalized.p + delta.p)
+pred external_collision[b : Block] {
+  let external = { p : Run.working - targets[b] | p.cap = b.cap } |
+    some b.identifier & external.identifier or
+    some b.scenarios.identifier & external.scenarios.identifier
 }
-
-// Requirement source file is consistent with its parsed spec
-fact requirementSourceConsistency {
-  all r : Requirement, p : ParsedSpec |
-    r in p.requirements implies r.sourceFile = p.source
+fun failure[b : Block] : lone FindingKind {
+  b.op = PreSection => PreSectionContent else
+  (b.op = Renamed => RenameUnsupported else
+  (delta_duplicate[b] => DuplicateDelta else
+  (b.op in Removed + Modified and no b.identifier => MissingId else
+  (b.op in Removed + Modified and no targets[b] => MissingTarget else
+  (b.op = Modified and external_collision[b] => Collision else
+  (b.op = Added and (some { p : Run.working | p.cap = b.cap and some b.identifier and p.identifier = b.identifier }
+    or some b.scenarios.identifier & { p : Run.working | p.cap = b.cap }.scenarios.identifier) => Collision else none))))))
 }
-
-// Scenario source file is consistent with its parent requirement
-fact scenarioSourceConsistency {
-  all s : Scenario | some s.parentReq implies
-    s.scenSourceFile = s.parentReq.sourceFile
+fun active_caps : set Capability { Run.working.cap }
+fun active_scenarios : set Scenario { Run.working.scenarios }
+fun empty_caps : set Capability { Capability - active_caps }
+fun compile_group[c : Capability] : set Claim { { q : Claim | q.block in Run.working and q.block.cap = c and claim_eligible[q] } }
+pred claim_group_valid[c : Capability] {
+  all disj a, b : compile_group[c] | a.rawLabel != b.rawLabel and a.sanitizedLabel != b.sanitizedLabel
 }
-
-// Base items in finalized specs have deltaOp = Base
-fact baseItemsHaveBaseOp {
-  all r : Requirement |
-    (some p : ParsedSpec | r in p.requirements and p in Capability.finalized)
-      implies r.deltaOp = Base
+pred abort_enabled {
+  Faults.internalError = True or
+  some c : Capability | #c.selectedDeltas > 1 or c.logicalFile.nonempty = False or
+    (some d : Capability - c | c.logicalFile.sanitized = d.logicalFile.sanitized)
 }
-
-// Scenarios inherit parent's delta operation
-fact scenarioInheritsDelta {
-  all s : Scenario | some s.parentReq implies
-    s.scenDeltaOp = s.parentReq.deltaOp
-}
-
-// --- Claim, artifact-key, and abort well-formedness ---
-
-// Every claim derives from a requirement that survives in its group's merged output
-fact claimProvenance {
-  all c : Claim | c.derivedFrom in c.claimCap.mergedReqs
-}
-
-// Sanitization is deterministic on claim ids: equal raw ids map to equal sanitized ids
-fact claimSanitizationDeterministic {
-  all disj c1, c2 : Claim |
-    c1.rawClaimId = c2.rawClaimId implies c1.sanitizedClaimId = c2.sanitizedClaimId
-}
-
-// Sanitization is deterministic on artifact keys: equal logical keys map to equal sanitized keys
-fact keySanitizationDeterministic {
-  all disj mc1, mc2 : MergedCapability |
-    mc1.logicalKey = mc2.logicalKey implies mc1.sanitizedKey = mc2.sanitizedKey
-}
-
-// [Artifact-Key Contract] The artifact-key collision cause is active exactly when two
-// capabilities' sanitized keys collide. (Sanitized keys must be unique per run.)
-fact keyCollisionActiveWhenStructural {
-  ArtifactKeyCollision in ActiveAbort iff
-    (some disj mc1, mc2 : MergedCapability | mc1.sanitizedKey = mc2.sanitizedKey)
-}
-
-// Claim findings reference claims owned by the capability that carries the finding
-fact claimFindingsAreLocal {
-  all mc : MergedCapability, f : mc.findings |
-    some f.affectedClaim implies f.affectedClaim.claimCap = mc
-}
-
-// --- Merge structural invariants ---
-// Merge is a deterministic pure function over (finalized, delta) inputs.
-// Its invariants are modeled as structural facts (not temporal events).
-
-// [MCA-MERGE-CAP] Each capability produces exactly one merged view
-fact oneViewPerCapability {
-  all c : Capability | one mc : MergedCapability | mc.cap = c
-}
-
-// Each MergedCapability has a unique logical key
-fact uniqueLogicalKeys {
-  all disj mc1, mc2 : MergedCapability | mc1.logicalKey != mc2.logicalKey
-}
-
-// [MCA-MERGE-PROVEN] Merged output traces to input source files
-fact mergedProvenance {
-  all mc : MergedCapability, r : mc.mergedReqs |
-    r.sourceFile in (mc.cap.finalized.source + mc.cap.delta.source)
-}
-
-// [MCA-MERGE-PROVEN-SCEN] Scenario source files also trace to inputs
-fact scenarioProvenance {
-  all mc : MergedCapability, s : mc.mergedScenarios |
-    s.scenSourceFile in (mc.cap.finalized.source + mc.cap.delta.source)
-}
-
-// Merged requirements originate from the capability's parsed specs
-fact mergedReqsFromInput {
-  all mc : MergedCapability, r : mc.mergedReqs |
-    r in mc.cap.finalized.requirements + mc.cap.delta.requirements
-}
-
-// Merged scenarios are exactly those belonging to merged requirements
-fact mergedScenariosFromReqs {
-  all mc : MergedCapability |
-    mc.mergedScenarios = mc.mergedReqs.scenarios
-}
-
-// [MCA-DELTA-SEM] Excluded operations never in merged output
-fact excludedOpsNeverInOutput {
-  all mc : MergedCapability |
-    no r : mc.mergedReqs | r.deltaOp in (Removed + PreSection + Renamed)
-}
-
-// [MCA-MERGE-DELTA-ONLY] Delta-only caps only include Added reqs
-fact deltaOnlyAdditiveOutput {
-  all mc : MergedCapability |
-    (no mc.cap.finalized and some mc.cap.delta) implies
-      (all r : mc.mergedReqs | r.deltaOp = Added)
-}
-
-// [MCA-DELTA-NAMESPACE] No duplicate requirement identifiers in merged output
-fact mergedReqIdUniqueness {
-  all mc : MergedCapability, disj r1, r2 : mc.mergedReqs |
-    (some r1.identifier and some r2.identifier) implies
-      r1.identifier != r2.identifier
-}
-
-// [MCA-DELTA-NAMESPACE] No duplicate scenario identifiers in merged output
-fact mergedScenIdUniqueness {
-  all mc : MergedCapability, disj s1, s2 : mc.mergedScenarios |
-    (some s1.scenarioId and some s2.scenarioId) implies
-      s1.scenarioId != s2.scenarioId
-}
-
-// [MCA-MERGE-STANDALONE] Standalone delta scenarios never in merged output
-fact standaloneScenarioExcluded {
-  all mc : MergedCapability, s : mc.mergedScenarios |
-    (some mc.cap.delta and s.scenSourceFile = mc.cap.delta.source) implies
-      some s.parentReq
-}
-
-// [MCA-MERGE-FIND] Every excluded delta requirement has a finding
-fact skipImpliesFinding {
-  all mc : MergedCapability, r : Requirement |
-    (some mc.cap.delta and r in mc.cap.delta.requirements
-     and r not in mc.mergedReqs)
-    implies some f : mc.findings | f.affectedReq = r
-}
-
-// [MCA-MERGE-FIND] Empty capabilities have EmptyCapSkipped finding
-fact emptyCapFinding {
-  all mc : MergedCapability |
-    (no mc.mergedReqs and some mc.cap.(finalized + delta).requirements)
-    implies some f : mc.findings | f.kind = EmptyCapSkipped
-}
-
-// [MCA-MERGE-MOD-COLLISION] Collision preserves original base block
-fact collisionPreservesBase {
-  all mc : MergedCapability, f : mc.findings |
-    (f.kind = DupModifiedId and some f.affectedReq and some f.affectedReq.identifier)
-    implies (some baseR : mc.cap.finalized.requirements |
-      baseR.identifier = f.affectedReq.identifier and baseR in mc.mergedReqs)
-}
-
-// [MCA-MERGE-DUP-BASE] First-occurrence wins for duplicate base identifiers
-fact firstOccurrenceWins {
-  all mc : MergedCapability, disj r1, r2 : mc.cap.finalized.requirements |
-    (some r1.identifier and r1.identifier = r2.identifier)
-    implies not (r1 in mc.mergedReqs and r2 in mc.mergedReqs)
-}
-
-// Findings reference only requirements from this capability's input
-fact findingsAreLocal {
-  all mc : MergedCapability, f : mc.findings |
-    some f.affectedReq implies
-      f.affectedReq in mc.cap.finalized.requirements + mc.cap.delta.requirements
-}
-
-// Cross-capability isolation: findings don't reference other capabilities' reqs
-fact capabilityIsolation {
-  all disj mc1, mc2 : MergedCapability |
-    no (mc1.findings.affectedReq &
-        (mc2.cap.finalized.requirements + mc2.cap.delta.requirements))
-}
-
-// No base requirement disappears silently (removed OR has finding)
-fact noSilentDiscard {
-  all mc : MergedCapability, r : Requirement |
-    (some mc.cap.finalized and r in mc.cap.finalized.requirements
-     and r not in mc.mergedReqs)
-    implies (
-      (some rem : Requirement | rem in mc.cap.delta.requirements
-        and rem.deltaOp = Removed and rem.identifier = r.identifier
-        and some r.identifier)
-      or (some f : mc.findings | f.affectedReq = r)
-    )
-}
-
-// [MCA-MERGE-FIND] Valid ADDED blocks with no collisions appear in merged output
-fact validAddedIncluded {
-  all mc : MergedCapability, r : mc.cap.delta.requirements |
-    (r.deltaOp = Added
-     and (no r.identifier or r.identifier not in (mc.mergedReqs - r).identifier)
-     and no (r.scenarios.scenarioId & (mc.mergedScenarios - r.scenarios).scenarioId)
-     and not (some f : mc.findings | f.affectedReq = r))
-    implies r in mc.mergedReqs
-}
-
-// [MCA-MERGE-NO-SPURIOUS] Findings only arise when a delta is present
-// (a finalized-only pass-through with no delta headings produces no findings)
-fact findingsRequireDelta {
-  all mc : MergedCapability |
-    (no mc.cap.delta and no (mc.cap.finalized.deltaSections - Base))
-    implies no mc.findings
-}
-
-// Non-colliding Added requirements cannot be the subject of findings
-// (findings target specific operation failures, not clean additions)
-fact addedNoCollisionClean {
-  all mc : MergedCapability, r : mc.cap.delta.requirements |
-    (r.deltaOp = Added
-     and (no r.identifier or r.identifier not in (mc.mergedReqs - r).identifier)
-     and no (r.scenarios.scenarioId & (mc.mergedScenarios - r.scenarios).scenarioId))
-    implies (no f : mc.findings | f.affectedReq = r)
-}
-
-// --- Pipeline initial state ---
-
-pred init_state {
-  PipelineState.currentPhase = Idle
-  no PipelineState.processedCaps
-  no PipelineState.mergeComplete
-  no PipelineState.solverSubmitted
-  no PipelineState.abortCause
+fun pending : set Block {
+  { b : Block - Run.handled | (Run.stage = RemoveStage and b.op = Removed) or
+    (Run.stage = ModifyStage and b.op = Modified) or (Run.stage = AddStage and b.op = Added) }
 }
 ```
 
@@ -407,9 +131,9 @@ WHEN one capability has both finalized and selected delta spec inputs, THE spec-
 **Postcondition:** Downstream specs-forward phases do not analyze separate finalized and delta claim sets for the same capability.
 
 ##### Evidence
-- Implementation: [merge.ts:24 mergeSpecsByCapability()](/src/domain/parser/merge.ts#L24), [claim-graph.ts:247 extractMergedSpecClaims()](/src/domain/claim-graph.ts#L247)
+- Implementation: [merge.ts:24 mergeSpecsByCapability()](/src/domain/parser/merge.ts#L24), [claim-graph.ts:253 extractMergedSpecClaims()](/src/domain/claim-graph.ts#L253)
 - Test: [merge.test.ts:76 applies REMOVED then MODIFIED then ADDED deterministically](/test/contract/merge.test.ts#L76)
-- Test (integration): [merge-liveness.integration.test.ts:181 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L181)
+- Test (integration): [merge-liveness.integration.test.ts:237 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L237)
 
 #### Scenario: Finalized-Only Capability Passes Through Unchanged [MCA-MERGE-FINAL]
 WHEN a capability has a finalized spec and no selected delta spec, THE spec-check tool SHALL produce a merged capability view whose requirement and scenario content matches the finalized spec content in the same order.
@@ -432,110 +156,29 @@ WHEN a capability has a selected delta spec and no finalized base spec, THE spec
 #### Requirement model
 
 ```alloy
-// --- Merge per capability: event predicates ---
-// The merge phase is a pure deterministic function over (finalized, delta) inputs.
-// Preconditions, postconditions, and failure modes are modeled as event predicates.
-
-// Event: merge a capability that has both finalized and delta inputs
-pred merge_finalized_and_delta [c : Capability, mc : MergedCapability] {
-  // Guard (precondition)
-  mc.cap = c
-  some c.finalized
-  some c.delta
-  PipelineState.currentPhase = Merging
-  mc not in PipelineState.mergeComplete
-  // Effect (postcondition): exactly one merged view produced
-  mc in PipelineState.mergeComplete'
-  // Merged reqs are a subset of finalized + delta inputs
-  mc.mergedReqs in c.finalized.requirements + c.delta.requirements
-  // No excluded operations leak through
-  no r : mc.mergedReqs | r.deltaOp in Removed + PreSection + Renamed
-  // Frame conditions
-  PipelineState.currentPhase' = PipelineState.currentPhase
-  PipelineState.processedCaps' = PipelineState.processedCaps
+// Event: initialize the authoritative base and pre-reject unsupported content.
+pred start_merge {
+  // Guard: selected inputs passed entry-point validation.
+  Run.stage = Idle and not abort_enabled
+  // Effect: first base occurrence wins; all duplicate delta members are rejected.
+  Run.stage' = RemoveStage
+  Run.working' = authoritative_base
+  Run.handled' = bases + { b : Block | b.op in PreSection + Renamed }
+  Run.applied' = none
+  Run.rejected' = { b : Block, k : FindingKind |
+    (later_base_duplicate[b] and k = DuplicateBase) or
+    (b.op = PreSection and k = PreSectionContent) or (b.op = Renamed and k = RenameUnsupported) }
+  // Frame: downstream phases cannot precede merge completion.
+  no Run.extracted' + Run.covered' + Run.analyzed' + Run.solverSubmitted'
 }
-
-// Event: merge a finalized-only capability (passthrough)
-pred merge_finalized_only [c : Capability, mc : MergedCapability] {
-  // Guard
-  mc.cap = c
-  some c.finalized
-  no c.delta
-  PipelineState.currentPhase = Merging
-  mc not in PipelineState.mergeComplete
-  // Effect: merged output equals finalized content exactly
-  mc.mergedReqs = c.finalized.requirements
-  mc.mergedScenarios = c.finalized.requirements.scenarios
-  no mc.findings
-  mc in PipelineState.mergeComplete'
-  // Frame
-  PipelineState.currentPhase' = PipelineState.currentPhase
-  PipelineState.processedCaps' = PipelineState.processedCaps
+// Safety: finalized-only clean blocks pass through without invented exclusions.
+assert finalized_only_passthrough {
+  execution implies always (Run.stage = Complete and Block = bases implies Run.working = authoritative_base)
 }
-
-// Event: merge a delta-only capability (additive only)
-pred merge_delta_only [c : Capability, mc : MergedCapability] {
-  // Guard
-  mc.cap = c
-  no c.finalized
-  some c.delta
-  PipelineState.currentPhase = Merging
-  mc not in PipelineState.mergeComplete
-  // Effect: only ADDED blocks contribute to output
-  all r : mc.mergedReqs | r.deltaOp = Added
-  mc.mergedReqs in c.delta.requirements
-  // MODIFIED and REMOVED in a delta-only context produce findings
-  all r : c.delta.requirements |
-    r.deltaOp in (Modified + Removed) implies
-      some f : mc.findings | f.affectedReq = r
-  mc in PipelineState.mergeComplete'
-  // Frame
-  PipelineState.currentPhase' = PipelineState.currentPhase
-  PipelineState.processedCaps' = PipelineState.processedCaps
+// Safety: delta-only output consists solely of accepted additions.
+assert delta_only_additive {
+  execution implies always (no bases implies Run.working.op in Added)
 }
-
-// Failure mode: more than one delta supplied (precondition violation)
-// This is caught by assertion, not by graceful finding emission.
-pred merge_precondition_violated [c : Capability] {
-  // Guard: two deltas for same capability (violates atMostOneDelta fact)
-  // In well-formed input this cannot happen; modeled as an impossibility.
-  // This pred is unsatisfiable by construction (fact atMostOneDelta prevents it).
-  #{p : ParsedSpec | p = c.delta} > 1
-}
-
-// Safety: each capability produces exactly one merged view
-assert one_view_per_capability {
-  all c : Capability | one mc : MergedCapability | mc.cap = c
-}
-
-// Safety: finalized-only passthrough produces no findings
-// (unless the finalized spec has delta headings, which produces a warning)
-assert finalized_only_no_findings {
-  all mc : MergedCapability |
-    (some mc.cap.finalized and no mc.cap.delta
-     and no (mc.cap.finalized.deltaSections - Base))
-      implies no mc.findings
-}
-
-// Safety: delta-only caps never include MODIFIED or REMOVED in output
-assert delta_only_additive_output {
-  all mc : MergedCapability |
-    (no mc.cap.finalized and some mc.cap.delta)
-      implies (all r : mc.mergedReqs | r.deltaOp = Added)
-}
-
-// Safety: downstream never sees separate finalized and delta claim sets
-// (only the single merged view reaches downstream)
-assert single_merged_input_to_downstream {
-  all mc : MergedCapability |
-    mc in PipelineState.processedCaps implies
-      one mc2 : PipelineState.processedCaps | mc2.cap = mc.cap
-}
-
-check one_view_per_capability for 6 expect 0
-check finalized_only_no_findings for 5 expect 0
-check delta_only_additive_output for 5 expect 0
-check single_merged_input_to_downstream for 5 expect 0
 ```
 
 ### Requirement: Apply Requirement-Block Delta Semantics Deterministically [MCA-DELTA-SEM]
@@ -563,7 +206,7 @@ WHEN a `MODIFIED` requirement block matches a surviving base requirement by cano
 ##### Evidence
 - Implementation: [merge.ts:296 applyModified()](/src/domain/parser/merge.ts#L296)
 - Test: [merge.test.ts:76 applies REMOVED then MODIFIED then ADDED deterministically](/test/contract/merge.test.ts#L76)
-- Test (integration): [merge-liveness.integration.test.ts:181 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L181)
+- Test (integration): [merge-liveness.integration.test.ts:237 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L237)
 
 #### Scenario: Removed Requirement Deletes Base Block [MCA-DELTA-REM]
 WHEN a `REMOVED` requirement block matches a surviving base requirement by canonical identifier, THE spec-check tool SHALL remove that base requirement block and all of its nested scenarios from the merged capability view.
@@ -573,16 +216,15 @@ WHEN a `REMOVED` requirement block matches a surviving base requirement by canon
 ##### Evidence
 - Implementation: [merge.ts:244 applyRemoved()](/src/domain/parser/merge.ts#L244)
 - Test: [merge.test.ts:76 applies REMOVED then MODIFIED then ADDED deterministically](/test/contract/merge.test.ts#L76)
-- Test (integration): [merge-liveness.integration.test.ts:181 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L181)
+- Test (integration): [merge-liveness.integration.test.ts:237 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L237)
 
 #### Scenario: Collision Checking Uses Projected Final State [MCA-DELTA-SURVIVING]
-WHEN the merge layer checks whether an `ADDED` or `MODIFIED` requirement block would introduce an identifier collision, THE spec-check tool SHALL check against the projected final state, defined as the base requirement set after all `REMOVED` deletions and all `MODIFIED` replacements have been applied.
+WHEN the merge layer checks whether an `ADDED` or `MODIFIED` requirement block would introduce an identifier collision, THE spec-check tool SHALL first apply `REMOVED` deletions, SHALL process `MODIFIED` replacements in source order against the current surviving state with the matched block excluded from its own collision check, and SHALL check `ADDED` blocks against the resulting post-modification state and previously accepted additions.
 
 **Postcondition:** An ADDED block does not collide with a requirement that has already been removed or replaced.
 
 ##### Evidence
 - Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [merge.ts:296 applyModified()](/src/domain/parser/merge.ts#L296), [merge.ts:357 applyAdded()](/src/domain/parser/merge.ts#L357)
-- Test: [merge.test.ts:120 surfaces ADDED collisions in requirement and scenario namespaces](/test/contract/merge.test.ts#L120)
 
 #### Scenario: Requirement And Scenario Collision Namespaces Remain Separate [MCA-DELTA-NAMESPACE]
 WHEN the merge layer checks for duplicate identifiers introduced by delta application, THE spec-check tool SHALL treat requirement identifiers and scenario identifiers as separate canonical namespaces.
@@ -591,12 +233,13 @@ WHEN the merge layer checks for duplicate identifiers introduced by delta applic
 
 ##### Evidence
 - Implementation: [merge.ts:281 buildNamespaceSets()](/src/domain/parser/merge.ts#L281), [merge.ts:296 applyModified()](/src/domain/parser/merge.ts#L296), [merge.ts:357 applyAdded()](/src/domain/parser/merge.ts#L357)
-- Test: [merge.test.ts:120 surfaces ADDED collisions in requirement and scenario namespaces](/test/contract/merge.test.ts#L120)
 
 #### Scenario: Modified Replacement Collision Preserves Prior Valid State [MCA-DELTA-MOD-COLLISION]
 IF a `MODIFIED` replacement would introduce a requirement or scenario identifier collision outside the matched base block, THEN THE spec-check tool SHALL emit `spec_merge.duplicate_modified_identifier`, SHALL skip the replacement, and SHALL preserve the original matched base block unchanged.
 
 **Postcondition:** The merged capability remains deterministic and collision-free without silently discarding base behavior.
+
+**Ordering clarification:** A replacement that collides with another block still present at its source-order turn is rejected even if a later replacement would free that identifier. Failed replacements preserve their prior base blocks.
 
 ##### Evidence
 - Implementation: [merge.ts:296 applyModified()](/src/domain/parser/merge.ts#L296)
@@ -605,171 +248,95 @@ IF a `MODIFIED` replacement would introduce a requirement or scenario identifier
 #### Requirement model
 
 ```alloy
-// --- Delta semantics: deterministic application order ---
-// Application order: REMOVED first, MODIFIED second, ADDED last.
-// Identifier collision checking uses the projected final state (post-remove, post-modify).
-
-// The projected surviving base after removals
-fun survivingAfterRemoval [mc : MergedCapability] : set Requirement {
-  let baseReqs = mc.cap.finalized.requirements |
-  let removedIds = { i : Identifier |
-    some r : mc.cap.delta.requirements |
-      r.deltaOp = Removed and r.identifier = i and some i } |
-  { r : baseReqs | r.identifier not in removedIds or no r.identifier }
+// Event: service the next instruction in source order within its operation stage.
+pred apply_next[b : Block] {
+  // Guard: removals precede modifications, which precede additions.
+  b in pending and no earlier[b] & pending
+  // Effect: commit a whole block or preserve the previous valid state on failure.
+  Run.handled' = Run.handled + b
+  Run.rejected' = Run.rejected + b -> failure[b]
+  Run.applied' = Run.applied + (no failure[b] => b else none)
+  Run.working' = (some failure[b] => Run.working else
+    (b.op = Removed => Run.working - targets[b] else
+    (b.op = Modified => Run.working - targets[b] + b else Run.working + b)))
+  // Frame: one instruction never advances a downstream phase.
+  Run.stage' = Run.stage
+  Run.extracted' = Run.extracted
+  Run.covered' = Run.covered
+  Run.analyzed' = Run.analyzed
+  Run.solverSubmitted' = Run.solverSubmitted
 }
-
-// The projected state after removals and modifications
-fun projectedFinalState [mc : MergedCapability] : set Requirement {
-  let surviving = survivingAfterRemoval[mc] |
-  let modifiedIds = { i : Identifier |
-    some r : mc.cap.delta.requirements |
-      r.deltaOp = Modified and r.identifier = i and some i } |
-  // Replace matched base reqs with their modified versions
-  (surviving - { r : surviving | r.identifier in modifiedIds and some r.identifier })
-  + { r : mc.cap.delta.requirements |
-      r.deltaOp = Modified and r.identifier in (surviving.identifier & modifiedIds) }
+pred advance_merge {
+  Run.stage in RemoveStage + ModifyStage + AddStage and no pending
+  Run.stage' = (Run.stage = RemoveStage => ModifyStage else
+    (Run.stage = ModifyStage => AddStage else Handoff))
+  keep_merge
+  keep_downstream
 }
-
-// Surviving requirement identifiers in the given namespace after full application
-fun survivingReqIds [mc : MergedCapability] : set Identifier {
-  projectedFinalState[mc].identifier
+// Output positions retain base slots for replacements; additions follow base slots.
+// Concrete ordinal serialization is an implementation-test boundary.
+fun original_slot[b : Block] : lone Block {
+  b.op = Modified => { p : authoritative_base | p.cap = b.cap and p.identifier = b.identifier } else b
 }
-
-// Surviving scenario identifiers after full application
-fun survivingScenIds [mc : MergedCapability] : set Identifier {
-  projectedFinalState[mc].scenarios.scenarioId
+fun output_before : Block -> Block {
+  { a, b : Run.working | a.cap = b.cap and a != b and
+    ((a.op != Added and b.op = Added) or
+     (a.op = Added and b.op = Added and a in earlier[b]) or
+     (a.op != Added and b.op != Added and original_slot[a] in earlier[original_slot[b]])) }
 }
-
-// Event: apply REMOVED operation (first phase)
-pred applyRemoved [mc : MergedCapability, r : Requirement] {
-  // Guard: r is in delta with Removed op and has identifier matching a base req
-  r in mc.cap.delta.requirements
-  r.deltaOp = Removed
-  some r.identifier
-  some baseTarget : mc.cap.finalized.requirements |
-    baseTarget.identifier = r.identifier
-  // Postcondition: matched base block and its scenarios excluded from output
-  no baseTarget : mc.mergedReqs | baseTarget.identifier = r.identifier
-    and baseTarget in mc.cap.finalized.requirements
+// Safety: replacement success removes the old block, while rejection preserves it.
+assert modification_atomicity {
+  execution implies always (all b : Block | apply_next[b] and b.op = Modified implies
+    (some failure[b] => Run.working' = Run.working else no targets[b] & Run.working'))
 }
-
-// Event: apply MODIFIED operation (second phase)
-pred applyModified [mc : MergedCapability, r : Requirement] {
-  // Guard: r is in delta with Modified op, has id, matches surviving base req
-  r in mc.cap.delta.requirements
-  r.deltaOp = Modified
-  some r.identifier
-  r.identifier in survivingAfterRemoval[mc].identifier
-  // Collision check: new scenario identifiers from r don't collide in projected state
-  // (the requirement identifier itself replaces the matched block, so it is non-colliding)
-  let externalScenIds = survivingScenIds[mc] -
-    { i : Identifier | some s : Scenario |
-      s in (survivingAfterRemoval[mc] & { req : Requirement | req.identifier = r.identifier }).scenarios
-      and s.scenarioId = i } |
-  {
-    // No collision: r's scenario ids don't overlap external surviving scenario ids
-    no (r.scenarios.scenarioId & externalScenIds)
-    // Postcondition: modified block replaces base block at same position
-    r in mc.mergedReqs
-  }
+// Safety: source order exposes at most one next instruction in an operation
+// stage. This checks operational choice, not uniqueness of output atom names.
+assert merge_instruction_choice_unique {
+  execution implies always (all disj a,b : pending | not (no earlier[a] & pending and no earlier[b] & pending))
 }
-
-// Event: apply ADDED operation (third phase)
-pred applyAdded [mc : MergedCapability, r : Requirement] {
-  // Guard: r is in delta with Added op
-  r in mc.cap.delta.requirements
-  r.deltaOp = Added
-  // Collision check against projected final state namespaces
-  no (r.identifier & survivingReqIds[mc])
-  no (r.scenarios.scenarioId & survivingScenIds[mc])
-  // Postcondition: appended to merged output
-  r in mc.mergedReqs
+// Safety: requirement IDs are unique; deltas introduce no external scenario
+// collision. Pre-existing malformed base scenario IDs remain parser scope.
+pred namespace_inv {
+  all disj a, b : Run.working | a.cap = b.cap and some a.identifier and some b.identifier implies a.identifier != b.identifier
+  all disj a, b : active_scenarios | a.parent != b.parent and
+    (a.parent.op != Base or b.parent.op != Base) and a.parent.cap = b.parent.cap and
+    some a.identifier and some b.identifier implies a.identifier != b.identifier
 }
-
-// Failure mode: MODIFIED introduces external collision
-pred applyModified_collision [mc : MergedCapability, r : Requirement] {
-  // Guard: r is MODIFIED, has id, matches base, but introduces collision
-  r in mc.cap.delta.requirements
-  r.deltaOp = Modified
-  some r.identifier
-  r.identifier in survivingAfterRemoval[mc].identifier
-  // Collision detected
-  some (r.scenarios.scenarioId & survivingScenIds[mc])
-    or some (r.identifier & (survivingReqIds[mc] - r.identifier))
-  // Effect: finding emitted, base block preserved unchanged
-  some f : mc.findings | f.kind = DupModifiedId and f.affectedReq = r
-  r not in mc.mergedReqs
-  // Original base block IS in merged output (preserved)
-  some baseR : mc.cap.finalized.requirements |
-    baseR.identifier = r.identifier and baseR in mc.mergedReqs
+// Safety: short execution regression; independent induction below is the primary
+// namespace check and retains the larger structural scope without trace unrolling.
+assert namespaces_unique {
+  execution implies always namespace_inv
 }
-
-// Namespace separation invariant: req ids and scenario ids never cross-collide
-// (structurally enforced by Namespace sig -- req and scen identifiers occupy different fields)
-pred namespaces_separate {
-  // A requirement identifier collision is checked only against other requirement identifiers
-  // A scenario identifier collision is checked only against other scenario identifiers
-  all mc : MergedCapability |
-    // No requirement has duplicate id in output (within req namespace)
-    (all disj r1, r2 : mc.mergedReqs |
-      (some r1.identifier and some r2.identifier) implies r1.identifier != r2.identifier)
-    and
-    // No scenario has duplicate id in output (within scen namespace)
-    (all disj s1, s2 : mc.mergedScenarios |
-      (some s1.scenarioId and some s2.scenarioId) implies s1.scenarioId != s2.scenarioId)
+pred scenario_input_namespace_valid {
+  all b : Block | all disj s,t : b.scenarios | some s.identifier and some t.identifier implies s.identifier != t.identifier
+  all disj s,t : authoritative_base.scenarios | s.parent.cap = t.parent.cap and some s.identifier and some t.identifier implies s.identifier != t.identifier
 }
-
-// Safety: removed ops never in output
-assert removed_never_in_output {
-  all mc : MergedCapability |
-    no r : mc.mergedReqs | r.deltaOp = Removed
+pred scenario_namespace_inv {
+  all disj s,t : active_scenarios | s.parent.cap = t.parent.cap and
+    some s.identifier and some t.identifier implies s.identifier != t.identifier
 }
-
-// Safety: no phantom introduction (every merged req comes from input)
-assert no_phantom_introduction {
-  all mc : MergedCapability, r : mc.mergedReqs |
-    r in mc.cap.finalized.requirements + mc.cap.delta.requirements
+// Safety: short regression for full scenario uniqueness with explicit input validity.
+assert valid_scenario_namespaces_preserved {
+  execution and scenario_input_namespace_valid implies always scenario_namespace_inv
 }
-
-// Safety: modified collision preserves base block
-assert collision_preserves_base {
-  all mc : MergedCapability, f : mc.findings |
-    (f.kind = DupModifiedId and some f.affectedReq and some f.affectedReq.identifier) implies
-      (some baseR : mc.cap.finalized.requirements |
-        baseR.identifier = f.affectedReq.identifier and baseR in mc.mergedReqs)
+// Safety: initialization establishes namespace health.
+assert namespace_initialization {
+  init implies namespace_inv
 }
-
-// Safety: ADDED blocks cannot introduce duplicate surviving identifiers
-assert added_no_duplicate_ids {
-  all mc : MergedCapability, r : mc.mergedReqs |
-    r.deltaOp = Added implies
-      (all r2 : mc.mergedReqs - r |
-        (some r.identifier and some r2.identifier) implies r.identifier != r2.identifier)
+// Safety: an arbitrary namespace-valid state is preserved by any permitted step.
+// There is deliberately no execution/init premise restricting the current state.
+assert namespace_preservation {
+  namespace_inv and next_step implies after namespace_inv
 }
-
-// Invariant: determinism -- same inputs produce same merged output
-// (modeled structurally: the facts fully determine mergedReqs given cap inputs)
-assert deterministic_merge {
-  all disj mc1, mc2 : MergedCapability |
-    mc1.cap = mc2.cap implies
-      (mc1.mergedReqs = mc2.mergedReqs and mc1.findings = mc2.findings)
+// Safety: full scenario uniqueness is established for well-formed source namespaces.
+assert scenario_namespace_initialization {
+  scenario_input_namespace_valid and init implies scenario_namespace_inv
 }
-
-check removed_never_in_output for 6 expect 0
-check no_phantom_introduction for 6 expect 0
-check collision_preserves_base for 5 expect 0
-check added_no_duplicate_ids for 5 expect 0
-check deterministic_merge for 5 expect 0
-
-// Scenario: deterministic application order is satisfiable
-run delta_application_scenario {
-  some c : Capability, mc : MergedCapability |
-    some c.finalized and some c.delta and mc.cap = c
-    and some r : mc.cap.delta.requirements | r.deltaOp = Removed
-    and some r : mc.cap.delta.requirements | r.deltaOp = Modified
-    and some r : mc.cap.delta.requirements | r.deltaOp = Added
-    and some mc.mergedReqs
-} for 5 expect 1
+// Safety: full scenario uniqueness is preserved with the same explicit input premise.
+assert scenario_namespace_preservation {
+  scenario_input_namespace_valid and scenario_namespace_inv and next_step
+    implies after scenario_namespace_inv
+}
 ```
 
 ### Requirement: Surface Invalid Or Unsupported Delta Content [MCA-MERGE-FIND]
@@ -798,7 +365,7 @@ IF a delta spec contains requirements or scenarios before the first recognized d
 ##### Evidence
 - Implementation: [merge.ts:159 partitionDelta()](/src/domain/parser/merge.ts#L159)
 - Test: [merge.test.ts:161 surfaces pre-section content](/test/contract/merge.test.ts#L161)
-- Test (integration): [merge-pipeline.integration.test.ts:61 keeps merge findings visible and ordered before downstream findings](/test/integration/merge-pipeline.integration.test.ts#L61)
+- Test (integration): [merge-pipeline.integration.test.ts:136 keeps merge findings visible and ordered before downstream findings](/test/integration/merge-pipeline.integration.test.ts#L136)
 
 #### Scenario: Missing Identifier In Modified Or Removed Operation Surfaced [MCA-MERGE-MISSING-ID]
 IF a `MODIFIED` or `REMOVED` requirement block lacks a canonical identifier, THEN THE spec-check tool SHALL emit `spec_merge.modified_missing_identifier` or `spec_merge.removed_missing_identifier` respectively and SHALL skip that operation.
@@ -871,443 +438,78 @@ IF a capability produces zero surviving merged requirements after removals and e
 **Postcondition:** Vacuous capability groups are not analyzed as if they contained active behavior.
 
 ##### Evidence
-- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [run-cli.ts:233 runAnalysisPhases()](/src/cli/run-cli.ts#L233), [pipeline-helpers.ts:264 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L264)
+- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [run-cli.ts:388 runAnalysisPhases()](/src/cli/run-cli.ts#L388), [pipeline-helpers.ts:270 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L270)
 - Test: [merge.test.ts:215 emits empty capability finding when no surviving requirements remain](/test/contract/merge.test.ts#L215)
-- Test (integration): [merge-liveness.integration.test.ts:85 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L85)
+- Test (integration): [merge-liveness.integration.test.ts:135 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L135)
 
 #### Requirement model
 
 ```alloy
-// --- Failure modes: finding emission event predicates ---
-// Each failure mode is modeled as a guarded event that emits a finding and skips
-// the affected item. The frame condition ensures other merge operations proceed.
-
-// Failure mode: standalone scenario in delta (no parent requirement)
-pred emit_standalone_scenario [mc : MergedCapability, s : Scenario] {
-  // Guard: scenario has no parent requirement and is in delta input
-  no s.parentReq
-  s.scenSourceFile = mc.cap.delta.source
-  // Effect: finding emitted, scenario excluded from merged output
-  some f : mc.findings | f.kind = StandaloneScenario and f.affectedScen = s
-  s not in mc.mergedScenarios
-}
-
-// Failure mode: pre-section content in delta
-pred emit_pre_section_content [mc : MergedCapability, r : Requirement] {
-  // Guard: requirement has PreSection delta op
-  r in mc.cap.delta.requirements
-  r.deltaOp = PreSection
-  // Effect: finding emitted, requirement excluded
-  some f : mc.findings | f.kind = PreSectionContent and f.affectedReq = r
-  r not in mc.mergedReqs
-}
-
-// Failure mode: MODIFIED or REMOVED with missing identifier
-pred emit_missing_identifier_modified [mc : MergedCapability, r : Requirement] {
-  // Guard: MODIFIED requirement without identifier
-  r in mc.cap.delta.requirements
-  r.deltaOp = Modified
-  no r.identifier
-  // Effect: finding emitted, operation skipped
-  some f : mc.findings | f.kind = ModMissingId and f.affectedReq = r
-  r not in mc.mergedReqs
-}
-
-pred emit_missing_identifier_removed [mc : MergedCapability, r : Requirement] {
-  // Guard: REMOVED requirement without identifier
-  r in mc.cap.delta.requirements
-  r.deltaOp = Removed
-  no r.identifier
-  // Effect: finding emitted, operation skipped
-  some f : mc.findings | f.kind = RemMissingId and f.affectedReq = r
-  r not in mc.mergedReqs
-}
-
-// Failure mode: MODIFIED or REMOVED target not found in surviving base
-pred emit_target_not_found_modified [mc : MergedCapability, r : Requirement] {
-  // Guard: MODIFIED with identifier that has no matching base requirement
-  r in mc.cap.delta.requirements
-  r.deltaOp = Modified
-  some r.identifier
-  r.identifier not in survivingAfterRemoval[mc].identifier
-  // Effect: finding emitted, operation skipped
-  some f : mc.findings | f.kind = ModNotFound and f.affectedReq = r
-  r not in mc.mergedReqs
-}
-
-pred emit_target_not_found_removed [mc : MergedCapability, r : Requirement] {
-  // Guard: REMOVED with identifier that has no matching base requirement
-  r in mc.cap.delta.requirements
-  r.deltaOp = Removed
-  some r.identifier
-  r.identifier not in mc.cap.finalized.requirements.identifier
-  // Effect: finding emitted, operation skipped
-  some f : mc.findings | f.kind = RemNotFound and f.affectedReq = r
-  r not in mc.mergedReqs
-}
-
-// Failure mode: ADDED introduces duplicate identifier
-pred emit_duplicate_added [mc : MergedCapability, r : Requirement] {
-  // Guard: ADDED block collides with surviving id in its namespace
-  r in mc.cap.delta.requirements
-  r.deltaOp = Added
-  (some (r.identifier & survivingReqIds[mc]))
-    or (some (r.scenarios.scenarioId & survivingScenIds[mc]))
-  // Effect: finding emitted (identifies colliding id and namespace), block + scenarios skipped
-  some f : mc.findings | f.kind = DupAdded and f.affectedReq = r
-  r not in mc.mergedReqs
-  no (r.scenarios & mc.mergedScenarios)
-}
-
-// Failure mode: duplicate base identifier (first-occurrence wins)
-pred emit_duplicate_base [mc : MergedCapability, r : Requirement] {
-  // Guard: r is a later occurrence of a duplicated identifier in finalized spec
-  r in mc.cap.finalized.requirements
-  some r.identifier
-  some r2 : mc.cap.finalized.requirements - r |
-    r2.identifier = r.identifier
-    // r2 is "earlier" (first occurrence is authoritative; modeled as: r2 in mergedReqs, r is not)
-  // Effect: finding emitted, later block excluded from output and matching
-  some f : mc.findings | f.kind = DupBase and f.affectedReq = r
-  r not in mc.mergedReqs
-}
-
-// Failure mode: duplicate delta identifier group
-pred emit_duplicate_delta [mc : MergedCapability, r : Requirement] {
-  // Guard: r shares identifier+deltaOp with another delta req in same section
-  r in mc.cap.delta.requirements
-  some r.identifier
-  some r2 : mc.cap.delta.requirements - r |
-    r2.identifier = r.identifier and r2.deltaOp = r.deltaOp
-  // Effect: finding emitted for each conflicting block, all excluded
-  some f : mc.findings | f.kind = DupDelta and f.affectedReq = r
-  r not in mc.mergedReqs
-}
-
-// Failure mode: RENAMED block (unsupported operation)
-pred emit_rename_unsupported [mc : MergedCapability, r : Requirement] {
-  // Guard: requirement has Renamed delta op
-  r in mc.cap.delta.requirements
-  r.deltaOp = Renamed
-  // Effect: exactly one finding per renamed block, merged content unchanged
-  one f : mc.findings | f.kind = RenameUnsupported and f.affectedReq = r
-  r not in mc.mergedReqs
-}
-
-// Failure mode: finalized spec has delta headings (warn once, treat as base)
-pred emit_finalized_delta_heading [mc : MergedCapability] {
-  // Guard: finalized spec has delta section headings
-  some mc.cap.finalized
-  some (mc.cap.finalized.deltaSections - Base)
-  // Effect: exactly one warning per finalized spec file
-  one f : mc.findings | f.kind = FinalizedDeltaHeadingIgnored
-  // All items in finalized treated as Base (enforced by baseItemsHaveBaseOp fact)
-}
-
-// Failure mode: empty merged capability
-pred emit_empty_cap_skipped [mc : MergedCapability] {
-  // Guard: no surviving requirements after all operations
-  no mc.mergedReqs
-  some mc.cap.(finalized + delta).requirements
-  // Effect: finding emitted, capability omitted from downstream
-  some f : mc.findings | f.kind = EmptyCapSkipped
-  mc not in PipelineState.processedCaps
-}
-
-// --- Safety assertions for failure modes ---
-
-// Safety: every skipped operation has exactly one corresponding finding
+// Safety: every handled rejected instruction has one attributed reason.
 assert every_skip_has_finding {
-  all mc : MergedCapability, r : mc.cap.delta.requirements |
-    (r.deltaOp in (Modified + Removed + Added + Renamed + PreSection)
-     and r not in mc.mergedReqs)
-    implies some f : mc.findings | f.affectedReq = r
+  execution implies always (all b : Run.handled - bases | b not in Run.applied implies one b.(Run.rejected))
 }
-
-// Safety: standalone scenarios never in merged output
-assert standalone_never_in_output {
-  all mc : MergedCapability, s : Scenario |
-    (no s.parentReq and s.scenSourceFile = mc.cap.delta.source)
-    implies s not in mc.mergedScenarios
-}
-
-// Safety: pre-section content never in merged output
-assert pre_section_never_in_output {
-  all mc : MergedCapability |
-    no r : mc.mergedReqs | r.deltaOp = PreSection
-}
-
-// Safety: renamed blocks never in merged output
-assert renamed_never_in_output {
-  all mc : MergedCapability |
-    no r : mc.mergedReqs | r.deltaOp = Renamed
-}
-
-// Safety: duplicate base -- only first occurrence is authoritative
-assert first_occurrence_wins {
-  all mc : MergedCapability, disj r1, r2 : mc.cap.finalized.requirements |
-    (some r1.identifier and r1.identifier = r2.identifier)
-    implies not (r1 in mc.mergedReqs and r2 in mc.mergedReqs)
-}
-
-// Safety: empty capabilities never reach downstream
-assert empty_caps_never_processed {
-  all mc : MergedCapability |
-    no mc.mergedReqs implies mc not in PipelineState.processedCaps
-}
-
-// Safety: failures are localized (other valid operations still apply)
-assert failure_localization {
-  all mc : MergedCapability |
-    (some f : mc.findings | f.kind in (ModNotFound + RemNotFound + ModMissingId + RemMissingId))
-    implies
-      // Other valid operations can still produce merged output
-      (all r : mc.cap.delta.requirements |
-        (r.deltaOp = Added
-         and (no r.identifier or r.identifier not in (mc.mergedReqs - r).identifier)
-         and no (r.scenarios.scenarioId & (mc.mergedScenarios - r.scenarios).scenarioId))
-        implies r in mc.mergedReqs)
-}
-
-check every_skip_has_finding for 5 expect 0
-check standalone_never_in_output for 5 expect 0
-check pre_section_never_in_output for 6 expect 0
-check renamed_never_in_output for 6 expect 0
-check first_occurrence_wins for 5 expect 0
-check empty_caps_never_processed for 5 expect 0
-check failure_localization for 4 expect 0
-
-// Scenario: failure modes are satisfiable
-run failure_mode_scenario {
-  some mc : MergedCapability |
-    some f : mc.findings | f.kind = ModNotFound
-    and some r : mc.mergedReqs | r.deltaOp = Added
-} for 4 expect 1
+// Derived skip evidence is capability-local; successful REMOVED instructions are
+// applied operations, not failures merely because instructions are not output.
+fun empty_skip_findings : set Capability { Run.stage in Handoff + Complete => empty_caps else none }
+fun finalized_heading_warnings : set SourceFile { { b : bases | b.headedDeltaInFinal = True }.file }
+// Safety: pre-section/rename instructions never influence the selected output.
+assert unsupported_never_active { execution implies always (no Run.working.op & (Removed + PreSection + Renamed)) }
 ```
 
 ### Requirement: Preserve Source Provenance In Merged Output [MCA-MERGE-PROVEN]
-WHEN the spec-check tool emits merged requirements, merged scenarios, and derived claims from a merged capability view, THE spec-check tool SHALL preserve the original source-file provenance on each contributing item, SHALL use a separate synthetic merged capability key only for grouping and artifact naming, and SHALL treat all claims grouped under one synthetic merged capability key as one downstream compile-group identity boundary for specs-forward logic analysis.
+WHEN the spec-check tool emits merged requirements, merged scenarios, and derived claims, THE spec-check tool SHALL preserve original provenance and structured statement metadata while using a separate synthetic capability key for downstream semantic grouping and artifact naming.
 
 **References:**
 - `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#System Invariant Tactics`
 - `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Artifact-Key Contract`
+- [Proposal: Assumptions and Dependencies](../../changes/archive/2026-11-15-improve-ears-smt-analysis/proposal.md#assumptions-and-dependencies)
+- [Design: Source and identity](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#source-and-identity)
 
 #### Scenario: Source Provenance Survives Merge [MCA-MERGE-SOURCE]
-WHEN a merged requirement or scenario originates from either the finalized spec or the selected delta spec, THE spec-check tool SHALL preserve that item's original source file and line provenance in the merged output and any derived claim.
-
-**Postcondition:** Reviewers can trace merged analysis results back to the original contributing file.
+WHEN a selected item originates from a finalized or delta spec, THE spec-check tool SHALL retain its original source spans, EARS/scenario structure, formal disposition, justification, and supporting-content references without rewriting them as synthetic source locations.
 
 ##### Evidence
-- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [claim-graph.ts:247 extractMergedSpecClaims()](/src/domain/claim-graph.ts#L247)
-- Test: [merge.test.ts:290 preserves provenance and does not remove base blocks without explicit cause](/test/contract/merge.test.ts#L290)
+- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [claim-graph.ts:275 claimFromRequirement()](/src/domain/claim-graph.ts#L275), [claim-graph.ts:298 claimFromScenario()](/src/domain/claim-graph.ts#L298)
+- Test: [merge.test.ts:290 preserves provenance and does not remove base blocks without explicit cause](/test/contract/merge.test.ts#L290), [surface-claims.test.ts:15 modified payload replaces the original without rewriting provenance](/test/contract/surface-claims.test.ts#L15)
 - Test (property): [merge.property.test.ts:122 preserves provenance, avoids silent discard, and emits complete skip findings](/test/property/merge.property.test.ts#L122)
 
 #### Scenario: Synthetic Logical Key Groups Capability Artifacts [MCA-MERGE-LOGICAL]
-WHEN the spec-check tool persists specs-forward solver artifacts or report headings for a merged capability, THE spec-check tool SHALL use the deterministic synthetic merged capability key `<merged-spec/{capability}>` rather than a real filesystem source path.
-
-**Postcondition:** Capability-scoped artifacts remain distinct from source-file provenance.
+WHEN merged capability artifacts are named or grouped, THE spec-check tool SHALL use `<merged-spec/{capability}>` separately from each item's source-file provenance.
 
 ##### Evidence
-- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345), [pipeline-helpers.ts:403 sanitizeLogicalFileForArtifacts()](/src/cli/pipeline-helpers.ts#L403)
-- Test: [merge-logic-routing.test.ts:57 writes logic artifacts under synthetic merged logicalFile artifact key](/test/contract/merge-logic-routing.test.ts#L57)
-- Test (integration): [merge-liveness.integration.test.ts:85 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L85)
+- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365), [pipeline-helpers.ts:422 sanitizeLogicalFileForArtifacts()](/src/cli/pipeline-helpers.ts#L422)
+- Test: [pipeline-helpers.test.ts:137 groups by Claim.capability instead of provenance.file](/test/contract/pipeline-helpers.test.ts#L137), [merge-logic-routing.test.ts:57 writes logic artifacts under synthetic merged logicalFile artifact key](/test/contract/merge-logic-routing.test.ts#L57)
+- Test (integration): [merge-liveness.integration.test.ts:135 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L135)
 
 #### Scenario: Synthetic Logical Key Defines Compile-Group Boundary [MCA-MERGE-GROUP-KEY]
-WHEN the specs-forward pipeline groups derived claims for combined SMT-LIB compilation, THE spec-check tool SHALL group all claims that share one synthetic merged capability key into the same compile group and SHALL preserve claim identifier uniqueness as a downstream precondition for that group.
-
-**Postcondition:** Compile-group identity is consistent from merged-capability routing through logic analysis, and claim-ID safety checks are applied at the same grouping boundary used for solver submission.
-
-**Data Boundary:** The synthetic merged capability key is the `specFile` or logical-file identity for specs-forward compilation and artifact naming. It is not necessarily a raw source path and SHALL be treated as untrusted text when emitted into SMT-LIB comments or reports.
-
-**Identity Boundary:** All claims grouped under one synthetic merged capability key share one declaration namespace, one assertion-label namespace, one conflict-preflight scope, and one solver submission boundary. Raw and sanitized claim-ID uniqueness SHALL be enforced within this grouped boundary before solver work.
+WHEN selected claims share a merged capability key, THE spec-check tool SHALL group their admitted formal scope under that key and SHALL apply existing compile-group identity validation before submission.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345), [logic-analysis.ts:146 runLogicAnalysis()](/src/domain/formal/logic-analysis.ts#L146), [logic-analysis.ts:200 preflightGroupClaimIds()](/src/domain/formal/logic-analysis.ts#L200)
-- Test: [merge-logic-routing.test.ts:35 runs one logic group per merged capability and detects contradictions in one run](/test/contract/merge-logic-routing.test.ts#L35)
-- Example:
-```typescript
-const { preflightGroupClaimIds } = await import("./src/domain/formal/logic-analysis.ts");
-const uniqueGroup = [{ claimId: "CAP-A-1" }, { claimId: "CAP-A-2" }];
-preflightGroupClaimIds(uniqueGroup); //=> null
-const duplicateGroup = [{ claimId: "CAP-A-1" }, { claimId: "CAP-A-1" }];
-preflightGroupClaimIds(duplicateGroup).kind; //=> duplicate_raw_claim_id
-```
+- Implementation: [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365), [logic-analysis.ts:150 runLogicAnalysis()](/src/domain/formal/logic-analysis.ts#L150), [logic-analysis.ts:209 preflightGroupClaimIds()](/src/domain/formal/logic-analysis.ts#L209)
+- Test: [merge-logic-routing.test.ts:35 runs one logic group per merged capability and detects contradictions in one run](/test/contract/merge-logic-routing.test.ts#L35), [logic-analysis.test.ts:556 rejects duplicate raw claim IDs as invalid group before compile and solver work](/test/contract/logic-analysis.test.ts#L556), [logic-analysis.test.ts:619 detects constructed sanitized-id collision in preflight](/test/contract/logic-analysis.test.ts#L619)
 
 #### Scenario: Merged Output Ordering Is Deterministic [MCA-MERGE-ORDER]
-WHEN the same finalized and delta inputs are merged on separate runs, THE spec-check tool SHALL produce the same requirement order, scenario order, capability order, findings, and logical grouping identity on each run.
-
-**Postcondition:** Merge output is a deterministic function of input specs and catalog selection.
+WHEN identical finalized and delta inputs are merged, THE spec-check tool SHALL produce identical selected item order, retained structure, dispositions, findings, and logical grouping identity.
 
 ##### Evidence
-- Implementation: [merge.ts:24 mergeSpecsByCapability()](/src/domain/parser/merge.ts#L24), [merge.ts:414 groupBlocks()](/src/domain/parser/merge.ts#L414), [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345)
+- Implementation: [merge.ts:24 mergeSpecsByCapability()](/src/domain/parser/merge.ts#L24), [merge.ts:414 groupBlocks()](/src/domain/parser/merge.ts#L414), [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365)
 - Test: [merge.test.ts:76 applies REMOVED then MODIFIED then ADDED deterministically](/test/contract/merge.test.ts#L76), [merge.test.ts:277 is deterministic across repeated runs](/test/contract/merge.test.ts#L277), [merge.determinism.test.ts:20 is byte-for-byte deterministic across repeated invocations](/test/determinism/merge.determinism.test.ts#L20)
 - Test (property): [merge.property.test.ts:60 random valid inputs are deterministic across 3 runs](/test/property/merge.property.test.ts#L60)
 
 #### Requirement model
 
 ```alloy
-// --- Provenance preservation and artifact-key contract ---
-// Source provenance (physical file) is distinct from logical key (synthetic grouping).
-// The merge function preserves source provenance on every merged item while using
-// a separate synthetic key for downstream artifact naming.
-
-// Postcondition: every merged requirement retains its original source file
-pred provenance_preserved {
-  all mc : MergedCapability, r : mc.mergedReqs |
-    r.sourceFile in (mc.cap.finalized.source + mc.cap.delta.source)
+// Selected objects are retained by identity, preserving file, payload and scenarios.
+fun selected_payloads : Block -> Payload { (Run.working <: payload) }
+// Safety: source payload is never rewritten into a synthetic capability location.
+assert provenance_preserved { execution implies always (all b : Run.working | b -> b.payload in selected_payloads) }
+// Safety: projected output ordering is a strict total order per capability.
+assert output_ordered {
+  execution implies always (no iden & ^output_before and all disj a, b : Run.working |
+    a.cap = b.cap implies (a -> b in output_before or b -> a in output_before))
 }
-
-// Postcondition: every merged scenario retains its original source file
-pred scenario_provenance_preserved {
-  all mc : MergedCapability, s : mc.mergedScenarios |
-    s.scenSourceFile in (mc.cap.finalized.source + mc.cap.delta.source)
-}
-
-// Invariant: logical key is structurally distinct from source file
-// (LogicalKey and SourceFile are separate sigs in Alloy -- type disjointness is guaranteed)
-
-// Invariant: each capability gets a unique logical key for artifacts
-pred unique_logical_keys {
-  all disj mc1, mc2 : MergedCapability |
-    mc1.logicalKey != mc2.logicalKey
-}
-
-// Invariant: determinism -- same inputs produce identical output
-// Merge is a pure function: identical (finalized, delta) pairs yield byte-for-byte same result
-pred merge_is_deterministic {
-  all disj mc1, mc2 : MergedCapability |
-    mc1.cap = mc2.cap implies (
-      mc1.mergedReqs = mc2.mergedReqs
-      and mc1.mergedScenarios = mc2.mergedScenarios
-      and mc1.findings = mc2.findings
-      and mc1.logicalKey = mc2.logicalKey
-    )
-}
-
-// Safety: provenance is never lost during merge
-assert provenance_integrity {
-  provenance_preserved
-  scenario_provenance_preserved
-}
-
-// Safety: logical key never collides with source provenance
-// (structural: LogicalKey and SourceFile are separate sigs)
-assert logical_key_separation {
-  unique_logical_keys
-}
-
-// Safety: provenance of findings also traces to input files
-assert finding_provenance {
-  all mc : MergedCapability, f : mc.findings |
-    some f.affectedReq implies
-      f.affectedReq.sourceFile in (mc.cap.finalized.source + mc.cap.delta.source)
-}
-
-// Safety: merged output is a deterministic function of inputs
-assert output_determinism {
-  merge_is_deterministic
-}
-
-check provenance_integrity for 6 expect 0
-check logical_key_separation for 6 expect 0
-check finding_provenance for 5 expect 0
-check output_determinism for 5 expect 0
-
-// Scenario: provenance survives merge with both finalized and delta sources
-run provenance_scenario {
-  some mc : MergedCapability |
-    some mc.cap.finalized and some mc.cap.delta
-    and some r1 : mc.mergedReqs | r1.sourceFile = mc.cap.finalized.source
-    and some r2 : mc.mergedReqs | r2.sourceFile = mc.cap.delta.source
-} for 4 expect 1
-
-// --- Compile-group identity boundary and claim-ID uniqueness (MCA-MERGE-GROUP-KEY) ---
-// All claims that share one synthetic logical key form one compile group. Claim-ID
-// uniqueness (raw first, sanitized as defense-in-depth) is a downstream precondition
-// enforced within that grouped boundary before any solver work.
-
-// The compile group of a merged capability = the claims routed to its logical key
-fun compileGroup [mc : MergedCapability] : set Claim {
-  claimCap.mc
-}
-
-// Preflight failure form 1: a raw claim id appears more than once in one group
-pred hasRawClaimIdCollision [mc : MergedCapability] {
-  some disj c1, c2 : compileGroup[mc] | c1.rawClaimId = c2.rawClaimId
-}
-
-// Preflight failure form 2: two DISTINCT raw ids sanitize to one sanitized id (defense-in-depth)
-pred hasSanitizedClaimIdCollision [mc : MergedCapability] {
-  some disj c1, c2 : compileGroup[mc] |
-    c1.rawClaimId != c2.rawClaimId and c1.sanitizedClaimId = c2.sanitizedClaimId
-}
-
-// A compile group is claim-ID-valid iff it has neither a raw nor a sanitized collision
-pred claimGroupValid [mc : MergedCapability] {
-  not hasRawClaimIdCollision[mc]
-  not hasSanitizedClaimIdCollision[mc]
-}
-
-// Failure mode: duplicate raw claim id -> emit finding, group is not claim-ID-valid
-pred emit_duplicate_raw_claim_id [mc : MergedCapability] {
-  // Guard
-  hasRawClaimIdCollision[mc]
-  // Effect: one preflight finding, group rejected (not valid for solver submission)
-  some f : mc.findings | f.kind = DupRawClaimId
-  not claimGroupValid[mc]
-}
-
-// Failure mode: duplicate sanitized claim id (raw check passed first) -> emit finding
-pred emit_duplicate_sanitized_claim_id [mc : MergedCapability] {
-  // Guard: raw ids distinct (raw check runs first) but sanitized ids collide
-  not hasRawClaimIdCollision[mc]
-  hasSanitizedClaimIdCollision[mc]
-  // Effect: one preflight finding, group rejected
-  some f : mc.findings | f.kind = DupSanitizedClaimId
-  not claimGroupValid[mc]
-}
-
-// Invariant: claims sharing a logical key share one compile group (one identity boundary)
-assert one_group_per_logical_key {
-  all disj c1, c2 : Claim |
-    c1.claimCap.logicalKey = c2.claimCap.logicalKey implies c1.claimCap = c2.claimCap
-}
-
-// Safety: a claim-ID-valid group has all-distinct raw AND sanitized claim ids
-// (raw + sanitized uniqueness enforced within the grouped boundary)
-assert valid_group_has_unique_claim_ids {
-  all mc : MergedCapability | claimGroupValid[mc] implies (
-    (all disj c1, c2 : compileGroup[mc] | c1.rawClaimId != c2.rawClaimId)
-    and
-    (all disj c1, c2 : compileGroup[mc] | c1.sanitizedClaimId != c2.sanitizedClaimId)
-  )
-}
-
-// Safety: every compile group is scoped to exactly one merged capability
-// (one declaration/label/preflight/submission namespace per group)
-assert group_scoped_to_one_capability {
-  all c : Claim | one c.claimCap
-}
-
-check one_group_per_logical_key for 6 expect 0
-check valid_group_has_unique_claim_ids for 5 expect 0
-check group_scoped_to_one_capability for 6 expect 0
-
-// Scenario: a raw claim-ID collision is detectable within a group and flags a finding
-run claim_id_collision_scenario {
-  some mc : MergedCapability |
-    hasRawClaimIdCollision[mc]
-    and (some f : mc.findings | f.kind = DupRawClaimId)
-    and not claimGroupValid[mc]
-} for 4 expect 1
-
-// Scenario: a clean group with multiple distinct claims is claim-ID-valid
-run valid_group_scenario {
-  some mc : MergedCapability |
-    some disj c1, c2 : compileGroup[mc] | c1.rawClaimId != c2.rawClaimId
-    and claimGroupValid[mc]
-} for 4 expect 1
 ```
 
 ### Requirement: Ensure All Non-Empty Merged Capabilities Reach Downstream Phases [MCA-LIVENESS]
@@ -1323,8 +525,8 @@ WHEN a merged capability contains at least one surviving requirement after merge
 **Postcondition:** No non-empty merged capability is silently omitted from downstream processing.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:264 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L264), [run-cli.ts:233 runAnalysisPhases()](/src/cli/run-cli.ts#L233), [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345)
-- Test (integration): [merge-liveness.integration.test.ts:85 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L85)
+- Implementation: [pipeline-helpers.ts:270 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L270), [run-cli.ts:388 runAnalysisPhases()](/src/cli/run-cli.ts#L388), [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365)
+- Test (integration): [merge-liveness.integration.test.ts:135 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L135)
 
 #### Scenario: Merge Precondition Assertion Catches Internal Errors [MCA-LIVENESS-ASSERT]
 IF `mergeSpecsByCapability()` receives input that violates its precondition (more than one delta per capability), THEN THE spec-check tool SHALL raise a fatal pipeline exception rather than producing undefined merge behavior.
@@ -1351,244 +553,35 @@ mergeSpecsByCapability(docs, parsedSpecs); //=> throws Error
 #### Requirement model
 
 ```alloy
-// --- Liveness: all non-empty merged capabilities reach downstream ---
-// Uses temporal operators to model pipeline phase progression.
-// The merge phase is a synchronous step; liveness means every non-empty
-// merged capability eventually reaches claim extraction, coverage, and logic phases.
-
-// Event: begin merge phase from initial state
-pred start_merge {
-  // Guard: pipeline is idle
-  PipelineState.currentPhase = Idle
-  // Effect: transition to Merging, synchronously complete all merges
-  PipelineState.currentPhase' = Merging
-  PipelineState.mergeComplete' = MergedCapability
-  PipelineState.processedCaps' = PipelineState.processedCaps
-  PipelineState.solverSubmitted' = PipelineState.solverSubmitted
-  PipelineState.abortCause' = PipelineState.abortCause
+// Event: record each distinct downstream submission exactly once.
+pred handoff[c : Capability] {
+  Run.stage = Handoff and c in active_caps - Run.extracted
+  Run.extracted' = Run.extracted + c
+  Run.covered' = Run.covered + c
+  Run.analyzed' = Run.analyzed + c
+  Run.solverSubmitted' = Run.solverSubmitted + ((some compile_group[c] and claim_group_valid[c]) => c else none)
+  Run.stage' = Run.stage
+  keep_merge
 }
-
-// Event: complete merge phase and advance to downstream
-pred complete_merge_phase {
-  // Guard: in Merging, all caps merged, and NO fatal abort cause is present
-  PipelineState.currentPhase = Merging
-  PipelineState.mergeComplete = MergedCapability
-  no ActiveAbort
-  // Effect: advance to ClaimExtraction, submit non-empty caps
-  PipelineState.currentPhase' = ClaimExtraction
-  PipelineState.processedCaps' = { mc : MergedCapability | some mc.mergedReqs }
-  PipelineState.mergeComplete' = PipelineState.mergeComplete
-  PipelineState.solverSubmitted' = PipelineState.solverSubmitted
-  PipelineState.abortCause' = PipelineState.abortCause
+pred finish {
+  Run.stage = Handoff and Run.extracted = active_caps
+  Run.stage' = Complete
+  keep_merge
+  keep_downstream
 }
-
-// Event: batch claim extraction (all submitted capabilities processed together)
-pred process_all_claims {
-  PipelineState.currentPhase = ClaimExtraction
-  PipelineState.currentPhase' = CoverageAnalysis
-  PipelineState.processedCaps' = PipelineState.processedCaps
-  PipelineState.mergeComplete' = PipelineState.mergeComplete
-  PipelineState.solverSubmitted' = PipelineState.solverSubmitted
-  PipelineState.abortCause' = PipelineState.abortCause
+pred abort {
+  Run.stage = Idle and abort_enabled
+  Run.stage' = Aborted
+  keep_merge
+  keep_downstream
 }
-
-// Event: batch coverage analysis
-pred process_all_coverage {
-  PipelineState.currentPhase = CoverageAnalysis
-  PipelineState.currentPhase' = LogicAnalysis
-  PipelineState.processedCaps' = PipelineState.processedCaps
-  PipelineState.mergeComplete' = PipelineState.mergeComplete
-  PipelineState.solverSubmitted' = PipelineState.solverSubmitted
-  PipelineState.abortCause' = PipelineState.abortCause
+// Safety: empty capabilities and invalid compile groups cannot reach the solver.
+assert downstream_exact {
+  execution implies always (Run.extracted = Run.covered and Run.covered = Run.analyzed and
+    Run.extracted in active_caps and all c : Run.solverSubmitted | claim_group_valid[c])
 }
-
-// Event: batch logic analysis. Only claim-ID-valid groups pass preflight and reach the
-// solver; groups that fail claim-ID preflight are excluded before any solver work.
-pred process_all_logic {
-  PipelineState.currentPhase = LogicAnalysis
-  PipelineState.currentPhase' = Complete
-  PipelineState.solverSubmitted' = { mc : PipelineState.processedCaps | claimGroupValid[mc] }
-  PipelineState.processedCaps' = PipelineState.processedCaps
-  PipelineState.mergeComplete' = PipelineState.mergeComplete
-  PipelineState.abortCause' = PipelineState.abortCause
-}
-
-// Event: fatal abort (MCA-LIVENESS-ASSERT + design Graceful Degradation).
-// A precondition violation (>1 delta), a sanitized artifact-key collision, or an
-// internal merge error propagates as PipelineAbortError -- no fallback, no downstream.
-pred abort_pipeline {
-  // Guard: a fatal cause is present while still pre-downstream (before any artifact write)
-  some ActiveAbort
-  PipelineState.currentPhase in (Idle + Merging)
-  // Effect: terminal Aborted state; record causes; no processed or solver-submitted caps
-  PipelineState.currentPhase' = Aborted
-  PipelineState.abortCause' = ActiveAbort
-  no PipelineState.processedCaps'
-  no PipelineState.solverSubmitted'
-  PipelineState.mergeComplete' = PipelineState.mergeComplete
-}
-
-// Stuttering (no progress)
-pred stutter {
-  PipelineState.currentPhase' = PipelineState.currentPhase
-  PipelineState.processedCaps' = PipelineState.processedCaps
-  PipelineState.mergeComplete' = PipelineState.mergeComplete
-  PipelineState.solverSubmitted' = PipelineState.solverSubmitted
-  PipelineState.abortCause' = PipelineState.abortCause
-}
-
-// Transition system
-fact transitions {
-  init_state and always (
-    start_merge
-    or complete_merge_phase
-    or process_all_claims
-    or process_all_coverage
-    or process_all_logic
-    or abort_pipeline
-    or stutter
-  )
-}
-
-// --- Liveness property ---
-
-// Fairness: if a transition is always eventually enabled, it eventually fires
-pred fairness {
-  // If idle, start_merge fires
-  (eventually always (PipelineState.currentPhase = Idle))
-    implies (always eventually start_merge)
-  // If merge is complete, downstream processing fires
-  (eventually always (PipelineState.currentPhase = Merging
-                      and PipelineState.mergeComplete = MergedCapability))
-    implies (always eventually complete_merge_phase)
-  // Downstream batch phases eventually fire
-  (eventually always (PipelineState.currentPhase = ClaimExtraction))
-    implies (always eventually process_all_claims)
-  (eventually always (PipelineState.currentPhase = CoverageAnalysis))
-    implies (always eventually process_all_coverage)
-  (eventually always (PipelineState.currentPhase = LogicAnalysis))
-    implies (always eventually process_all_logic)
-  // If a fatal cause is pending while still abortable, the abort eventually fires
-  (eventually always (some ActiveAbort
-                      and PipelineState.currentPhase in (Idle + Merging)))
-    implies (always eventually abort_pipeline)
-}
-
-// Liveness: every non-empty merged capability eventually reaches Complete phase
-// (guarded on the no-fatal-abort premise: a pending abort legitimately diverts
-// the pipeline to the terminal Aborted phase instead of Complete)
-assert all_nonempty_caps_reach_downstream {
-  (fairness and no ActiveAbort) implies
-    (some MergedCapability implies eventually PipelineState.currentPhase = Complete)
-}
-
-// Liveness: no non-empty capability is silently omitted
-assert no_silent_omission {
-  fairness implies always (
-    PipelineState.currentPhase = ClaimExtraction implies
-      (all mc : MergedCapability |
-        some mc.mergedReqs implies mc in PipelineState.processedCaps)
-  )
-}
-
-// Safety: empty capabilities never reach downstream processing
-assert empty_never_processed {
-  always (all mc : MergedCapability |
-    no mc.mergedReqs implies mc not in PipelineState.processedCaps)
-}
-
-// Safety: each non-empty cap is processed exactly once (no double-processing)
-assert exactly_once_processing {
-  always (all mc : PipelineState.processedCaps |
-    one mc2 : PipelineState.processedCaps | mc2.cap = mc.cap)
-}
-
-// Safety: precondition violation is structurally impossible
-// (fact atMostOneDelta prevents >1 delta; if violated, no valid instance exists)
-assert precondition_structurally_enforced {
-  all c : Capability | lone c.delta
-}
-
-// Safety: an aborted pipeline stays aborted (fatal abort, no recovery/fallback)
-assert abort_is_terminal {
-  always (PipelineState.currentPhase = Aborted
-    implies always PipelineState.currentPhase = Aborted)
-}
-
-// Safety: an aborted pipeline emits no downstream work (no partial artifacts)
-assert abort_produces_no_downstream {
-  always (PipelineState.currentPhase = Aborted implies
-    (no PipelineState.processedCaps and no PipelineState.solverSubmitted))
-}
-
-// Safety: reaching Complete implies no sanitized artifact-key collision occurred
-// (a structural key collision activates ArtifactKeyCollision, which forces an
-// abort before complete_merge_phase -- and thus Complete -- is ever reachable)
-assert complete_implies_no_key_collision {
-  always (PipelineState.currentPhase = Complete implies
-    (no disj mc1, mc2 : MergedCapability | mc1.sanitizedKey = mc2.sanitizedKey))
-}
-
-// Safety: every group submitted to the solver passed claim-ID preflight
-assert solver_groups_are_claim_id_valid {
-  always (all mc : PipelineState.solverSubmitted | claimGroupValid[mc])
-}
-
-// Safety: solver-submitted groups are always a subset of the caps processed downstream
-assert solver_subset_of_processed {
-  always (PipelineState.solverSubmitted in PipelineState.processedCaps)
-}
-
-// Liveness: a pending fatal cause always eventually drives the pipeline to Aborted
-assert fatal_cause_eventually_aborts {
-  (fairness and some ActiveAbort)
-    implies eventually PipelineState.currentPhase = Aborted
-}
-
-check all_nonempty_caps_reach_downstream for 3 but 15 steps expect 0
-check no_silent_omission for 3 but 15 steps expect 0
-check empty_never_processed for 4 but 10 steps expect 0
-check exactly_once_processing for 4 but 10 steps expect 0
-check precondition_structurally_enforced for 6 expect 0
-check abort_is_terminal for 4 but 10 steps expect 0
-check abort_produces_no_downstream for 4 but 10 steps expect 0
-check complete_implies_no_key_collision for 4 but 10 steps expect 0
-check solver_groups_are_claim_id_valid for 4 but 10 steps expect 0
-check solver_subset_of_processed for 4 but 10 steps expect 0
-check fatal_cause_eventually_aborts for 3 but 12 steps expect 0
-
-// Scenario: non-empty capability reaches Complete phase
-run liveness_scenario {
-  no ActiveAbort
-  some mc : MergedCapability |
-    some mc.mergedReqs
-    and eventually (PipelineState.currentPhase = Complete
-                    and mc in PipelineState.processedCaps)
-} for 2 but 10 steps expect 1
-
-// Scenario: pipeline with empty capability skips it
-run empty_cap_skipped_scenario {
-  no ActiveAbort
-  some mc : MergedCapability |
-    no mc.mergedReqs
-    and eventually (PipelineState.currentPhase = Complete)
-    and always (mc not in PipelineState.processedCaps)
-} for 3 but 12 steps expect 1
-
-// Scenario: a pending fatal cause aborts the pipeline into the terminal state
-run abort_scenario {
-  some ActiveAbort
-  eventually PipelineState.currentPhase = Aborted
-} for 3 but 10 steps expect 1
-
-// Scenario: a sanitized artifact-key collision drives a fatal abort
-run key_collision_aborts_scenario {
-  some disj mc1, mc2 : MergedCapability | mc1.sanitizedKey = mc2.sanitizedKey
-  eventually PipelineState.currentPhase = Aborted
-} for 4 but 10 steps expect 1
-
-// Sanity: the transition system is satisfiable
-run pipeline_sanity {} for 3 but 10 steps expect 1
+// Safety: entry-point faults prevent every downstream submission.
+assert abort_no_work { execution implies always (Run.stage = Aborted implies no Run.extracted + Run.solverSubmitted) }
 ```
 
 ### Requirement: Shared Logical-File Grouping Authority [MCA-GROUP-KEY]
@@ -1598,95 +591,6 @@ THE spec-check tool SHALL treat merged capability logical-file keys as the share
 - `openspec/changes/semantic-batching/proposal.md#Domain Model`
 - `openspec/changes/semantic-batching/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/semantic-batching/design.md#Component Descriptions`
-
-#### Requirement model
-
-```alloy
-// --- Shared logical-file grouping authority (MCA-GROUP-KEY) ---
-// Builds on the existing module: MergedCapability, Claim, LogicalKey.
-// The logical-file map is the shared grouping authority. Every provided merged
-// capability maps to its non-empty logical file; the synthetic key
-// <merged-spec/{capability}> is the deterministic fallback when unmapped.
-// Non-empty logicalFile string validation remains a contract-test obligation
-// outside this model.
-
-// A merged capability "provides" content iff it has requirements or scenarios.
-pred hasRequirements [mc : MergedCapability] { some mc.mergedReqs }
-pred hasScenarios    [mc : MergedCapability] { some mc.mergedScenarios }
-
-// The grouping map: each provided (active) capability -> its logical key.
-// Every MergedCapability already carries exactly one logicalKey
-// (uniqueLogicalKeys), so the map is total over the active set and injective by
-// construction. Capability uniqueness follows from the merge layer's
-// capabilityOrder first-occurrence deduplication (oneViewPerCapability +
-// uniqueLogicalKeys), and is not re-enforced here.
-fun groupingMap : MergedCapability -> LogicalKey {
-  { mc : MergedCapability, k : LogicalKey |
-    mc in activeForGrouping and k = mc.logicalKey }
-}
-
-// Capabilities carrying a map entry.
-fun mappedCaps : set MergedCapability { groupingMap.LogicalKey }
-
-// [MCA-GROUP-KEY-COMPLETE] The map covers exactly the active-for-grouping caps.
-pred mapCoversActiveSpecs {
-  mappedCaps = activeForGrouping
-}
-
-// [MCA-GROUP-KEY-SCEN] Scenario-only specs (some scenario, no requirement)
-// still contribute a map entry. Defensive: unreachable in today's domain, where
-// merged scenarios derive only from surviving requirement blocks
-// (see mergedScenariosFromReqs).
-pred scenarioOnlySpecsMapped {
-  all mc : MergedCapability |
-    (some mc.mergedScenarios and no mc.mergedReqs) implies mc in mappedCaps
-}
-
-// Today's merge domain: a merged scenario cannot exist without its parent
-// requirement, so scenario presence implies requirement presence. Stated as a
-// predicate so each check names the condition it depends on. This holds
-// structurally here (base fact mergedScenariosFromReqs makes scenario-only
-// merged capabilities unreachable), so scenarioOnlySpecsMapped is VACUOUSLY
-// true under today's domain.
-pred scenariosImplyRequirements {
-  all mc : MergedCapability | some mc.mergedScenarios implies some mc.mergedReqs
-}
-
-// A future domain that admits standalone scenario claims (scenario-only merged
-// capabilities). Named so the scenario-only property below is shown to hold
-// even THERE, not merely vacuously here.
-pred standaloneScenariosAdmitted {
-  some mc : MergedCapability | some mc.mergedScenarios and no mc.mergedReqs
-}
-
-// [MCA-GROUP-KEY-COMPLETE] No provided capability is silently omitted from the map.
-assert every_active_capability_mapped {
-  mapCoversActiveSpecs implies (all mc : activeForGrouping | mc in mappedCaps)
-}
-
-// [MCA-GROUP-KEY-SCEN] Scenario-only specs are still mapped whenever the map
-// covers active specs. HONEST SCOPE NOTE: in this capability's module the base
-// fact mergedScenariosFromReqs makes scenario-only merged capabilities
-// unreachable (standaloneScenariosAdmitted is UNSAT here), so scenarioOnlySpecsMapped
-// is vacuously true and this check cannot expose a violation of the scenario-only
-// rule itself. It is retained as the domain-independent statement of the rule;
-// the rule is exercised non-vacuously in the formalization-and-logic-analysis
-// module (BuiltMap layer), whose domain admits standalone scenarios. The
-// mapCoversActiveSpecs antecedent IS satisfiable here (mapCovers_reachable
-// witness), so the implication is not vacuous on its left side.
-assert scenario_only_mapped_under_coverage {
-  mapCoversActiveSpecs implies scenarioOnlySpecsMapped
-}
-
-check every_active_capability_mapped for 6 expect 0
-check scenario_only_mapped_under_coverage for 6 expect 0
-
-// Non-vacuity: map coverage is reachable with a non-empty active set, so the
-// two checks above are not vacuous on their antecedent.
-run mapCovers_reachable {
-  mapCoversActiveSpecs and some activeForGrouping
-} for 4 expect 1
-```
 
 #### Scenario: Scenario-Only Spec Contributes Map Entry [MCA-GROUP-KEY-SCEN]
 WHEN a merged capability spec contains at least one scenario and no requirements (a defensive case that is unreachable in the current merge domain model), THE spec-check tool SHALL include that capability in the logical-file map used for grouping.
@@ -1703,7 +607,7 @@ IF a merged capability spec supplied to the map builder has an empty `logicalFil
 **Postcondition:** Empty logical-file values never silently enter the grouping map.
 
 ##### Evidence
-- Implementation: [grouping.ts:136 buildLogicalFileByCapability()](/src/domain/formal/grouping.ts#L136), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Implementation: [grouping.ts:136 buildLogicalFileByCapability()](/src/domain/formal/grouping.ts#L136), [run-cli.ts:546 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L546)
 - Test: [semantic-grouping.test.ts:87 returns every empty logical-file value as validation data](/test/contract/semantic-grouping.test.ts#L87)
 
 #### Scenario: Every Provided Capability Mapped [MCA-GROUP-KEY-COMPLETE]
@@ -1712,8 +616,16 @@ WHEN the map builder receives a set of merged capability specs, THE resulting ma
 **Postcondition:** No provided capability is silently omitted from the map.
 
 ##### Evidence
-- Implementation: [grouping.ts:136 buildLogicalFileByCapability()](/src/domain/formal/grouping.ts#L136), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Implementation: [grouping.ts:136 buildLogicalFileByCapability()](/src/domain/formal/grouping.ts#L136), [run-cli.ts:546 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L546)
 - Test: [semantic-grouping.test.ts:68 maps every supplied capability without normalizing logical files](/test/contract/semantic-grouping.test.ts#L68)
+
+#### Requirement model
+
+```alloy
+fun grouping_map : Capability -> LogicalKey { { c : active_caps, k : LogicalKey | k = c.logicalFile } }
+// Safety: provided active capabilities have exactly their original logical key.
+assert grouping_complete { execution implies always (grouping_map.LogicalKey = active_caps) }
+```
 
 ### Requirement: Active Merged Specs For Grouping [MCA-ACTIVE-SPECS]
 WHEN the spec-check tool selects merged specs for grouping-map construction, THE spec-check tool SHALL include a merged spec when it has at least one requirement or at least one scenario, and SHALL express this filtering in a dedicated, explicitly named helper rather than hiding it inside the map builder. This helper is used only for grouping-map construction; it SHALL NOT replace the claim-graph or solver-input activity filters (at least one requirement), so the grouping map can only be broader than the set of specs that contribute claims — never narrower. The scenarios clause is defensive: unreachable under the current merge domain model. If standalone scenario claims are ever admitted, this clause becomes load-bearing and the claim-graph activity filter must be broadened in the same change.
@@ -1723,74 +635,13 @@ WHEN the spec-check tool selects merged specs for grouping-map construction, THE
 - `openspec/changes/semantic-batching/design.md#Component Descriptions`
 - `openspec/changes/semantic-batching/design.md#Interaction Protocols`
 
-#### Requirement model
-
-```alloy
-// --- Active merged specs for grouping (MCA-ACTIVE-SPECS) ---
-// The grouping-map activity filter is broader (requirement OR scenario) than the
-// unchanged solver-input filter (requirement only), so the grouping map can only
-// be broader than the set of specs that contribute claims -- never narrower.
-
-// [MCA-ACTIVE-SPECS] Active for grouping: at least one requirement OR scenario.
-// The scenarios clause is defensive -- unreachable under the current merge domain
-// model; it becomes load-bearing only if standalone scenario claims are admitted.
-fun activeForGrouping : set MergedCapability {
-  { mc : MergedCapability | some mc.mergedReqs or some mc.mergedScenarios }
-}
-
-// Solver-input activity filter (unchanged): requirements only.
-fun activeForSolverInput : set MergedCapability {
-  { mc : MergedCapability | some mc.mergedReqs }
-}
-
-// The grouping map can only be broader than the solver-input set, never narrower.
-pred groupingMapCoversSolverInputs {
-  activeForSolverInput in mappedCaps
-}
-
-// [MCA-ACTIVE-EMPTY] Empty specs (no req, no scenario) contribute no entry.
-pred emptySpecsExcluded {
-  all mc : MergedCapability |
-    (no mc.mergedReqs and no mc.mergedScenarios) implies mc not in mappedCaps
-}
-
-// [MCA-ACTIVE-SPECS] The grouping map is never narrower than the solver-input set.
-assert grouping_never_narrower_than_solver {
-  mapCoversActiveSpecs implies groupingMapCoversSolverInputs
-}
-
-// [MCA-ACTIVE-EMPTY] Vacuous specs never enter the grouping map.
-assert vacuous_specs_never_mapped {
-  emptySpecsExcluded implies
-    (no mc : MergedCapability |
-      no mc.mergedReqs and no mc.mergedScenarios and mc in mappedCaps)
-}
-
-check grouping_never_narrower_than_solver for 6 expect 0
-check vacuous_specs_never_mapped for 6 expect 0
-
-// Scenario: a requirement-bearing capability is active and mapped [MCA-ACTIVE-REQ].
-run active_requirement_scenario {
-  some mc : MergedCapability | some mc.mergedReqs and mc in mappedCaps
-} for 4 expect 1
-
-// Scenario: an empty capability is excluded while a non-empty one is mapped
-// [MCA-ACTIVE-EMPTY], demonstrating selective coverage.
-run empty_excluded_scenario {
-  mapCoversActiveSpecs
-  some mc1 : MergedCapability |
-    no mc1.mergedReqs and no mc1.mergedScenarios and mc1 not in mappedCaps
-  some mc2 : MergedCapability | some mc2.mergedReqs and mc2 in mappedCaps
-} for 4 expect 1
-```
-
 #### Scenario: Requirement-Bearing Spec Is Active [MCA-ACTIVE-REQ]
 WHEN a merged spec has at least one requirement, THE spec-check tool SHALL treat it as active for grouping.
 
 **Postcondition:** The spec is included in grouping-map construction.
 
 ##### Evidence
-- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [run-cli.ts:546 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L546)
 - Test: [semantic-grouping.test.ts:56 selects requirement and defensive scenario-only specs in input order](/test/contract/semantic-grouping.test.ts#L56)
 - Test (integration): [semantic-batching.integration.test.ts:173 aligns merged grouping, provenance, bounds, prompt, cleanup, and evidence](/test/integration/semantic-batching.integration.test.ts#L173)
 
@@ -1800,7 +651,7 @@ WHEN a merged spec has at least one scenario and no requirements (a defensive ca
 **Postcondition:** Scenario-only capabilities keep their semantic grouping key.
 
 ##### Evidence
-- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [run-cli.ts:546 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L546)
 - Test: [semantic-grouping.test.ts:56 selects requirement and defensive scenario-only specs in input order](/test/contract/semantic-grouping.test.ts#L56)
 
 #### Scenario: Empty Spec Is Inactive [MCA-ACTIVE-EMPTY]
@@ -1809,8 +660,17 @@ WHEN a merged spec has zero requirements and zero scenarios, THE spec-check tool
 **Postcondition:** Vacuous specs contribute no grouping entries.
 
 ##### Evidence
-- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [run-cli.ts:546 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L546)
 - Test: [semantic-grouping.test.ts:56 selects requirement and defensive scenario-only specs in input order](/test/contract/semantic-grouping.test.ts#L56)
+
+#### Requirement model
+
+```alloy
+// Today's merge output has scenarios only through surviving requirement blocks.
+fun grouping_active : set Capability { Run.working.cap + active_scenarios.parent.cap }
+// Safety: the grouping filter is never narrower than requirement-bearing output.
+assert grouping_never_narrower { execution implies always (active_caps in grouping_active) }
+```
 
 ### Requirement: Solver Grouping Calls Shared Key Helper [MCA-SOLVER-SHARED-KEY]
 WHEN the spec-check tool groups claims for solver analysis, THE solver grouping path SHALL obtain each claim's grouping key from the same shared semantic key helper used by formalization grouping, SHALL NOT duplicate capability fallback logic locally, SHALL consume the same logical-file map instance that the pipeline constructs once and passes to both phases, and SHALL perform any solver-specific claim filtering before grouping and document that filtering independently of the key function.
@@ -1819,114 +679,16 @@ WHEN the spec-check tool groups claims for solver analysis, THE solver grouping 
 - `openspec/changes/semantic-batching/proposal.md#Scope`
 - `openspec/changes/semantic-batching/design.md#Interaction Protocols`
 
-#### Requirement model
-
-```alloy
-// --- Solver grouping calls the shared key helper (MCA-SOLVER-SHARED-KEY) ---
-// One shared semantic key helper serves both solver grouping and formalization
-// grouping. The capability fallback rule (mapped logicalFile, else the synthetic
-// <merged-spec/{capability}> key) exists in exactly one place, so the two phases
-// cannot drift. Pipeline map-instance identity and solver-specific filtering order
-// remain implementation and test obligations outside this model.
-
-// One key space: a mapped logical key, or the synthetic per-capability fallback.
-sig SyntheticKey { synthCap : one MergedCapability }
-fact synthKeyPerCap {
-  all disj s1, s2 : SyntheticKey | s1.synthCap != s2.synthCap
-  all mc : MergedCapability | one s : SyntheticKey | s.synthCap = mc
-}
-
-// The single authoritative fallback rule [MCA-SOLVER-NODUP]: mapped logicalKey
-// when the capability is active/mapped, else the synthetic <merged-spec/{cap}> key.
-fun semanticKeyOf [mc : MergedCapability] : LogicalKey + SyntheticKey {
-  (mc in mappedCaps implies mc.logicalKey
-   else { s : SyntheticKey | s.synthCap = mc })
-}
-
-// A claim's grouping key = the semantic key of its compile-group capability.
-// Both solver grouping and formalization grouping obtain the key from this helper.
-fun claimKey [c : Claim] : LogicalKey + SyntheticKey {
-  semanticKeyOf[c.claimCap]
-}
-
-// [MCA-SOLVER-NODUP] Parity: claims with equal grouping keys co-group. Because
-// both phases call this one helper, they cannot diverge (no key drift).
-pred parityBySharedKey {
-  all disj c1, c2 : Claim |
-    claimKey[c1] = claimKey[c2] implies c1.claimCap = c2.claimCap
-}
-
-// [MCA-SOLVER-FILTER-FIRST] The key helper is policy-free, total, and
-// deterministic: every claim gets exactly one key regardless of solver-specific
-// filtering, which is applied before grouping and never encoded in the helper.
-pred keyHelperTotal {
-  all c : Claim | one claimKey[c]
-}
-
-// [MCA-SOLVER-NODUP] Shared-key parity: equal keys imply the same compile group.
-assert shared_key_parity {
-  parityBySharedKey
-}
-
-// [MCA-SOLVER-FILTER-FIRST] The key helper is total and deterministic.
-assert key_helper_deterministic {
-  keyHelperTotal
-}
-
-// Safety: the semantic key reflects exactly whether the capability was mapped.
-// LogicalKey and SyntheticKey are disjoint sigs, so a mapped-keyed capability
-// can never collide with a fallback-keyed one. Stated over semanticKeyOf at the
-// CAPABILITY level, where BOTH branches are live (an inactive/empty merged
-// capability -- some mc not in mappedCaps -- exercises the synthetic fallback).
-assert fallback_distinct_from_logical {
-  all mc : MergedCapability |
-    (mc in mappedCaps implies semanticKeyOf[mc] in LogicalKey)
-    and (mc not in mappedCaps implies semanticKeyOf[mc] in SyntheticKey)
-}
-
-// Note on claim-level reachability: the base fact `claimProvenance`
-// (c.derivedFrom in c.claimCap.mergedReqs) forces every claim's capability to
-// carry requirements, hence to be active/mapped. So `claimKey` only ever
-// resolves to a LogicalKey in this module; the synthetic branch is unreachable
-// FOR CLAIMS here even though it is the authoritative rule the pipeline shares
-// with formalization grouping. The fallback is therefore verified at the
-// capability level (assert above + synthetic_fallback_scenario witness), not via
-// claimKey. claim_key_always_logical records the claim-level consequence.
-assert claim_key_always_logical {
-  all c : Claim | claimKey[c] in LogicalKey
-}
-
-check shared_key_parity for 6 expect 0
-check key_helper_deterministic for 6 expect 0
-check fallback_distinct_from_logical for 6 expect 0
-check claim_key_always_logical for 6 expect 0
-
-// Scenario: two claims in the same group share one key (parity witness)
-// [MCA-SOLVER-NODUP].
-run shared_key_scenario {
-  some disj c1, c2 : Claim |
-    c1.claimCap = c2.claimCap and claimKey[c1] = claimKey[c2]
-} for 4 expect 1
-
-// Non-vacuity: the synthetic fallback is reachable at the capability level --
-// an inactive/empty merged capability keys to its <merged-spec/{cap}> synthetic
-// key, distinct from any logical key [MCA-SOLVER-NODUP].
-run synthetic_fallback_scenario {
-  some mc : MergedCapability |
-    mc not in mappedCaps and semanticKeyOf[mc] in SyntheticKey
-} for 6 expect 1
-```
-
 #### Scenario: No Duplicated Fallback Logic [MCA-SOLVER-NODUP]
 WHEN solver grouping computes a claim's grouping key, THE key SHALL be produced by the shared helper so that the capability fallback rule (mapped `logicalFile`, else `<merged-spec/{capability}>`) exists in exactly one place.
 
 **Postcondition:** The capability fallback rule has a single authoritative implementation.
 
 ##### Evidence
-- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [pipeline-helpers.ts:356 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L356), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365), [run-cli.ts:546 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L546)
 - Test: [semantic-grouping.test.ts:112 selects mapped, provenance, and synthetic fallback keys exactly](/test/contract/semantic-grouping.test.ts#L112)
 - Test (property): [semantic-batching.property.test.ts:179 matches solver grouping after the same explicit filtering](/test/property/semantic-batching.property.test.ts#L179)
-- Test (integration): [merge-liveness.integration.test.ts:199 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L199)
+- Test (integration): [merge-liveness.integration.test.ts:135 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L135)
 
 #### Scenario: Filtering Precedes Grouping [MCA-SOLVER-FILTER-FIRST]
 WHEN solver analysis excludes claims (for example, non-spec claims), THE spec-check tool SHALL apply those exclusions before grouping and SHALL NOT encode solver-specific policy inside the shared key helper.
@@ -1934,6 +696,221 @@ WHEN solver analysis excludes claims (for example, non-spec claims), THE spec-ch
 **Postcondition:** The key function remains policy-free and identical across phases.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:356 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L356), [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185)
+- Implementation: [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365), [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185)
 - Test: [pipeline-helpers.test.ts:218 excludes non-spec claims from capability-grouped logic path](/test/contract/pipeline-helpers.test.ts#L218)
 - Test (property): [semantic-batching.property.test.ts:179 matches solver grouping after the same explicit filtering](/test/property/semantic-batching.property.test.ts#L179)
+
+#### Requirement model
+
+```alloy
+fun key_for_claim[q : Claim] : one LogicalKey { q.block.cap.logicalFile }
+// Safety: logical grouping is independent of original file provenance.
+assert shared_key_parity { all a, b : Claim | a.block.cap = b.block.cap implies key_for_claim[a] = key_for_claim[b] }
+```
+
+### Requirement: Discover Concepts Only From Selected Active Content [MCA-CONCEPT-ACTIVE]
+WHEN concept discovery begins, THE spec-check tool SHALL provide only the selected merged capability statements and explicitly configured model context as authoritative discovery inputs.
+
+**References:**
+- [Design: Interaction Protocols](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#interaction-protocols)
+
+#### Scenario: Removed Or Replaced Statements Do Not Supply Concepts [MCA-CONCEPT-REMOVED]
+WHEN a requirement block is removed or replaced by merge operations, THE spec-check tool SHALL exclude its superseded statement text and nested scenarios from concept discovery and formal analysis while retaining ordinary merge provenance.
+
+##### Evidence
+- Implementation: [merge.ts:244 applyRemoved()](/src/domain/parser/merge.ts#L244), [merge.ts:296 applyModified()](/src/domain/parser/merge.ts#L296), [claim-graph.ts:253 extractMergedSpecClaims()](/src/domain/claim-graph.ts#L253), [source-formalize.ts:80 processGroup()](/src/domain/formal/source-formalize.ts#L80)
+- Test: [surface-claims.test.ts:15 modified payload replaces the original without rewriting provenance](/test/contract/surface-claims.test.ts#L15), [surface-claims.test.ts:64 ineligible content remains selected but removed blocks do not](/test/contract/surface-claims.test.ts#L64)
+- Test (integration): [merge-liveness.integration.test.ts:237 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L237)
+
+#### Scenario: Formal Ineligibility Does Not Delete Merge Content [MCA-CONCEPT-INELIGIBLE]
+WHEN a selected statement is formally ineligible, THE spec-check tool SHALL retain the selected merge content and its disposition instead of treating ineligibility as an implicit removal operation.
+
+##### Evidence
+- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [claim-graph.ts:275 claimFromRequirement()](/src/domain/claim-graph.ts#L275), [claim-graph.ts:298 claimFromScenario()](/src/domain/claim-graph.ts#L298), [grouping.ts:208 isFormalizableClaim()](/src/domain/formal/grouping.ts#L208)
+- Test: [surface-claims.test.ts:64 ineligible content remains selected but removed blocks do not](/test/contract/surface-claims.test.ts#L64), [surface-claims.test.ts:34 retains excluded source claims but assigns indexes after admission](/test/contract/surface-claims.test.ts#L34)
+
+#### Requirement model
+
+```alloy
+fun discovery_input : set Block { Run.stage in Handoff + Complete => { b : Run.working | b.formallyEligible = True } else none }
+fun discovery_scenario_input : set Scenario { Run.stage in Handoff + Complete => { s : active_scenarios | s.formallyEligible = True } else none }
+// Safety: formal ineligibility does not delete selected merge content.
+assert discovery_selected_only { execution implies always (discovery_input in Run.working and discovery_input.formallyEligible in True and
+  discovery_scenario_input in active_scenarios and discovery_scenario_input.formallyEligible in True) }
+// Safety: eligibility never changes merge selection or authorizes solver work
+// for an empty formal group; diagnostics still reach every nonempty capability.
+assert solver_submission_exact { execution implies always (Run.stage = Complete implies Run.solverSubmitted =
+  { c : active_caps | some compile_group[c] and claim_group_valid[c] }) }
+fun invalid_compile_groups : set Capability { { c : Run.analyzed | not claim_group_valid[c] } }
+```
+
+### State machine and invariant checks
+
+```alloy
+pred keep_merge {
+  Run.working' = Run.working
+  Run.handled' = Run.handled
+  Run.applied' = Run.applied
+  Run.rejected' = Run.rejected
+}
+pred keep_downstream {
+  Run.extracted' = Run.extracted
+  Run.covered' = Run.covered
+  Run.analyzed' = Run.analyzed
+  Run.solverSubmitted' = Run.solverSubmitted
+}
+pred init {
+  Run.stage = Idle
+  no Run.rejected
+  no Run.working + Run.handled + Run.applied +
+    Run.extracted + Run.covered + Run.analyzed + Run.solverSubmitted
+}
+pred stutter { Run.stage' = Run.stage and keep_merge and keep_downstream }
+// One-step relation is usable independently of initialization for preservation.
+pred next_step {
+  start_merge or abort or advance_merge or finish or
+    (some b : Block | apply_next[b]) or (some c : Capability | handoff[c]) or stutter
+}
+// Opt-in execution semantics: assertions/runs about reachable behavior name this
+// predicate explicitly. Structural source/ownership facts remain globally valid.
+pred execution { init and always next_step }
+pred fairness {
+  always (Run.stage = Idle implies eventually (start_merge or abort))
+  all b : Block | always (b in pending and no earlier[b] & pending implies eventually apply_next[b])
+  always (Run.stage in RemoveStage + ModifyStage + AddStage and no pending implies eventually advance_merge)
+  all c : Capability | always (Run.stage = Handoff and c in active_caps - Run.extracted implies eventually handoff[c])
+  always (Run.stage = Handoff and Run.extracted = active_caps implies eventually finish)
+}
+// Liveness: finite selected input drains under action-level service fairness.
+assert eventually_terminal { execution and fairness implies eventually Run.stage in Complete + Aborted }
+// Safety: completion accounts for every selected instruction and active capability.
+assert completion_total { execution implies always (Run.stage = Complete implies Run.handled = Block and Run.extracted = active_caps) }
+// Safety: the complete/aborted workflow admits only framed stuttering.
+assert terminal_stable { execution implies always (Run.stage in Complete + Aborted implies Run.stage' = Run.stage and Run.working' = Run.working) }
+run clean_completion { execution and fairness and some Block and eventually Run.stage = Complete } for 4 but 20 steps expect 1
+run three_operation_completion {
+  execution
+  (some b : Block | b.op = Removed) and (some b : Block | b.op = Modified) and (some b : Block | b.op = Added)
+  eventually (Run.stage = Complete and (Removed + Modified + Added) in Run.applied.op)
+} for 6 but 3 Identifier, 24 steps expect 1
+run fresh_replacement_scenario {
+  execution
+  some b : Block | b.op = Modified and some b.scenarios and
+    (some old : authoritative_base | old.cap = b.cap and old.identifier = b.identifier and some old.scenarios) and
+    no b.scenarios.identifier & bases.scenarios.identifier and eventually b in Run.applied
+  eventually Run.stage = Complete
+} for 4 but 20 steps expect 1
+run collision_rolls_back {
+  execution
+  eventually (some b : Block | b.op = Modified and apply_next[b] and failure[b] = Collision and some targets[b])
+  eventually Run.stage = Complete
+} for 5 but 20 steps expect 1
+run duplicate_base_authority {
+  execution
+  Block = bases
+  some b : bases | later_base_duplicate[b]
+  eventually Run.stage = Complete
+} for 4 but 20 steps expect 1
+run duplicate_delta_group {
+  execution
+  some disj a, b : Block | delta_duplicate[a] and delta_duplicate[b]
+  eventually Run.stage = Complete
+} for 4 but 20 steps expect 1
+run mixed_capability_handoff {
+  execution
+  eventually (Run.stage = Complete and #active_caps = 2 and some empty_caps)
+} for 4 but exactly 3 Capability, 20 steps expect 1
+run input_precondition_abort { execution
+  some c : Capability | #c.selectedDeltas > 1
+  eventually Run.stage = Aborted } for 3 but 4 steps expect 1
+run key_collision_abort { execution
+  some disj c, d : Capability | c.logicalFile.sanitized = d.logicalFile.sanitized
+  eventually Run.stage = Aborted } for 3 but 4 steps expect 1
+run empty_finalized_skip { execution and no Block and eventually (Run.stage = Complete and some empty_skip_findings) } for 3 but exactly 0 Block, 12 steps expect 1
+run ineligible_selected_content {
+  execution
+  some b : Block | b.op = Base and b.formallyEligible = False and
+    eventually (Run.stage = Complete and b in Run.working and b not in discovery_input)
+} for 3 but 14 steps expect 1
+run compile_identity_rejected {
+  execution
+  some disj a,b : Claim | a.block.cap = b.block.cap and a.rawLabel = b.rawLabel and
+    a.block.formallyEligible = True and b.block.formallyEligible = True and
+    eventually (Run.stage = Complete and a.block + b.block in Run.working and a.block.cap in invalid_compile_groups)
+} for 3 but 2 Claim, 16 steps expect 1
+run both_sources_preserved {
+  execution
+  some disj a,b : Block | a.cap = b.cap and a.op = Base and b.op = Added and a.file != b.file and
+    eventually (Run.stage = Complete and a + b in Run.working)
+} for 3 but 16 steps expect 1
+run source_ordered_scenario_swap_rejected {
+  execution
+  some disj a,b : bases, disj x,y : Block | {
+    a.cap = b.cap and x.cap = a.cap and y.cap = a.cap
+    x.op = Modified and y.op = Modified
+    some a.identifier and some b.identifier and a.identifier != b.identifier
+    x.identifier = a.identifier and y.identifier = b.identifier
+    one a.scenarios and one b.scenarios and one x.scenarios and one y.scenarios
+    some a.scenarios.identifier and some b.scenarios.identifier
+    a.scenarios.identifier != b.scenarios.identifier
+    x.scenarios.identifier = b.scenarios.identifier
+    y.scenarios.identifier = a.scenarios.identifier
+    eventually (Run.stage = Complete and x.(Run.rejected) = Collision and y.(Run.rejected) = Collision and a + b in Run.working)
+  }
+} for 4 but 1 Capability, 1 LogicalKey, 1 ArtifactKey, 4 Scenario, 0 Claim, 20 steps expect 1
+run eligible_scenario_under_ineligible_parent {
+  execution
+  some b : Block, s : b.scenarios | b.op = Base and b.formallyEligible = False and s.formallyEligible = True and
+    eventually (Run.stage = Complete and b in Run.working and s in discovery_scenario_input)
+} for 3 but 14 steps expect 1
+check finalized_only_passthrough for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 20 steps expect 0
+check delta_only_additive for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 20 steps expect 0
+check modification_atomicity for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 20 steps expect 0
+// Primary namespace verification: independent base and step, with the original
+// six-block/four-scenario structural budgets and only one/two temporal states.
+check namespace_initialization for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 1 steps expect 0
+check namespace_preservation for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 2 steps expect 0
+check scenario_namespace_initialization for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 1 steps expect 0
+check scenario_namespace_preservation for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 2 steps expect 0
+// Six-state prefix regressions supplement induction and the full-length witnesses.
+// Their purpose is execution wiring, not a second long-horizon invariant proof.
+check namespaces_unique for 4 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 6 steps expect 0
+check every_skip_has_finding for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 20 steps expect 0
+check unsupported_never_active for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 20 steps expect 0
+check provenance_preserved for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 20 steps expect 0
+check output_ordered for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 20 steps expect 0
+check downstream_exact for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 20 steps expect 0
+check abort_no_work for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 20 steps expect 0
+check grouping_complete for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 20 steps expect 0
+check grouping_never_narrower for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 20 steps expect 0
+check shared_key_parity for 6 but 1 steps expect 0
+check discovery_selected_only for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 20 steps expect 0
+check eventually_terminal for 4 but 24 steps expect 0
+check completion_total for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 20 steps expect 0
+check terminal_stable for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 20 steps expect 0
+check merge_instruction_choice_unique for 6 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 20 steps expect 0
+check solver_submission_exact for 4 but 2 Capability, 3 Claim, 4 Block, 20 steps expect 0
+check valid_scenario_namespaces_preserved for 4 but 2 Capability, 2 LogicalKey, 2 ArtifactKey, 3 Identifier, 4 Scenario, 2 SourceFile, 1 Payload, 0 Claim, 2 DeltaFile, 6 steps expect 0
+// Nonvacuity controls deliberately omit execution. They would become UNSAT if a
+// global initialization/behavior fact accidentally constrained induction again.
+run induction_exercises_noninitial_modification {
+  namespace_inv
+  scenario_input_namespace_valid
+  scenario_namespace_inv
+  Run.stage = ModifyStage
+  Run.working.op = Base
+  some Run.working.scenarios
+  some b : Block | apply_next[b] and b.op = Modified and some b.scenarios and no failure[b]
+} for 4 but 2 Capability, 3 Identifier, 4 Scenario, 0 Claim, 2 steps expect 1
+run namespace_violation_is_representable {
+  not namespace_inv
+} for 4 but 2 Capability, 3 Identifier, 4 Scenario, 0 Claim, 1 steps expect 1
+run scenario_violation_is_representable {
+  scenario_input_namespace_valid
+  not scenario_namespace_inv
+} for 4 but 2 Capability, 3 Identifier, 4 Scenario, 0 Claim, 1 steps expect 1
+```
+
+**Verification boundary:** Namespace initialization and preservation are checked independently of `execution`, over arbitrary states within the listed structural scopes; they are not short initialized traces presented as induction. Full scenario uniqueness retains its explicit source-validity premise. Smaller temporal regressions and full execution witnesses supplement these checks. All commands use explicit finite scopes. Concrete byte/order preservation and external-process deadlines require the referenced contract/property and integration tests. Passing bounded checks does not prove natural-language fidelity or production refinement.
+
+**Bounded verification (2026-11-16):** Alloy 6.2.0, using its default SAT solver with no solver override, found instances for all 18 execution/control witnesses and no counterexamples for all 24 assertion checks in the complete merge suite. This includes all four independent namespace initialization/preservation checks, both six-state execution regressions, and the non-initial modification and representable-invalid-state controls. The induction checks retain the six-block/four-scenario structural budgets listed above; these results do not extend the checked object scopes or establish production refinement.

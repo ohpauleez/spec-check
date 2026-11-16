@@ -37,7 +37,16 @@ import {
   runCodeBackwardsWork,
 } from "./pipeline-helpers.js";
 import { activeMergedSpecsForGrouping, buildLogicalFileByCapability, isFormalizableClaim } from "../domain/formal/grouping.js";
-import { removeOutputTemporaryFiles, removeOutputTree } from "../adapters/fs.js";
+import { removeOutputTemporaryFiles, removeOutputTree, writeOutputAtomic } from "../adapters/fs.js";
+import { EvidenceRecorder, EvidencePersistenceError, EvidenceBudgetError, type SemanticEvidenceFile } from "../domain/formal/evidence.js";
+import { DEFAULT_ANALYSIS } from "../domain/formal/analysis-config.js";
+import { QueryExecutor, summarizeQueryLedger } from "../domain/formal/query-executor.js";
+import { collectCoreArtifacts, reconcileSemanticEvidence } from "../adapters/core-artifacts.js";
+import { semanticRuntimeIdentity } from "../adapters/semantic-identity.js";
+import { PREDICATE_PROMPT } from "../adapters/predicate-formalization.js";
+import { contentHash } from "../domain/formal/concepts.js";
+import { createHash } from "node:crypto";
+import { CONCEPT_DISCOVERY_PROMPT } from "../adapters/concept-discovery.js";
 import {
   FORMALIZATION_EVIDENCE_DIRECTORY,
   buildFormalizationAttemptSet,
@@ -184,14 +193,24 @@ async function runCliPipeline(config: RunConfig, telemetryEnabled: boolean): Pro
   // Phases 1-3: dependency check, catalog build, document parsing.
   const ingestion = await runIngestionPhases(config);
 
-  return await runWithOpencodeRuntime(ingestion.runtime, async () => await runResolvedPhases(config, ingestion, telemetryEnabled));
+  try { return await runWithOpencodeRuntime(ingestion.runtime, async () => await runResolvedPhases(config, ingestion, telemetryEnabled)); }
+  catch (error: unknown) { if (error instanceof EvidencePersistenceError) throw new PipelineAbortError("OutputError", error.message); throw error; }
 }
 
 /** Execute model-backed phases under the immutable dependency-selected runtime. */
 async function runResolvedPhases(config: RunConfig, ingestion: IngestionResult, telemetryEnabled: boolean): Promise<RunState> {
+  const limits = (config.analysis ?? DEFAULT_ANALYSIS).limits;
+  const evidence = new EvidenceRecorder(limits.evidenceBytes, async (path, content) => await writeOutputAtomic(config.output, toRelativePath(path), content));
+  const executor = new QueryExecutor(limits, evidence, config.z3);
+  const ledgerBytes = Math.min(8_388_608, Math.max(1, Math.floor(limits.evidenceBytes / 8)));
+  evidence.reserve("run-ledger", ledgerBytes);
+  await evidence.json("run", "effective-config", { schemaVersion: 1, model: config.model, analysis: config.analysis ?? DEFAULT_ANALYSIS, semanticMode: "static", inputFiles: config.inputs,
+    configurationPath: config.configPath ?? null, configurationHash: contentHash(config.analysis ?? DEFAULT_ANALYSIS),
+    predicatePromptHash: createHash("sha256").update(PREDICATE_PROMPT, "utf8").digest("hex"), discoveryPromptHash: createHash("sha256").update(CONCEPT_DISCOVERY_PROMPT, "utf8").digest("hex"),
+    compiler: await semanticRuntimeIdentity(import.meta.url) });
 
   // Phases 4-8: claim graph, qualitative, formalization, clustering, logic.
-  const analysis = await runAnalysisPhases(config, ingestion);
+  const analysis = await runAnalysisPhases(config, ingestion, evidence, executor);
 
   // Phases 9-10: source traceability and code-backwards (only when --src provided).
   let state = analysis.state;
@@ -217,6 +236,8 @@ async function runResolvedPhases(config: RunConfig, ingestion: IngestionResult, 
       analysis.claimGraphResult,
       analysis.clusterResult.representatives,
       knownCapabilities,
+      evidence,
+      executor,
     );
     state = srcResult.state;
     srcTraceFindings = srcResult.srcTraceFindings;
@@ -226,13 +247,21 @@ async function runResolvedPhases(config: RunConfig, ingestion: IngestionResult, 
   }
 
   // Phase 11: generate reports and manifest.
-  state = await runReportingPhase(config, state, analysis, srcTraceFindings, srcLogicFindings, compareFindings, codeEvidenceFiles, telemetryEnabled);
+  const sourceClaims = analysis.claimGraphResult.graph.claims.filter((claim) => claim.kind === "requirement" || claim.kind === "scenario");
+  const scopeCounts = { extracted: sourceClaims.length, eligible: sourceClaims.filter(isFormalizableClaim).length,
+    excluded: sourceClaims.filter((claim) => !isFormalizableClaim(claim)).length, candidates: analysis.clusterResult.representatives.length,
+    failed: analysis.formalization.errors.length, unstable: analysis.clusterResult.representatives.filter((claim) => claim.interpretationAssessment?.stability === "unstable").length,
+    ...summarizeQueryLedger(executor.ledger) };
+  await evidence.json("run", "ledger", { scopeCounts, queries: executor.ledger, skipped: evidence.skipped, formalizationErrors: analysis.formalization.errors }, "reporting", "run-ledger");
+  evidence.release("run-ledger");
+  state = await runReportingPhase(config, state, analysis, srcTraceFindings, srcLogicFindings, compareFindings, codeEvidenceFiles, telemetryEnabled, evidence.files(), scopeCounts);
 
   return state;
 }
 
 /** Every path spec-check owns across base, source-backed, and telemetry modes. */
 const MANAGED_OUTPUT_PATHS: readonly RelativePath[] = [
+  toRelativePath("semantic_evidence"),
   FORMALIZATION_EVIDENCE_DIRECTORY,
   toRelativePath("report_1.1.md"),
   toRelativePath("report_1.2.md"),
@@ -308,7 +337,9 @@ async function runIngestionPhases(config: RunConfig): Promise<IngestionResult> {
 
   // Phase 3: Parse all discovered documents.
   const parsed = await runPhaseWithResult("parse", state, async () => {
-    return await parseAllDocuments(catalogResult.value);
+    try { return await parseAllDocuments(catalogResult.value, {
+      ...(config.analysis === undefined ? {} : { earsExtensions: config.analysis.earsExtensions, statementMaxBytes: config.analysis.limits.statementBytes }),
+    }); } catch (error: unknown) { throw new PipelineAbortError("CatalogError", error instanceof Error ? error.message : "Specification read/encoding failure"); }
   });
   state = parsed.state;
 
@@ -354,7 +385,7 @@ async function runIngestionPhases(config: RunConfig): Promise<IngestionResult> {
  * Safety: invokes LLM and Z3 solver as external processes. Network failures in LLM
  * calls will surface as PipelineAbortError after internal retry exhaustion.
  */
-async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult): Promise<AnalysisResult> {
+async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult, evidence: EvidenceRecorder, executor: QueryExecutor): Promise<AnalysisResult> {
   const merged = await runMergeAndGroupingMap(ingestion);
   let state = merged.state;
   const ctx = merged.ctx;
@@ -366,6 +397,15 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
   });
   state = addFindings(claimGraphResult.state, claimGraphResult.value.claimFindings);
   state = addFindings(state, claimGraphResult.value.coverageFindings);
+  try {
+    await evidence.json("run", "source-inventory", claimGraphResult.value.graph.claims.filter((claim) => claim.kind === "requirement" || claim.kind === "scenario").map((claim) => ({
+      id: claim.id ?? null, kind: claim.kind, capability: claim.capability ?? null, provenance: claim.provenance, surface: claim.surface,
+    })));
+  } catch (error: unknown) {
+    if (!(error instanceof EvidenceBudgetError)) throw error;
+    state = addFindings(state, [{ severity: "warning", category: "formalization.source_inventory_skipped", provenance: { file: "<source-inventory>" },
+      description: "Global source mapping artifact exceeded evidence capacity", rationale: "Per-group source artifacts remain required before dependent model analysis; excluded scope remains in the ledger.", evidence: [{ kind: "limit", value: error.message }] }]);
+  }
 
   // Phase 5: Run qualitative review passes.
   const qualResult = await runPhaseWithResult("qualitative", state, async () => {
@@ -384,12 +424,12 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
   state = addFindings(qualResult.state, [...qualResult.value.pass1Findings, ...qualResult.value.pass2Findings]);
 
   // Phase 6: Formalize claims via LLM.
-  const formalization = await runFormalizationPhaseWithEvidence(config, state, claimGraphResult.value.graph, logicalFileByCapability);
+  const formalization = await runFormalizationPhaseWithEvidence(config, state, claimGraphResult.value.graph, logicalFileByCapability, evidence);
   state = formalization.state;
 
   // Phase 7: Cluster formalization samples and select representatives.
   const clusterResult = await runPhaseWithResult("clustering", state, async () => {
-    return await runClusteringPhase(config, formalization.output.candidates);
+    return await runClusteringPhase(config, formalization.output.candidates, executor);
   });
   state = addFindings(clusterResult.state, clusterResult.value.findings);
 
@@ -404,6 +444,7 @@ async function runAnalysisPhases(config: RunConfig, ingestion: IngestionResult):
       groups,
       outputDir: config.output,
       ...(config.z3 === undefined ? {} : { z3Path: config.z3 }),
+      analysis: config.analysis ?? DEFAULT_ANALYSIS, evidence, executor, pairBudget: config.pairBudget,
     });
     return output;
   });
@@ -443,6 +484,7 @@ async function runFormalizationPhaseWithEvidence(
   state: RunState,
   claimGraph: ClaimGraph,
   logicalFileByCapability: ReadonlyMap<string, string>,
+  evidence: EvidenceRecorder,
 ): Promise<{
   readonly state: RunState;
   readonly output: FormalizationOutput;
@@ -456,6 +498,9 @@ async function runFormalizationPhaseWithEvidence(
       timeoutMs: config.timeoutMs,
       maxBatchSize: config.maxBatchSize,
       logicalFileByCapability,
+      analysis: config.analysis ?? DEFAULT_ANALYSIS,
+      evidence,
+      ...(config.configPath === undefined ? {} : { configSource: config.configPath }),
     });
     const evidenceFile = await writeFormalizationAttemptSet(
       config.output,
@@ -467,14 +512,12 @@ async function runFormalizationPhaseWithEvidence(
     if (!result.ok) {
       throw new PipelineAbortError("FormalizationError", result.error.map((e) => e.message).join("; "));
     }
-    if (result.value.errors.length > 0 && result.value.candidates.length === 0) {
+    if (result.value.errors.length > 0 && result.value.candidates.length === 0 && result.value.allModelsSkipped !== true) {
       throw new PipelineAbortError("FormalizationError", result.value.errors.map((e) => e.message).join("; "));
     }
     return { output: result.value, evidenceFile };
   });
-  const errorFindings = formalResult.value.output.candidates.length === 0
-    ? []
-    : formalizationErrorsToFindings(formalResult.value.output.errors, claimGraph.claims);
+  const errorFindings = formalizationErrorsToFindings(formalResult.value.output.errors, claimGraph.claims);
   return {
     state: addFindings(formalResult.state, [...formalResult.value.output.findings, ...errorFindings]),
     output: formalResult.value.output,
@@ -559,10 +602,20 @@ async function runReportingPhase(
   compareFindings: readonly Finding[] | undefined,
   codeEvidenceFiles: readonly FormalizationEvidenceFile[] | undefined,
   telemetryEnabled: boolean,
+  semanticEvidence: readonly SemanticEvidenceFile[] = [],
+  scopeCounts?: Readonly<Record<string, number>>,
 ): Promise<RunState> {
   const skippedPhases = computeSkippedPhases(config);
+  const scopeText = scopeCounts === undefined ? "" : `\n## Formal Analysis Scope\n\n${Object.entries(scopeCounts).map(([name, value]) => `- ${name}: ${value}`).join("\n")}\n\nResults concern satisfying valuations under explicit premises and recorded interpretations. They do not establish executable reachability, temporal safety, response completeness, or all-input realizability. Single samples do not establish measured interpretation agreement.\n`;
+  const summaryFor = async (summaryState: RunState): Promise<RenderedReportFile> => {
+    const file = await writeSummaryReport({ outputDir: config.output, allFindings: summaryState.findings, skippedPhases });
+    if (scopeText === "") return file;
+    const scoped = { ...file, content: file.content + scopeText };
+    await writeOutputAtomic(config.output, toRelativePath(scoped.path), scoped.content);
+    return scoped;
+  };
 
-  const reporting = await runPhaseWithResult("reporting", state, async () => {
+  const reporting = await requiredOutput("core report publication", async () => await runPhaseWithResult("reporting", state, async () => {
     const phaseFiles = await writePhaseReports({
       outputDir: config.output,
       report11: analysis.qualResult.pass1Findings,
@@ -573,23 +626,30 @@ async function runReportingPhase(
       ...(srcLogicFindings === undefined ? {} : { srcLogicReport: srcLogicFindings }),
       ...(compareFindings === undefined ? {} : { compareReport: compareFindings }),
     });
-    const summaryFile = await writeSummaryReport({
-      outputDir: config.output,
-      allFindings: state.findings,
-      skippedPhases,
-    });
-    return { phaseFiles, summaryFile };
-  });
+    const scopedFiles = await Promise.all(phaseFiles.map(async (file) => {
+      if (file.path !== "report_1.logic.md" || scopeText === "") return file;
+      const updated = { ...file, content: file.content + scopeText };
+      await writeOutputAtomic(config.output, toRelativePath(updated.path), updated.content);
+      return updated;
+    }));
+    const summaryFile = await summaryFor(state);
+    return { phaseFiles: scopedFiles, summaryFile };
+  }));
 
-  const metricsFile = telemetryEnabled
-    ? await writeCurrentRunMetrics(config)
-    : undefined;
-  const nonReportEntries = [
-    analysis.formalization.evidenceFile,
-    ...(codeEvidenceFiles ?? []),
-    ...(metricsFile === undefined ? [] : [metricsFile]),
-  ];
-  await writeCoreManifest(config, reporting.value.phaseFiles, reporting.value.summaryFile, nonReportEntries);
+  const nonReportEntries = await requiredOutput("core artifact enumeration/publication", async () => {
+    const metricsFile = telemetryEnabled
+      ? await writeCurrentRunMetrics(config)
+      : undefined;
+    const entries = [
+      analysis.formalization.evidenceFile,
+      ...(codeEvidenceFiles ?? []),
+      ...(metricsFile === undefined ? [] : [metricsFile]),
+      ...semanticEvidence,
+      ...await collectCoreArtifacts(config.output),
+    ];
+    await writeCoreManifest(config, reporting.value.phaseFiles, reporting.value.summaryFile, entries);
+    return entries;
+  });
   const coordinated = await coordinateFinalReportLifecycle<RenderedReportFile>(reporting.state, {
     attempt: async () => {
       const attempt = await runOptionalPhaseWithResult("final-report", reporting.state, async () => await generateFinalReport({
@@ -602,7 +662,7 @@ async function runReportingPhase(
     cleanup: async () => await removeFinalReport(config.output),
     addWarning: (attemptState, error) => addFindings(attemptState, [finalReportFailureFinding(error)]),
     invalidateMarker: async () => { await invalidateStaleManifest(config.output); },
-    rewriteSummary: async (warnedState) => await writeSummaryReport({ outputDir: config.output, allFindings: warnedState.findings, skippedPhases }),
+    rewriteSummary: async (warnedState) => await summaryFor(warnedState),
     refreshManifest: async (summary) => await writeCoreManifest(config, reporting.value.phaseFiles, summary, nonReportEntries),
   });
   if (!coordinated.ok) {
@@ -622,10 +682,12 @@ async function writeCoreManifest(
     phaseFiles.every((file) => file.path !== "report.md") && summaryFile.path !== "report.md",
     "core manifest descriptors must exclude report.md",
   );
-  await writeManifest(config.output, validateCoreManifestEntries([
+  const entries = validateCoreManifestEntries([
     ...buildManifestEntries([...phaseFiles, summaryFile]),
     ...nonReportEntries,
-  ]));
+  ]);
+  await reconcileSemanticEvidence(config.output, entries);
+  await writeManifest(config.output, entries);
 }
 
 /** Build the one append-only warning that explains optional report degradation. */
@@ -641,6 +703,12 @@ function finalReportFailureFinding(error: FinalReportError): Finding {
 }
 
 /** Normalize exceptional output failures into a bounded CLI diagnostic. */
+async function requiredOutput<T>(operation: string, work: () => Promise<T>): Promise<T> {
+  try { return await work(); }
+  catch (error: unknown) { throw new PipelineAbortError("OutputError", outputFailureMessage(operation, error)); }
+}
+
+/** Format the operation and its primary output failure. */
 function outputFailureMessage(operation: string, error: unknown): string {
   const detail = error instanceof Error ? error.message : "unknown output failure";
   return `${operation} failed: ${detail}`;
@@ -690,6 +758,8 @@ async function runSourcePhases(
   claimGraphResult: { readonly graph: ClaimGraph },
   representativeClaims: readonly LogicIrClaim[],
   knownCapabilities: readonly string[],
+  evidence: EvidenceRecorder,
+  executor: QueryExecutor,
 ): Promise<{
   readonly state: RunState;
   readonly srcTraceFindings: readonly Finding[];
@@ -719,7 +789,7 @@ async function runSourcePhases(
   const claimCapabilityMap = new Map<string, string>();
   for (const claim of claimGraphResult.graph.claims) {
     if (claim.id !== undefined) {
-      const cap = inferCapabilityName(claim.provenance.file);
+      const cap = claim.capability ?? inferCapabilityName(claim.provenance.file);
       if (cap !== undefined) {
         claimCapabilityMap.set(claim.id, cap);
       }
@@ -734,6 +804,8 @@ async function runSourcePhases(
       representativeClaims,
       knownCapabilities,
       claimCapabilityMap,
+      evidence,
+      executor,
     );
   });
   state = addFindings(codeResult.state, codeResult.value.allFindings);

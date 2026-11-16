@@ -174,7 +174,7 @@ function printHelp(): void {
       "Options:",
       "  --output <dir>   Output directory for reports and evidence",
       "  --src <dir>      Source directory for traceability mode",
-      "  --model <name>   LLM model to use (default github-copilot/gpt-5.6-terra, high)",
+      "  --model <name>   LLM model to use (default github-copilot/gpt-6.1-sol, high)",
       "  --caps <path>    Optional capability selection file",
       "  --z3 <path>      Path to z3 binary",
       "  --config <path>  Path to JSON config file",

@@ -6,6 +6,8 @@ title: ClaimGraphAndCoverage
 
 Define the claim graph construction and coverage analysis behavior for the spec-check tool: normalizing parsed content into typed claims and analyzing coverage, contradiction, and semantic alignment across proposal, design, and capability specs.
 
+All Alloy fences in this document form one Alloy 6 module in document order. Text, spans, clauses, metadata, and semantic comparisons are abstract values; equality checks preservation, while parser differential and serialization tests establish their concrete meaning. Merged views are immutable results supplied by the authoritative merged-capability-analysis contract; this model checks their handoff, not merge application or collision resolution. Empty capabilities retain merge-layer skip findings only. Catalog resolution may select no capabilities (for example, proposal-only analysis). Malformed claims remain reviewable in a separate rejected-input set and never enter the ordinary graph or coverage conclusions.
+
 ```alloy
 module ClaimGraphAndCoverage
 open util/boolean
@@ -29,7 +31,7 @@ sig Provenance {
   sourceSection.artifact = sourceFile
 }
 
-// Obligation levels (EARS keyword classification)
+// Obligation levels (EARS structural-modal classification)
 abstract sig ObligationLevel {}
 one sig Mandatory, Advisory, Informational extends ObligationLevel {}
 
@@ -37,7 +39,7 @@ one sig Mandatory, Advisory, Informational extends ObligationLevel {}
 abstract sig ClaimKind {}
 one sig Behavioral, Structural, Constraint extends ClaimKind {}
 
-// --- Delta operations and merge model ---
+// --- Delta operations and selected merge-result boundary ---
 
 // Delta operations from the OpenSpec authoring model
 abstract sig DeltaOperation {}
@@ -52,21 +54,36 @@ sig ParsedRequirement {
   reqCapability : one Capability
 }
 
+// Parsed scenarios retain block ownership independently of claim eligibility.
+sig ParsedScenario {
+  scenarioParent : lone ParsedRequirement,
+  scenarioCapability : one Capability,
+  scenarioDeltaOp : one DeltaOperation
+}
+
 // Requirement identifiers for delta matching
 sig ReqIdentifier {}
 
-// Merged capability spec: the active view after delta application
+// Merged capability spec: immutable handoff from the authoritative merge model.
+// Bookkeeping sets describe supplied outcomes; they are not production fields
+// or a second implementation of first-wins matching/collision resolution.
 sig MergedCapabilitySpec {
   mergeSource : one Capability,
   activeReqs : set ParsedRequirement,
-  removedReqs : set ParsedRequirement,
+  removedBaseReqs : set ParsedRequirement,
+  replacedBaseReqs : set ParsedRequirement,
+  appliedDeltas : set ParsedRequirement,
+  removalTargets : ParsedRequirement -> lone ParsedRequirement,
+  replacementTargets : ParsedRequirement -> lone ParsedRequirement,
+  skippedReqs : set ParsedRequirement,
+  activeScenarios : set ParsedScenario,
   mergeFindings : set MergeFinding,
   isEmpty : one Bool
 } {
-  // Removed reqs are never in active set (exclusion invariant)
-  no activeReqs & removedReqs
+  // Exclusion: removed, replaced and skipped blocks cannot remain active.
+  disj[activeReqs, removedBaseReqs, replacedBaseReqs, skippedReqs]
   // All reqs trace back to this capability
-  (activeReqs + removedReqs).reqCapability = mergeSource
+  (activeReqs + removedBaseReqs + replacedBaseReqs + appliedDeltas + skippedReqs).reqCapability in mergeSource
   // isEmpty reflects zero active requirements
   isEmpty = True iff no activeReqs
 }
@@ -79,13 +96,24 @@ one sig MergeModNotFound, MergeRemNotFound, MergeDupId,
 
 sig MergeFinding {
   mfKind : one MergeFindingKind,
-  mfAffectedReq : lone ParsedRequirement
+  mfAffectedReq : lone ParsedRequirement,
+  mfAffectedScenario : lone ParsedScenario
 }
 
 // --- Claims ---
 
 // A typed claim: the core unit of the claim graph
 sig Claim {
+  source : one SourceItem,
+  text : one SourceText,
+  statementSpans : set SourceSpan,
+  clauses : set Clause,
+  scenarioMetadata : lone ScenarioMetadata,
+  supportingContent : set SupportingContent,
+  references : set Reference,
+  disposition : one FormalDisposition,
+  permission : one Bool,
+  responseNegated : one Bool,
   kind : one ClaimKind,
   obligation : one ObligationLevel,
   provenance : lone Provenance,
@@ -109,6 +137,8 @@ sig Finding {
   upstream : lone Claim,
   downstream : lone Claim,
   affectedCapability : lone Capability,  // for capability-level findings
+  affectedReference : lone Reference,
+  omissions : set DocumentedDetail,
   var emitted : one Bool
 }
 
@@ -139,9 +169,15 @@ fact finding_wellformedness {
     f.findingKind in (CoverageGap + TaskGap + AnalysisDefect + UnsupportedRef) implies
       some f.upstream
   // Archived references never produce UnsupportedRef findings
-  all f : Finding, r : Reference |
-    (f.findingKind = UnsupportedRef and f.upstream = r.refSource) implies
-      r.isArchived = False
+  all f : Finding |
+    f.findingKind = UnsupportedRef implies {
+      some f.affectedReference
+      f.upstream = f.affectedReference.refSource
+      f.affectedReference.isArchived = False
+    }
+  all f : Finding | f.findingKind != UnsupportedRef implies no f.affectedReference
+  all f : Finding | f.findingKind != SemanticDrift implies no f.omissions
+  all f : Finding | f.findingKind = SemanticDrift implies some f.omissions
   // EmptyCapSkipped findings reference the affected capability, not claims
   all f : Finding |
     f.findingKind = EmptyCapSkipped implies
@@ -150,9 +186,9 @@ fact finding_wellformedness {
 
 // Bool (via the module import) for tracking emission state
 
-// Capability declared in a proposal
+// Capability identity may exist without a proposal in spec-only analysis.
 sig Capability {
-  declaredIn : one Proposal,
+  declaredIn : lone Proposal,
   specFile : lone CapabilitySpec,
   mergedView : lone MergedCapabilitySpec
 }
@@ -160,15 +196,24 @@ sig Capability {
 // References from requirements to upstream content
 sig Reference {
   refSource : one Claim,       // the claim that declares the reference
-  refTarget : one Section,     // the upstream section referenced
-  isArchived : one Bool        // whether target is in changes/archive/
+  refTarget : lone Section,    // absent for unresolved links; citation still retained
+  citation : one SourceText,
+  semanticSupport : one Bool,
+  isArchived : one Bool        // whether citation is in changes/archive/
 }
 
 // Coverage relation: semantic alignment between claims
 sig CoverageLink {
   upstreamClaim : one Claim,
   downstreamClaim : one Claim,
-  partial : one Bool           // whether coverage is only partial
+  partial : one Bool,          // whether coverage is only partial
+  omittedDetails : set DocumentedDetail
+}
+
+abstract sig DocumentedDetail {}
+sig DocumentedConstraint, DocumentedFailureMode, BoundaryCondition extends DocumentedDetail {}
+fact partial_link_evidence {
+  all link : CoverageLink | link.partial = True iff some link.omittedDetails
 }
 
 // --- Merge well-formedness constraints ---
@@ -202,10 +247,11 @@ fact active_reqs_have_valid_ops {
     r.reqDeltaOp in (DeltaBase + DeltaAdded + DeltaModified)
 }
 
-// Removed requirements have REMOVED delta operation
-fact removed_reqs_have_removed_op {
-  all mc : MergedCapabilitySpec, r : mc.removedReqs |
-    r.reqDeltaOp = DeltaRemoved
+// Removed/replaced base blocks: abstract bookkeeping for accepted operations.
+// REMOVED instructions are separately recorded in appliedDeltas.
+fact retired_blocks_are_base_requirements {
+  all mc : MergedCapabilitySpec |
+    (mc.removedBaseReqs + mc.replacedBaseReqs).reqDeltaOp in DeltaBase
 }
 
 // Upstream claims (proposal/design/task) never carry capability identity
@@ -219,14 +265,14 @@ fact upstream_claims_no_capability {
 // PreSection and Renamed requirements never appear in active or removed
 fact excluded_ops_never_in_merge_output {
   all mc : MergedCapabilitySpec |
-    no r : mc.activeReqs + mc.removedReqs |
+    no r : mc.activeReqs + mc.removedBaseReqs + mc.replacedBaseReqs |
       r.reqDeltaOp in (DeltaPreSection + DeltaRenamed)
 }
 
 // Empty merged capabilities have EmptyCapSkipped finding
 fact empty_cap_has_finding {
   all mc : MergedCapabilitySpec |
-    (mc.isEmpty = True and some ParsedRequirement & (mc.activeReqs + mc.removedReqs).*(reqCapability.mergedView.(activeReqs + removedReqs)))
+    mc.isEmpty = True
     implies some mf : mc.mergeFindings | mf.mfKind = MergeEmptyCapSkipped
 }
 
@@ -246,342 +292,382 @@ one sig Idle, Merging, Normalizing, Analyzing, Complete extends Phase {}
 ## Requirements
 
 ### Requirement: Normalize Parsed Content Into Typed Claims [CGC-NORMALIZE-CLAIMS]
-WHEN parsed proposal, design, merged capability spec, or task content is available, THE spec-check tool SHALL normalize the content into typed claims that preserve claim kind, source text, obligation level when present, original source provenance needed for downstream analysis, and capability identity for all spec-derived claims.
+WHEN parsed proposal, design, merged capability spec, or task content is available, THE spec-check tool SHALL construct claims preserving source text, kind, provenance, references, capability identity, and any source-established statement structure and formal disposition.
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Domain Model`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
 - `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Domain Model`
 - `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Interaction Protocols`
+- [Proposal: Domain Model](../../changes/archive/2026-11-15-improve-ears-smt-analysis/proposal.md#domain-model)
+- [Design: Source and identity](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#source-and-identity)
 
 #### Scenario: Preserve Claim Provenance [CGC-CLAIM-PROVEN]
-WHEN the tool derives a claim from a requirement, scenario, design section, or task summary, THE spec-check tool SHALL attach the source file and nearest heading needed to trace that claim back to its origin.
+WHEN a claim is derived from a source item, THE spec-check tool SHALL retain its original file, nearest heading, statement/clause spans, and supporting-content associations when present.
 
-**Postcondition:** Every derived claim can be traced back to its originating artifact section.
+**Postcondition:** Every ordinary graph claim traces to its originating artifact section; malformed inputs remain separately reviewable.
 
 ##### Evidence
-- Implementation: [claim-graph.ts:153 buildClaimGraph()](/src/domain/claim-graph.ts#L153), [claim-graph.ts:269 claimFromRequirement()](/src/domain/claim-graph.ts#L269), [claim-graph.ts:291 claimFromScenario()](/src/domain/claim-graph.ts#L291), [claim-graph.ts:314 extractProposalClaims()](/src/domain/claim-graph.ts#L314), [claim-graph.ts:358 extractDesignClaims()](/src/domain/claim-graph.ts#L358), [claim-graph.ts:390 extractTaskClaims()](/src/domain/claim-graph.ts#L390)
-- Test: [claim-graph.test.ts:8 assigns obligation levels and keeps provenance](/test/contract/claim-graph.test.ts#L8), [safety-liveness.invariant.test.ts:73 SAFE-2: no claim enters the graph without provenance](/test/invariant/safety-liveness.invariant.test.ts#L73)
-- Test (property): [claim-graph.property.test.ts:9 every claim has provenance with a file, and no claim exists without a traceable source](/test/property/claim-graph.property.test.ts#L9)
-- Example:
-```typescript
-const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
-const req = { title: "R1", identifier: "R1", body: "THE system SHALL respond", earsType: "event-driven", references: [], provenance: { file: "spec.md", line: 1 } };
-const spec = { file: "spec.md", requirements: [req], scenarios: [], deltaSections: ["ADDED"], structuralFindings: [], unparsed: [] };
-const { graph } = buildClaimGraph({ specs: [spec] }); //*
-graph.claims[0].provenance.file; //=> spec.md
-```
+- Implementation: [claim-graph.ts:275 claimFromRequirement()](/src/domain/claim-graph.ts#L275), [claim-graph.ts:298 claimFromScenario()](/src/domain/claim-graph.ts#L298), [claim-graph.ts:322 extractProposalClaims()](/src/domain/claim-graph.ts#L322), [claim-graph.ts:366 extractDesignClaims()](/src/domain/claim-graph.ts#L366), [claim-graph.ts:398 extractTaskClaims()](/src/domain/claim-graph.ts#L398)
+- Test: [claim-graph.test.ts:8 assigns obligation levels and keeps provenance](/test/contract/claim-graph.test.ts#L8), [surface-claims.test.ts:15 modified payload replaces the original without rewriting provenance](/test/contract/surface-claims.test.ts#L15)
+- Test (property): [claim-graph.property.test.ts:9 every claim has provenance with a file, and no claim exists without a traceable source](/test/property/claim-graph.property.test.ts#L9), [surface.property.test.ts:9 maps every normalized offset to an original character or join boundary](/test/property/surface.property.test.ts#L9)
 
 #### Scenario: Reject Provenance-Free Finding Input [CGC-CLAIM-FAIL]
-IF a downstream analysis step would consume a claim without sufficient provenance, THEN THE spec-check tool SHALL treat that condition as an analysis defect and SHALL surface it as a finding instead of issuing an untraceable conclusion.
+IF a downstream step receives a claim without sufficient provenance, THEN THE spec-check tool SHALL surface an analysis-defect finding instead of issuing an untraceable conclusion.
 
-**Postcondition:** Downstream analysis does not rely on orphaned claims.
+**Postcondition:** Rejected claims remain evidence, without entering the ordinary graph or supporting coverage conclusions.
+
+**Evidence boundary:** The separate rejected-input set models the no-consumption policy. The implementation and test below establish orphan detection only: `buildClaimGraph` still returns the malformed claim in the ordinary graph, and coverage does not reject it.
 
 ##### Evidence
-- Implementation: [claim-graph.ts:459 detectOrphanClaims()](/src/domain/claim-graph.ts#L459)
+- Implementation: [claim-graph.ts:470 detectOrphanClaims()](/src/domain/claim-graph.ts#L470)
 - Test: [claim-graph.test.ts:51 surfaces orphaned claim without provenance](/test/contract/claim-graph.test.ts#L51)
-- Example:
-```typescript
-const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
-const req = { title: "R1", identifier: "R1", body: "SHALL do X", earsType: "event-driven", references: [], provenance: { file: "", line: 1 } };
-const spec = { file: "", requirements: [req], scenarios: [], deltaSections: ["ADDED"], structuralFindings: [], unparsed: [] };
-const result = buildClaimGraph({ specs: [spec] }); //*
-result.findings[0].category; //=> claim_graph.orphaned_claim
-```
 
 #### Scenario: Populate Capability Identity On Spec-Derived Claims [CGC-CLAIM-CAP]
-WHEN the tool derives a claim from a merged capability requirement or scenario, THE spec-check tool SHALL attach the capability identity of the merged capability view to that claim.
+WHEN a claim is derived from a merged requirement or scenario, THE spec-check tool SHALL retain the merged capability identity separately from original source provenance.
 
-**Postcondition:** Downstream specs-forward grouping can use capability identity without re-inferring it from source file paths.
+**Postcondition:** Downstream grouping uses capability identity without re-inferring it from original file paths.
 
 ##### Evidence
-- Implementation: [claim-graph.ts:247 extractMergedSpecClaims()](/src/domain/claim-graph.ts#L247), [claim-graph.ts:269 claimFromRequirement()](/src/domain/claim-graph.ts#L269), [claim-graph.ts:291 claimFromScenario()](/src/domain/claim-graph.ts#L291), [pipeline-helpers.ts:356 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L356)
-- Test: [claim-graph.test.ts:123 populates Claim.capability for merged spec-derived claims](/test/contract/claim-graph.test.ts#L123), [pipeline-helpers.test.ts:137 groups by Claim.capability instead of provenance.file](/test/contract/pipeline-helpers.test.ts#L137)
+- Implementation: [claim-graph.ts:253 extractMergedSpecClaims()](/src/domain/claim-graph.ts#L253), [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365)
+- Test: [claim-graph.test.ts:123 populates Claim.capability for merged spec-derived claims](/test/contract/claim-graph.test.ts#L123), [surface-claims.test.ts:15 modified payload replaces the original without rewriting provenance](/test/contract/surface-claims.test.ts#L15), [pipeline-helpers.test.ts:137 groups by Claim.capability instead of provenance.file](/test/contract/pipeline-helpers.test.ts#L137)
+
+#### Scenario: Preserve Source Structure Across Normalization [CGC-CLAIM-CLAUSES]
+WHEN a parsed item supplies EARS clauses or scenario metadata, THE spec-check tool SHALL carry those structures into formalization context without flattening them into prose-only claims.
+
+##### Evidence
+- Implementation: [claim-graph.ts:275 claimFromRequirement()](/src/domain/claim-graph.ts#L275), [claim-graph.ts:298 claimFromScenario()](/src/domain/claim-graph.ts#L298), [source-formalize.ts:192 perform()](/src/domain/formal/source-formalize.ts#L192)
+- Test: [surface-claims.test.ts:15 modified payload replaces the original without rewriting provenance](/test/contract/surface-claims.test.ts#L15), [formalization-predicates.test.ts:22 actor swaps change context and actor context survives batch recovery and additional samples](/test/contract/formalization-predicates.test.ts#L22), [formalization-predicates.test.ts:72 source negation and postcondition control the response skeleton](/test/contract/formalization-predicates.test.ts#L72)
 - Example:
 ```typescript
+const { parseSpecText } = await import("./src/domain/parser/spec.ts");
 const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
-const { toCapabilityName } = await import("./src/domain/branded.ts");
-const mergedSpec = {
-  capability: toCapabilityName("claim-graph-and-coverage"),
-  sourceFiles: ["specs/claim-graph-and-coverage/spec.md"],
-  logicalFile: "<merged-spec/claim-graph-and-coverage>",
-  requirements: [{
-    title: "Merged req",
-    identifier: "CGC-MERGED-REQ",
-    body: "WHEN merged input exists, THE system SHALL assign capability.",
-    earsType: "event-driven",
-    deltaOperation: "base",
-    references: [],
-    provenance: { file: "specs/claim-graph-and-coverage/spec.md", line: 1 },
-  }],
-  scenarios: [],
-  findings: [],
-};
-const { graph } = buildClaimGraph({ specs: [], mergedSpecs: [mergedSpec] }); //*
-graph.claims[0].capability; //=> claim-graph-and-coverage
+const parsed = parseSpecText("structure.md", "### Requirement: Respond [CGC-DEMO]\nWHEN called, THE engine MUST NOT stop.\n**Postcondition:** Result exists.\n");
+const claim = buildClaimGraph({ specs: [parsed] }).graph.claims[0];
+claim.surface === parsed.requirements[0].surface; //=> true
+claim.surface.clauses.negatedResponse; //=> true
+claim.surface.fields.postcondition.text; //=> Result exists.
 ```
 
 #### Requirement model
 
 ```alloy
-// --- Claim normalization: provenance, typing, and capability identity ---
+// --- Claim normalization: source structure, provenance and capability identity ---
+// Source-local identity does not depend on optional authored/display IDs.
+sig SourceIdentity {}
+sig SourceText, SourceSpan, Clause, ScenarioMetadata, SupportingContent {}
+abstract sig FormalDisposition {}
+one sig Eligible, Excluded extends FormalDisposition {}
+abstract sig StructuralModal {}
+one sig ShallModal, MustModal, ShouldModal, MayModal, NoModal extends StructuralModal {}
 
-// Precondition: normalization requires parsed content from at least one artifact
-pred normalization_precondition {
-  some Section
-  some Artifact
+sig SourceItem {
+  localIdentity : one SourceIdentity,
+  displayIdentifier : lone ReqIdentifier,
+  sourceArtifact : one Artifact,
+  sourceProvenance : lone Provenance,
+  sourceText : one SourceText,
+  sourceKind : one ClaimKind,
+  sourceSpans : set SourceSpan,
+  sourceClauses : set Clause,
+  sourceScenarioMetadata : lone ScenarioMetadata,
+  sourceSupportingContent : set SupportingContent,
+  sourceReferences : set Reference,
+  sourceDisposition : one FormalDisposition,
+  structuralModal : one StructuralModal,
+  sourceResponseNegated : one Bool,
+  sourceCapability : lone Capability,
+  parentRequirement : lone ParsedRequirement,
+  parsedScenario : lone ParsedScenario,
+  completedTaskSummary : one Bool
 }
 
-// Precondition: merge phase has completed before normalization begins
+fact source_identity_and_origin {
+  all disj a, b : SourceItem | a.localIdentity != b.localIdentity
+  all s : SourceItem | {
+    some s.sourceProvenance implies s.sourceProvenance.sourceFile = s.sourceArtifact
+    s.sourceArtifact in CapabilitySpec implies {
+      one s.parentRequirement
+      s.sourceCapability = s.parentRequirement.reqCapability
+      s.sourceArtifact = s.parentRequirement.reqSourceFile
+      some s.parsedScenario implies {
+        s.parsedScenario.scenarioParent = s.parentRequirement
+        s.parsedScenario.scenarioCapability = s.sourceCapability
+      }
+    }
+    s.sourceArtifact not in CapabilitySpec implies {
+      no s.sourceCapability
+      no s.parentRequirement
+      no s.parsedScenario
+    }
+  }
+  all c : Claim | c.references = c.source.sourceReferences
+  all r : Reference | r in r.refSource.references
+}
+
+// The extracted set includes requirements and their surviving scenarios.
+fun extracted_sources : set SourceItem {
+  { s : SourceItem | s.sourceArtifact not in CapabilitySpec or
+      (s.parentRequirement in MergedCapabilitySpec.activeReqs and
+       (no s.parsedScenario or s.parsedScenario in MergedCapabilitySpec.activeScenarios)) }
+}
+
+pred normalized_claim [c : Claim] {
+  c.text = c.source.sourceText
+  c.kind = c.source.sourceKind
+  c.provenance = c.source.sourceProvenance
+  c.statementSpans = c.source.sourceSpans
+  c.clauses = c.source.sourceClauses
+  c.scenarioMetadata = c.source.sourceScenarioMetadata
+  c.supportingContent = c.source.sourceSupportingContent
+  c.references = c.source.sourceReferences
+  c.capability = c.source.sourceCapability
+  c.disposition = c.source.sourceDisposition
+  c.responseNegated = c.source.sourceResponseNegated
+  c.obligation = structural_obligation[c.source.structuralModal]
+  c.permission = True iff c.source.structuralModal = MayModal
+}
+
+// Canonical normalized claims are immutable values; arbitrary downstream
+// inputs may still be malformed and must be rejected before conclusions.
+fact canonical_claim_generation {
+  all s : extracted_sources | one c : Claim | c.source = s and normalized_claim[c]
+  all c : Claim | normalized_claim[c] and c.source in extracted_sources implies
+    all r : c.references | r.refSource = c
+}
+fun normalized_input : set Claim {
+  { c : Claim | c.source in extracted_sources and normalized_claim[c] }
+}
+// Valid ordinary graph input and retained rejected source claims are disjoint.
+fun graph_input : set Claim { { c : normalized_input | analyzable_claim[c] } }
+fun rejected_source_input : set Claim { normalized_input - graph_input }
+pred normalization_precondition { some Artifact }
 pred merge_complete_precondition {
-  // At least one merged view exists when capabilities are declared
   all cap : Capability | some cap.specFile implies some cap.mergedView
 }
-
-// Postcondition: every claim in the graph has valid provenance
-pred all_claims_have_provenance {
-  all c : AnalysisState.graphClaims | some c.provenance
-}
-
-// Postcondition: every spec-derived claim has capability identity populated
-pred spec_claims_have_capability {
-  all c : AnalysisState.graphClaims |
-    (some c.provenance and c.provenance.sourceFile in CapabilitySpec)
-      implies some c.capability
-}
-
-// Event: normalize parsed content into claims (from merged capability views)
+// Event: normalize all source values, separating malformed claims for review.
 pred normalize_claims {
-  // Guard: in normalizing phase with parsed content available
+  // Guard: normalization follows the selected merge-result handoff.
   AnalysisState.phase = Normalizing
   normalization_precondition
   merge_complete_precondition
-  // Effect: claims are added to the graph with provenance (monotonic growth)
-  AnalysisState.graphClaims in AnalysisState.graphClaims'
-  all c : AnalysisState.graphClaims' - AnalysisState.graphClaims | {
-    some c.provenance
-    // Spec-derived claims carry capability identity
-    (c.provenance.sourceFile in CapabilitySpec) implies some c.capability
-  }
-  // Only non-empty merged capabilities produce claims
-  all c : AnalysisState.graphClaims' - AnalysisState.graphClaims |
-    (some c.capability) implies
-      (some mc : MergedCapabilitySpec |
-        mc.mergeSource = c.capability and mc.isEmpty = False)
-  // Phase advances
-  AnalysisState.phase' = Analyzing
-  AnalysisState.analysisComplete' = AnalysisState.analysisComplete
+  AnalysisState.graphClaims != graph_input
+  // Effect: only traceable canonical claims enter the ordinary graph.
+  AnalysisState.graphClaims' = graph_input
+  // Frame: findings and completion are unchanged.
+  AnalysisState.phase' = Normalizing
   AnalysisState.graphFindings' = AnalysisState.graphFindings
-  // Findings emission unchanged
+  AnalysisState.analysisComplete' = AnalysisState.analysisComplete
   all f : Finding | f.emitted' = f.emitted
 }
 
-// Failure mode: provenance-free claim detected during analysis
-pred reject_provenance_free_claim [c : Claim] {
-  // Guard: claim has no provenance and is about to be consumed
-  no c.provenance
-  c in AnalysisState.graphClaims
-  AnalysisState.phase = Analyzing
-  // Effect: emit an analysis-defect finding instead of using the claim
-  some f : Finding {
-    f.findingKind = AnalysisDefect
-    f.upstream = c
-    no f.downstream
-    no f.affectedCapability
-    f.severity = High
-    f.emitted' = True
-    AnalysisState.graphFindings' = AnalysisState.graphFindings + f
-  }
-  // Frame
-  AnalysisState.phase' = AnalysisState.phase
-  AnalysisState.graphClaims' = AnalysisState.graphClaims
-  AnalysisState.analysisComplete' = AnalysisState.analysisComplete
-  all f : Finding - AnalysisState.graphFindings' + AnalysisState.graphFindings |
-    f.emitted' = f.emitted
-}
-
-// Failure mode: capability identity missing on spec-derived claim
-pred reject_capability_free_spec_claim [c : Claim] {
-  // Guard: spec-derived claim without capability identity
+pred sufficient_provenance [c : Claim] {
   some c.provenance
-  c.provenance.sourceFile in CapabilitySpec
-  no c.capability
-  c in AnalysisState.graphClaims
+  c.provenance.sourceFile = c.source.sourceArtifact
+  c.provenance = c.source.sourceProvenance
+  c.statementSpans = c.source.sourceSpans
+}
+pred analyzable_claim [c : Claim] {
+  sufficient_provenance[c]
+  c.source.sourceArtifact in CapabilitySpec implies {
+    some c.capability
+    c.capability = c.source.sourceCapability
+    c.source.parentRequirement in c.capability.mergedView.activeReqs
+  }
+}
+
+// A downstream boundary may receive damaged/external claims as well as the
+// constructed graph. They are diagnosed without entering the claim graph.
+one sig DownstreamInput { received : set Claim }
+fun rejected_inputs : set Claim {
+  rejected_source_input + { c : DownstreamInput.received | not analyzable_claim[c] }
+}
+
+// Event: retain a high-severity defect for rejected input, without consuming it.
+pred emit_analysis_defect [c : Claim] {
+  // Guard: only malformed, reviewable boundary inputs are diagnosed.
   AnalysisState.phase = Analyzing
-  // Effect: emit analysis-defect finding
-  some f : Finding {
+  c in rejected_inputs
+  // Effect: add one new defect finding.
+  some f : Finding - AnalysisState.graphFindings | {
     f.findingKind = AnalysisDefect
     f.upstream = c
-    no f.downstream
-    no f.affectedCapability
+    no f.downstream + f.affectedCapability
     f.severity = High
     f.emitted' = True
     AnalysisState.graphFindings' = AnalysisState.graphFindings + f
+    all other : Finding - f | other.emitted' = other.emitted
   }
-  // Frame
+  // Frame: the ordinary graph and lifecycle remain unchanged.
   AnalysisState.phase' = AnalysisState.phase
   AnalysisState.graphClaims' = AnalysisState.graphClaims
   AnalysisState.analysisComplete' = AnalysisState.analysisComplete
-  all f : Finding - AnalysisState.graphFindings' + AnalysisState.graphFindings |
-    f.emitted' = f.emitted
+}
+pred reject_provenance_free_claim [c : Claim] {
+  not sufficient_provenance[c]
+  emit_analysis_defect[c]
+}
+pred reject_capability_free_spec_claim [c : Claim] {
+  c.source.sourceArtifact in CapabilitySpec
+  not analyzable_claim[c]
+  emit_analysis_defect[c]
 }
 
-// Safety: no claim in graph ever lacks provenance after normalization completes
+// Safety: ordinary graph values preserve the complete source-owned structure.
+assert normalization_preserves_source_structure {
+  always (all c : AnalysisState.graphClaims | normalized_claim[c])
+}
+// Safety: every ordinary graph claim has sufficient provenance, not just
+// claims that happen to be cited by an emitted finding.
 assert provenance_integrity {
-  always (AnalysisState.phase = Analyzing implies all_claims_have_provenance)
+  always (all c : AnalysisState.graphClaims | sufficient_provenance[c])
 }
-
-// Safety: provenance-free claims are never silently consumed
+// Safety: rejected input never supports a coverage conclusion.
 assert no_silent_orphan_consumption {
-  always (all c : Claim |
-    (no c.provenance and c in AnalysisState.graphClaims and AnalysisState.phase = Analyzing)
-      implies (some f : AnalysisState.graphFindings' |
-        f.findingKind = AnalysisDefect and f.upstream = c))
+  always (no AnalysisState.graphClaims & rejected_inputs and
+    all f : AnalysisState.graphFindings | f.findingKind != AnalysisDefect implies
+      no (f.upstream + f.downstream) & rejected_inputs)
 }
-
-// Safety: spec-derived claims always carry capability identity after normalization
+// Safety: conclusions cite only sufficiently traceable claims.
+assert conclusion_provenance_integrity {
+  always (all f : AnalysisState.graphFindings |
+    f.findingKind != AnalysisDefect implies
+      all c : f.upstream + f.downstream | sufficient_provenance[c])
+}
+// Safety: spec claims retain their selected merged capability identity.
 assert spec_claims_carry_capability {
-  always (AnalysisState.phase in (Analyzing + Complete) implies
-    spec_claims_have_capability)
-}
-
-// Safety: claims are only produced from non-empty merged capabilities
-assert no_claims_from_empty_capabilities {
   always (all c : AnalysisState.graphClaims |
-    (some c.capability) implies
-      (some mc : MergedCapabilitySpec |
-        mc.mergeSource = c.capability and mc.isEmpty = False))
+    c.source.sourceArtifact in CapabilitySpec implies
+      c.capability = c.source.sourceCapability and some c.capability)
+}
+// Safety: empty capability groups cannot contribute ordinary graph claims.
+assert no_claims_from_empty_capabilities {
+  always (all c : AnalysisState.graphClaims | some c.capability implies
+    capability_active_for_coverage[c.capability])
+}
+// Safety postcondition: completion requires a high-severity defect per rejection.
+assert defective_inputs_are_reported {
+  always (AnalysisState.phase = Complete implies
+    all c : rejected_inputs |
+      some f : AnalysisState.graphFindings |
+        f.findingKind = AnalysisDefect and f.upstream = c and f.severity = High)
 }
 ```
 
 ### Requirement: Obligation Level Assignment [CGC-OBLIGATION-LEVEL]
-WHEN the spec-check tool normalizes a claim from a requirement or scenario, THE spec-check tool SHALL assign an obligation level (mandatory, advisory, or informational) based on the source structure and EARS pattern keywords.
+WHEN a requirement or scenario is normalized, THE spec-check tool SHALL derive obligation and permission meaning from its parsed structural modal rather than from substring scanning or model output.
 
 **References:**
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Domain Model`
 - `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Preconditions, Postconditions, and Invariants`
+- [Design: Expression and semantic IR](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#expression-and-semantic-ir)
 
 #### Scenario: SHALL Requirement Classified As Mandatory [CGC-OBLIG-MANDATORY]
-WHEN a requirement uses the keyword SHALL without qualification, THE spec-check tool SHALL assign the mandatory obligation level to that claim.
+WHEN a statement uses structural `SHALL` or `MUST`, THE spec-check tool SHALL assign mandatory obligation while preserving response negation independently.
 
-**Postcondition:** Mandatory claims produce higher-severity findings in downstream analysis when violated.
+**Postcondition:** Mandatory obligations remain distinct from advisory and permission semantics.
 
 ##### Evidence
-- Implementation: [claim-graph.ts:439 deriveObligation()](/src/domain/claim-graph.ts#L439)
-- Test: [claim-graph.test.ts:8 assigns obligation levels and keeps provenance](/test/contract/claim-graph.test.ts#L8)
+- Implementation: [claim-graph.ts:447 deriveObligation()](/src/domain/claim-graph.ts#L447)
+- Test: [claim-graph.test.ts:8 assigns obligation levels and keeps provenance](/test/contract/claim-graph.test.ts#L8), [surface-claims.test.ts:51 derives MUST and scoped modal negation from parser-owned slots](/test/contract/surface-claims.test.ts#L51)
 - Test (property): [claim-graph.property.test.ts:39 obligation assignment is consistent across EARS patterns](/test/property/claim-graph.property.test.ts#L39)
-- Example:
-```typescript
-const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
-const req = { title: "R1", identifier: "R1", body: "THE system SHALL process it", earsType: "event-driven", references: [], provenance: { file: "s.md", line: 1 } };
-const spec = { file: "s.md", requirements: [req], scenarios: [], deltaSections: ["ADDED"], structuralFindings: [], unparsed: [] };
-const { graph } = buildClaimGraph({ specs: [spec] }); //*
-graph.claims[0].obligation; //=> mandatory
-```
 
 #### Scenario: SHOULD Requirement Classified As Advisory [CGC-OBLIG-ADVISORY]
-WHEN a requirement uses the keyword SHOULD, THE spec-check tool SHALL assign the advisory obligation level to that claim.
+WHEN a statement uses structural `SHOULD`, THE spec-check tool SHALL assign advisory obligation for analysis separately from the mandatory baseline.
 
-**Postcondition:** Advisory claims produce lower-severity findings than mandatory claims when violated.
+**Postcondition:** Advisory rules cannot constrain the mandatory baseline.
 
 ##### Evidence
-- Implementation: [claim-graph.ts:439 deriveObligation()](/src/domain/claim-graph.ts#L439)
-- Test: [claim-graph.test.ts:8 assigns obligation levels and keeps provenance](/test/contract/claim-graph.test.ts#L8)
+- Implementation: [claim-graph.ts:447 deriveObligation()](/src/domain/claim-graph.ts#L447)
+- Test: [claim-graph.test.ts:8 assigns obligation levels and keeps provenance](/test/contract/claim-graph.test.ts#L8), [surface-claims.test.ts:51 derives MUST and scoped modal negation from parser-owned slots](/test/contract/surface-claims.test.ts#L51), [formalization-predicates.test.ts:84 uses a frozen registry for batched and additional samples](/test/contract/formalization-predicates.test.ts#L84)
 - Test (property): [claim-graph.property.test.ts:39 obligation assignment is consistent across EARS patterns](/test/property/claim-graph.property.test.ts#L39)
-- Example:
-```typescript
-const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
-const req = { title: "R1", identifier: "R1", body: "THE system SHOULD log events", earsType: "event-driven", references: [], provenance: { file: "s.md", line: 1 } };
-const spec = { file: "s.md", requirements: [req], scenarios: [], deltaSections: ["ADDED"], structuralFindings: [], unparsed: [] };
-const { graph } = buildClaimGraph({ specs: [spec] }); //*
-graph.claims[0].obligation; //=> advisory
-```
 
 #### Scenario: Informational Content Classified [CGC-OBLIG-INFO]
-WHEN a claim is derived from a design property, assumption, or informational section that does not use obligation keywords, THE spec-check tool SHALL assign the informational obligation level.
+WHEN a design property or informational section lacks an authoritative structural modal, THE spec-check tool SHALL retain informational classification without promoting prose occurrences of modal words into behavioral obligations.
 
-**Postcondition:** Informational claims contribute to coverage analysis without triggering mandatory-severity findings.
+**Postcondition:** Informational content remains coverage context without becoming a mandatory rule.
 
 ##### Evidence
-- Implementation: [claim-graph.ts:314 extractProposalClaims()](/src/domain/claim-graph.ts#L314), [claim-graph.ts:358 extractDesignClaims()](/src/domain/claim-graph.ts#L358)
-- Test: [claim-graph.test.ts:107 classifies informational content at informational obligation](/test/contract/claim-graph.test.ts#L107), [safety-liveness.invariant.test.ts:158 SAFE-9: claims with non-standard obligation produce only informational findings](/test/invariant/safety-liveness.invariant.test.ts#L158)
+- Implementation: [claim-graph.ts:322 extractProposalClaims()](/src/domain/claim-graph.ts#L322), [claim-graph.ts:366 extractDesignClaims()](/src/domain/claim-graph.ts#L366), [claim-graph.ts:447 deriveObligation()](/src/domain/claim-graph.ts#L447)
+- Test: [claim-graph.test.ts:107 classifies informational content at informational obligation](/test/contract/claim-graph.test.ts#L107), [surface-claims.test.ts:51 derives MUST and scoped modal negation from parser-owned slots](/test/contract/surface-claims.test.ts#L51), [safety-liveness.invariant.test.ts:161 SAFE-9: claims with non-standard obligation produce only informational findings](/test/invariant/safety-liveness.invariant.test.ts#L161)
 - Test (property): [claim-graph.property.test.ts:39 obligation assignment is consistent across EARS patterns](/test/property/claim-graph.property.test.ts#L39)
-- Example:
-```typescript
-const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
-const proposal = { file: "proposal.md", sections: new Map([["Scope", { heading: "Scope", lines: ["analysis covers formal methods"], startLine: 1, endLine: 2 }]]), unparsed: [] };
-const { graph } = buildClaimGraph({ proposal, specs: [] }); //*
-graph.claims[0].obligation; //=> informational
-```
 
 #### Scenario: MAY Requirement Classified As Informational [CGC-OBLIG-OPTIONAL]
-WHEN a requirement uses the keyword MAY, THE spec-check tool SHALL assign the informational obligation level to that claim.
+WHEN a statement uses structural `MAY`, THE spec-check tool SHALL retain informational obligation metadata and explicit permission semantics rather than require the response.
 
-**Postcondition:** Optional behavior does not trigger mandatory- or advisory-severity findings when absent or deviated from.
+**Postcondition:** Absence of the permitted behavior is not a violation; an explicit permission may still conflict with mandatory prohibitions.
 
 ##### Evidence
-- Implementation: [claim-graph.ts:439 deriveObligation()](/src/domain/claim-graph.ts#L439)
-- Test: [claim-graph.test.ts:78 classifies MAY requirement as informational obligation](/test/contract/claim-graph.test.ts#L78)
-- Example:
-```typescript
-const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
-const req = { title: "R1", identifier: "R1", body: "THE system MAY include color formatting", earsType: "event-driven", references: [], provenance: { file: "s.md", line: 1 } };
-const spec = { file: "s.md", requirements: [req], scenarios: [], deltaSections: ["ADDED"], structuralFindings: [], unparsed: [] };
-const { graph } = buildClaimGraph({ specs: [spec] }); //*
-graph.claims[0].obligation; //=> informational
-```
+- Implementation: [claim-graph.ts:447 deriveObligation()](/src/domain/claim-graph.ts#L447), [predicate-lowering.ts:89 lowerPredicates()](/src/domain/formal/predicate-lowering.ts#L89)
+- Test: [claim-graph.test.ts:78 classifies MAY requirement as informational obligation](/test/contract/claim-graph.test.ts#L78), [surface-claims.test.ts:51 derives MUST and scoped modal negation from parser-owned slots](/test/contract/surface-claims.test.ts#L51), [static-queries.test.ts:45 separates advisory and permission conflicts from mandatory satisfiability](/test/contract/static-queries.test.ts#L45)
 
 #### Requirement model
 
 ```alloy
-// --- Obligation level assignment and severity mapping ---
-
-// Severity mapping: obligation level determines finding severity ceiling
-fun max_severity [o : ObligationLevel] : Severity {
-  o = Mandatory implies High
-  else o = Advisory implies Medium
-  else Low
+// --- Obligation assignment, permission semantics and severity mapping ---
+fun structural_obligation [m : StructuralModal] : one ObligationLevel {
+  m in ShallModal + MustModal => Mandatory else
+    (m = ShouldModal => Advisory else Informational)
+}
+fun max_severity [o : ObligationLevel] : one Severity {
+  o = Mandatory => High else (o = Advisory => Medium else Low)
 }
 
-// Predicate: a finding respects the obligation-severity ceiling
-pred finding_respects_obligation [f : Finding] {
-  some f.upstream implies
-    severity_leq[f.severity, max_severity[f.upstream.obligation]]
+// Static valuations model behavior meaning, independently of graph severity.
+sig BehaviorValuation {}
+sig SemanticRule {
+  ruleClaim : one Claim,
+  guard : set BehaviorValuation,
+  positiveResponse : set BehaviorValuation
+} {
+  ruleClaim in normalized_input
 }
-
-// Severity ordering: High > Medium > Low
-pred severity_leq [s1, s2 : Severity] {
-  s2 = High
-  or (s1 = Medium and s2 != Low)
-  or s1 = Low
+fun response [r : SemanticRule] : set BehaviorValuation {
+  r.ruleClaim.responseNegated = True => BehaviorValuation - r.positiveResponse
+    else r.positiveResponse
 }
-
-// Safety: mandatory violations always produce High severity
+fun mandatory_baseline [rs : set SemanticRule] : set BehaviorValuation {
+  { v : BehaviorValuation | all r : rs |
+    r.ruleClaim.obligation = Mandatory implies
+      (v in r.guard implies v in response[r]) }
+}
+pred permission_conflicts_with_baseline [p : SemanticRule, rs : set SemanticRule] {
+  p.ruleClaim.permission = True
+  some p.guard & response[p]
+  no p.guard & response[p] & mandatory_baseline[rs]
+}
+// Safety: parsed structural modals and negation are the classification authority.
+assert structural_modal_is_authoritative {
+  always (all c : AnalysisState.graphClaims |
+    c.obligation = structural_obligation[c.source.structuralModal] and
+    (c.permission = True iff c.source.structuralModal = MayModal) and
+    c.responseNegated = c.source.sourceResponseNegated)
+}
+// Safety: advisory and permission rules cannot constrain mandatory behavior.
+assert advisory_and_permission_do_not_constrain_baseline {
+  all rs : set SemanticRule | mandatory_baseline[rs] =
+    mandatory_baseline[{ r : rs | r.ruleClaim.obligation = Mandatory }]
+}
+// Safety: an isolated permission imposes no mandatory response obligation.
+assert permission_absence_is_not_a_violation {
+  all p : SemanticRule | p.ruleClaim.permission = True implies
+    mandatory_baseline[p] = BehaviorValuation
+}
+// Safety: mandatory upstream violations retain the existing high severity.
 assert mandatory_produces_high_severity {
-  all f : Finding |
-    (f.findingKind in (Contradiction + CoverageGap + SemanticDrift) and
-     some f.upstream and f.upstream.obligation = Mandatory)
-      implies f.severity = High
+  all f : Finding | f.findingKind in CoverageGap + Contradiction + SemanticDrift and
+    f.upstream.obligation = Mandatory implies f.severity = High
 }
-
-// Safety: advisory violations produce at most Medium severity
+// Safety: advisory violations respect the existing medium-or-low ceiling.
 assert advisory_produces_medium_severity {
-  all f : Finding |
-    (f.findingKind in (Contradiction + CoverageGap + SemanticDrift) and
-     some f.upstream and f.upstream.obligation = Advisory)
-      implies f.severity in (Medium + Low)
+  all f : Finding | f.findingKind in CoverageGap + Contradiction + SemanticDrift and
+    f.upstream.obligation = Advisory implies f.severity in Medium + Low
 }
-
-// Safety: informational claims never produce mandatory-severity findings
+// Safety: informational upstream violations respect the low severity ceiling.
 assert informational_no_high_severity {
-  all f : Finding |
-    (f.findingKind in (Contradiction + CoverageGap + SemanticDrift) and
-     some f.upstream and f.upstream.obligation = Informational)
-      implies f.severity = Low
+  all f : Finding | f.findingKind in CoverageGap + Contradiction + SemanticDrift and
+    f.upstream.obligation = Informational implies f.severity = Low
 }
-
-// Invariant: every claim has exactly one obligation level (structural from sig)
-// Alloy's `one` multiplicity on the field enforces this statically.
 ```
 
 ### Requirement: Detect Missing Coverage And Contradictions Across Artifacts [CGC-FIND-MISSING]
@@ -700,9 +786,10 @@ pred emit_coverage_gap [c : Claim] {
   c in upstream_claims
   c in AnalysisState.graphClaims
   claim_uncovered[c]
+  analyzable_claim[c]
   AnalysisState.phase = Analyzing
   // Effect: emit finding
-  some f : Finding {
+  some f : Finding - AnalysisState.graphFindings {
     f.findingKind = CoverageGap
     f.upstream = c
     no f.downstream
@@ -724,9 +811,11 @@ pred emit_contradiction [cp : ContradictionPair] {
   // Guard
   cp.contra_upstream in AnalysisState.graphClaims
   cp.contra_downstream in AnalysisState.graphClaims
+  analyzable_claim[cp.contra_upstream]
+  analyzable_claim[cp.contra_downstream]
   AnalysisState.phase = Analyzing
   // Effect
-  some f : Finding {
+  some f : Finding - AnalysisState.graphFindings {
     f.findingKind = Contradiction
     f.upstream = cp.contra_upstream
     f.downstream = cp.contra_downstream
@@ -749,14 +838,18 @@ pred emit_semantic_drift [c : Claim] {
   c in upstream_claims
   c in AnalysisState.graphClaims
   claim_partially_covered[c]
+  analyzable_claim[c]
   AnalysisState.phase = Analyzing
   // Effect
-  some f : Finding, link : CoverageLink {
+  some f : Finding - AnalysisState.graphFindings, link : CoverageLink {
     link.upstreamClaim = c
     link.partial = True
+    link.downstreamClaim in AnalysisState.graphClaims
+    analyzable_claim[link.downstreamClaim]
     f.findingKind = SemanticDrift
     f.upstream = c
     f.downstream = link.downstreamClaim
+    f.omissions = link.omittedDetails
     no f.affectedCapability
     f.severity = max_severity[c.obligation]
     f.emitted' = True
@@ -770,13 +863,12 @@ pred emit_semantic_drift [c : Claim] {
     f.emitted' = f.emitted
 }
 
-// Safety: every uncovered upstream claim eventually gets a finding
-// (bidirectional: downstream without upstream justification also surfaced)
+// Safety postcondition: every analyzable uncovered upstream claim is reported.
 assert uncovered_claims_surfaced {
   always (
     (AnalysisState.phase = Complete) implies
       (all c : upstream_claims & AnalysisState.graphClaims |
-        claim_uncovered[c] implies
+        (claim_uncovered[c] and analyzable_claim[c]) implies
           some f : AnalysisState.graphFindings |
             f.findingKind = CoverageGap and f.upstream = c))
 }
@@ -790,9 +882,11 @@ assert contradiction_cites_both {
 
 // Safety: drift findings always identify the partial link
 assert drift_identifies_omission {
-  all f : Finding |
+  always (all f : AnalysisState.graphFindings |
     f.findingKind = SemanticDrift implies
-      (some f.upstream and some f.downstream)
+      (some link : CoverageLink | link.upstreamClaim = f.upstream and
+        link.downstreamClaim = f.downstream and link.partial = True and
+        f.omissions = link.omittedDetails and some f.omissions))
 }
 ```
 
@@ -843,6 +937,40 @@ const findings = analyzeCoverage({ claimGraph: graph.graph, specs: [spec] }); //
 findings.some(f => f.category === "coverage.unsupported_reference"); //=> true
 ```
 
+#### Requirement model
+
+```alloy
+// Preconditions and postconditions use active merged presence, not raw files.
+pred reference_validation_precondition {
+  AnalysisState.phase = Analyzing
+  merge_complete_precondition
+}
+pred reference_validation_postcondition {
+  reference_results_present[AnalysisState.graphFindings]
+}
+// Required result descriptors are parameterized independently of completion.
+pred reference_results_present[fs : set Finding] {
+  all cap : Capability | capability_missing_spec[cap] implies
+    some f : fs |
+      f.findingKind = MissingSpecFile and f.affectedCapability = cap
+  all r : Reference | r.refSource in AnalysisState.graphClaims and
+    analyzable_claim[r.refSource] and reference_unsupported[r] implies
+      some f : fs |
+        f.findingKind = UnsupportedRef and f.affectedReference = r
+}
+// Safety postcondition: completion includes every required reference result.
+assert completed_reference_validation {
+  always (AnalysisState.phase = Complete implies reference_validation_postcondition)
+}
+// Safety: unsupported-reference findings retain the exact citing requirement/link.
+assert unsupported_reference_names_exact_target {
+  always (all f : AnalysisState.graphFindings | f.findingKind = UnsupportedRef implies
+    f.upstream = f.affectedReference.refSource and
+    reference_unsupported[f.affectedReference] and
+    some f.affectedReference.citation)
+}
+```
+
 ### Requirement: Use Merged Capability Views For Coverage [CGC-MERGED-COVERAGE]
 WHEN the spec-check tool performs proposal-to-spec mapping and downstream coverage analysis, THE spec-check tool SHALL use merged capability specs as the active capability source of truth rather than raw per-file parsed specs.
 
@@ -857,8 +985,9 @@ WHEN a requirement is removed from the active merged capability view by a valid 
 **Postcondition:** Coverage reflects the same active capability behavior used by claim extraction and logic.
 
 ##### Evidence
-- Implementation: [merge.ts:244 applyRemoved()](/src/domain/parser/merge.ts#L244), [pipeline-helpers.ts:265 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L265)
-- Test (integration): [merge-liveness.integration.test.ts:226 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L226)
+- Implementation: [merge.ts:244 applyRemoved()](/src/domain/parser/merge.ts#L244), [claim-graph.ts:253 extractMergedSpecClaims()](/src/domain/claim-graph.ts#L253), [pipeline-helpers.ts:270 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L270)
+- Test: [surface-claims.test.ts:64 ineligible content remains selected but removed blocks do not](/test/contract/surface-claims.test.ts#L64)
+- Test (integration): [merge-liveness.integration.test.ts:237 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L237)
 - Example:
 ```typescript
 const { mergeSpecsByCapability } = await import("./src/domain/parser/merge.ts");
@@ -900,9 +1029,9 @@ IF a capability produces zero surviving merged requirements and the merge layer 
 **Postcondition:** Coverage analysis does not report misleading results for vacuous capability groups.
 
 ##### Evidence
-- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [pipeline-helpers.ts:265 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L265)
+- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [pipeline-helpers.ts:270 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L270)
 - Test: [merge.test.ts:215 emits empty capability finding when no surviving requirements remain](/test/contract/merge.test.ts#L215), [pipeline-helpers.test.ts:61 submits every non-empty merged capability to claim extraction and coverage exactly once](/test/contract/pipeline-helpers.test.ts#L61)
-- Test (integration): [merge-liveness.integration.test.ts:124 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L124)
+- Test (integration): [merge-liveness.integration.test.ts:135 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L135)
 - Example:
 ```typescript
 const { runClaimGraphPhase } = await import("./src/cli/pipeline-helpers.ts");
@@ -929,7 +1058,7 @@ result.coverageFindings.length; //=> 0
 
 // A capability is missing its spec file (no merged view exists)
 pred capability_missing_spec [cap : Capability] {
-  no cap.specFile
+  some cap.declaredIn
   no cap.mergedView
 }
 
@@ -948,8 +1077,7 @@ pred capability_active_for_coverage [cap : Capability] {
 // A reference is semantically supported by its target
 // (opaque to model: semantic analysis determines this)
 pred reference_supported [r : Reference] {
-  r.isArchived = True    // archived refs are always accepted
-  // or semantic support exists (abstracted as non-archived + supported)
+  r.isArchived = True or (some r.refTarget and r.semanticSupport = True)
 }
 
 // A reference is unsupported (non-archived and semantically unsupported)
@@ -958,108 +1086,53 @@ pred reference_unsupported [r : Reference] {
   not reference_supported[r]
 }
 
-// --- Delta operation application (inline merge model) ---
+// --- Selected merge-result handoff (external component contract) ---
+// The merged-capability-analysis specification owns first-base-wins matching,
+// duplicate rejection, removal-before-modification, projected requirement and
+// scenario namespaces, collision rollback, and ordered output. This module
+// deliberately does not recompute those decisions from parsed identifiers.
+// The supplied outcome sets below partition selected inputs and retain skip
+// evidence; their algorithmic correctness requires the authoritative model and
+// merge contract/integration tests cited above.
 
 // Precondition: merge requires catalog resolution to have selected inputs
 pred merge_precondition {
-  some Capability
+  some Artifact
 }
 
-// A requirement is removed by a matching REMOVED delta operation
-pred req_removed_by_delta [r : ParsedRequirement, mc : MergedCapabilitySpec] {
-  r.reqDeltaOp = DeltaBase
-  some rem : ParsedRequirement |
-    rem.reqDeltaOp = DeltaRemoved and
-    rem.reqIdentifier = r.reqIdentifier and
-    some r.reqIdentifier and
-    rem.reqCapability = mc.mergeSource
-}
-
-// A requirement is replaced by a matching MODIFIED delta operation
-pred req_modified_by_delta [r : ParsedRequirement, mc : MergedCapabilitySpec] {
-  r.reqDeltaOp = DeltaBase
-  some mod : ParsedRequirement |
-    mod.reqDeltaOp = DeltaModified and
-    mod.reqIdentifier = r.reqIdentifier and
-    some r.reqIdentifier and
-    mod.reqCapability = mc.mergeSource
-}
-
-// The replacement requirement for a modified base requirement
-fun modified_replacement [r : ParsedRequirement, mc : MergedCapabilitySpec] : lone ParsedRequirement {
-  { mod : ParsedRequirement |
-    mod.reqDeltaOp = DeltaModified and
-    mod.reqIdentifier = r.reqIdentifier and
-    mod.reqCapability = mc.mergeSource }
-}
-
-// Merge semantics: determine active requirements after delta application
-// Active set = (base - removed - stale_modified) + added + modified_replacements
-fact merge_active_set_semantics {
+fact selected_merge_handoff {
   all mc : MergedCapabilitySpec | {
-    // Active includes all base reqs not removed or superseded by modification
-    all r : ParsedRequirement |
-      (r.reqDeltaOp = DeltaBase and r.reqCapability = mc.mergeSource
-       and not req_removed_by_delta[r, mc]
-       and not req_modified_by_delta[r, mc])
-        implies r in mc.activeReqs
-    // Active includes all ADDED delta reqs
-    all r : ParsedRequirement |
-      (r.reqDeltaOp = DeltaAdded and r.reqCapability = mc.mergeSource)
-        implies r in mc.activeReqs
-    // Active includes MODIFIED replacements
-    all r : ParsedRequirement |
-      (r.reqDeltaOp = DeltaModified and r.reqCapability = mc.mergeSource)
-        implies r in mc.activeReqs
-    // Removed set contains base reqs targeted by REMOVED
-    all r : ParsedRequirement |
-      (req_removed_by_delta[r, mc])
-        implies r in mc.removedReqs
+    let inputs = { r : ParsedRequirement | r.reqCapability = mc.mergeSource },
+        bases = { r : inputs | r.reqDeltaOp = DeltaBase } | {
+      bases = (mc.activeReqs & bases) + mc.removedBaseReqs +
+        mc.replacedBaseReqs + (mc.skippedReqs & bases)
+      disj[mc.appliedDeltas, mc.skippedReqs]
+      inputs - bases = mc.appliedDeltas + (mc.skippedReqs - bases)
+      mc.appliedDeltas.reqDeltaOp in DeltaAdded + DeltaModified + DeltaRemoved
+      mc.activeReqs - bases = { r : mc.appliedDeltas | r.reqDeltaOp != DeltaRemoved }
+    }
+    // Supplied application receipts distinguish retired base identities from
+    // their instructions. This checks receipt shape, not how merge chose them.
+    (mc.removalTargets).ParsedRequirement = { r : mc.appliedDeltas | r.reqDeltaOp = DeltaRemoved }
+    ParsedRequirement.(mc.removalTargets) = mc.removedBaseReqs
+    (mc.replacementTargets).ParsedRequirement = { r : mc.appliedDeltas | r.reqDeltaOp = DeltaModified }
+    ParsedRequirement.(mc.replacementTargets) = mc.replacedBaseReqs
+    all base : mc.removedBaseReqs | one (mc.removalTargets).base
+    all base : mc.replacedBaseReqs | one (mc.replacementTargets).base
+    all instruction, base : ParsedRequirement |
+      instruction -> base in mc.removalTargets + mc.replacementTargets implies
+        some base.reqIdentifier and instruction.reqIdentifier = base.reqIdentifier
+    // Merge supplies the surviving scenario/block association as one unit.
+    mc.activeScenarios = { s : ParsedScenario |
+      s.scenarioCapability = mc.mergeSource and some s.scenarioParent and
+      s.scenarioParent in mc.activeReqs }
+    all r : mc.skippedReqs | some mf : mc.mergeFindings |
+      mf.mfAffectedReq = r and mf.mfKind != MergeEmptyCapSkipped
+    all s : ParsedScenario | s.scenarioCapability = mc.mergeSource and
+      no s.scenarioParent implies some mf : mc.mergeFindings |
+        mf.mfAffectedScenario = s and mf.mfKind in
+          MergePreSectionContent + MergeStandaloneScenario
   }
-}
-
-// --- Merge failure modes ---
-
-// Failure: MODIFIED delta without matching base requirement
-pred merge_mod_not_found [r : ParsedRequirement, mc : MergedCapabilitySpec] {
-  r.reqDeltaOp = DeltaModified
-  r.reqCapability = mc.mergeSource
-  no base : ParsedRequirement |
-    base.reqDeltaOp = DeltaBase and
-    base.reqIdentifier = r.reqIdentifier and
-    some r.reqIdentifier and
-    base.reqCapability = mc.mergeSource
-}
-
-// Failure: REMOVED delta without matching base requirement
-pred merge_rem_not_found [r : ParsedRequirement, mc : MergedCapabilitySpec] {
-  r.reqDeltaOp = DeltaRemoved
-  r.reqCapability = mc.mergeSource
-  no base : ParsedRequirement |
-    base.reqDeltaOp = DeltaBase and
-    base.reqIdentifier = r.reqIdentifier and
-    some r.reqIdentifier and
-    base.reqCapability = mc.mergeSource
-}
-
-// Failure: MODIFIED or REMOVED delta lacking identifier
-pred merge_delta_missing_id [r : ParsedRequirement] {
-  r.reqDeltaOp in (DeltaModified + DeltaRemoved)
-  no r.reqIdentifier
-}
-
-// Fact: merge failures produce merge findings (no silent discard)
-fact merge_failures_surfaced {
-  all mc : MergedCapabilitySpec, r : ParsedRequirement |
-    merge_mod_not_found[r, mc] implies
-      some mf : mc.mergeFindings | mf.mfKind = MergeModNotFound and mf.mfAffectedReq = r
-  all mc : MergedCapabilitySpec, r : ParsedRequirement |
-    merge_rem_not_found[r, mc] implies
-      some mf : mc.mergeFindings | mf.mfKind = MergeRemNotFound and mf.mfAffectedReq = r
-  all mc : MergedCapabilitySpec, r : ParsedRequirement |
-    (merge_delta_missing_id[r] and r.reqCapability = mc.mergeSource) implies
-      some mf : mc.mergeFindings |
-        mf.mfKind in (MergeModNotFound + MergeRemNotFound) and mf.mfAffectedReq = r
 }
 
 // --- Coverage events using merged views ---
@@ -1070,7 +1143,7 @@ pred emit_missing_spec_file [cap : Capability] {
   capability_missing_spec[cap]
   AnalysisState.phase = Analyzing
   // Effect
-  some f : Finding {
+  some f : Finding - AnalysisState.graphFindings {
     f.findingKind = MissingSpecFile
     no f.upstream
     no f.downstream
@@ -1087,38 +1160,21 @@ pred emit_missing_spec_file [cap : Capability] {
     f.emitted' = f.emitted
 }
 
-// Event: emit empty-capability-skipped finding
-pred emit_empty_capability_skipped [cap : Capability] {
-  // Guard: capability has merged view but it is empty
-  capability_merged_empty[cap]
-  AnalysisState.phase = Analyzing
-  // Effect: emit informational finding
-  some f : Finding {
-    f.findingKind = EmptyCapSkipped
-    no f.upstream
-    no f.downstream
-    f.affectedCapability = cap
-    f.severity = Low
-    f.emitted' = True
-    AnalysisState.graphFindings' = AnalysisState.graphFindings + f
-  }
-  // Frame
-  AnalysisState.phase' = AnalysisState.phase
-  AnalysisState.graphClaims' = AnalysisState.graphClaims
-  AnalysisState.analysisComplete' = AnalysisState.analysisComplete
-  all f : Finding - AnalysisState.graphFindings' + AnalysisState.graphFindings |
-    f.emitted' = f.emitted
-}
+// EmptyCapSkipped is reserved vocabulary; this pipeline surfaces empty
+// capabilities through MergeEmptyCapSkipped, without a coverage event.
 
 // Event: emit unsupported-reference finding
 pred emit_unsupported_ref [r : Reference] {
   // Guard
   reference_unsupported[r]
+  r.refSource in AnalysisState.graphClaims
+  analyzable_claim[r.refSource]
   AnalysisState.phase = Analyzing
   // Effect
-  some f : Finding {
+  some f : Finding - AnalysisState.graphFindings {
     f.findingKind = UnsupportedRef
     f.upstream = r.refSource
+    f.affectedReference = r
     no f.downstream
     no f.affectedCapability
     f.severity = Medium
@@ -1139,7 +1195,7 @@ pred emit_unsupported_ref [r : Reference] {
 assert archived_refs_never_flagged {
   all r : Reference |
     r.isArchived = True implies
-      no f : Finding | f.findingKind = UnsupportedRef and f.upstream = r.refSource
+      no f : Finding | f.findingKind = UnsupportedRef and f.affectedReference = r
 }
 
 // Safety: missing spec files are always surfaced
@@ -1153,37 +1209,50 @@ assert missing_specs_surfaced {
 }
 
 // Safety: removed requirements never produce claims in the graph
-// (no claim in the graph references a capability whose merged view is empty)
+// Requirement identity, including attached scenarios, traces to active blocks.
 assert removed_reqs_never_produce_claims {
   always (all c : AnalysisState.graphClaims |
-    (some c.capability) implies
-      (some c.capability.mergedView and c.capability.mergedView.isEmpty = False))
+    no c.source.parentRequirement & MergedCapabilitySpec.removedBaseReqs)
 }
 
 // Safety: empty capabilities never contribute claims to the graph
 assert empty_caps_produce_no_claims {
-  all cap : Capability |
+  always (all cap : Capability |
     capability_merged_empty[cap] implies
-      no c : AnalysisState.graphClaims | c.capability = cap
+      no c : AnalysisState.graphClaims | c.capability = cap)
 }
 
 // Safety: empty capabilities never participate in coverage analysis
-// (no coverage gap, contradiction, or drift findings reference them)
+// Boundary defects may diagnose stale received claims; they are not coverage
+// conclusions about an empty capability.
 assert empty_caps_excluded_from_coverage {
   always (all cap : Capability |
     capability_merged_empty[cap] implies
       no f : AnalysisState.graphFindings |
-        f.findingKind in (CoverageGap + Contradiction + SemanticDrift) and
-        (some f.upstream and f.upstream.capability = cap))
+        f.findingKind != AnalysisDefect and
+        (f.affectedCapability = cap or
+         cap in (f.upstream + f.downstream).capability))
 }
 
-// Safety: merge failures never silently discard delta content
+// Safety: every unapplied delta retains supplied merge-skip evidence.
+// This is a handoff-contract consequence, not a proof of merge classification
+// or evidence generation; those belong to the authoritative merge model.
 assert no_silent_delta_discard {
   all mc : MergedCapabilitySpec, r : ParsedRequirement |
-    (r.reqDeltaOp in (DeltaModified + DeltaRemoved) and
+    (r.reqDeltaOp != DeltaBase and
      r.reqCapability = mc.mergeSource and
-     r not in mc.activeReqs and r not in mc.removedReqs)
+      r not in mc.appliedDeltas)
       implies some mf : mc.mergeFindings | mf.mfAffectedReq = r
+}
+
+// Safety: rejected/retired merge blocks and their scenarios cannot enter claims.
+assert skipped_and_replaced_blocks_never_produce_claims {
+  always (all c : AnalysisState.graphClaims | no c.source.parentRequirement &
+    (MergedCapabilitySpec.skippedReqs + MergedCapabilitySpec.replacedBaseReqs))
+}
+// Safety: every graph scenario belongs to the supplied surviving scenario set.
+assert graph_scenarios_follow_merge_handoff {
+  always (AnalysisState.graphClaims.source.parsedScenario in MergedCapabilitySpec.activeScenarios)
 }
 
 // Safety: only non-empty merged capabilities feed downstream analysis
@@ -1192,14 +1261,13 @@ assert only_active_caps_analyzed {
     some c.capability implies capability_active_for_coverage[c.capability])
 }
 
-// Liveness: every empty capability is surfaced with EmptyCapSkipped
+// Safety postcondition: the merge-layer skip remains reviewable.
 assert empty_caps_surfaced {
   always (
     AnalysisState.phase = Complete implies
       all cap : Capability |
         capability_merged_empty[cap] implies
-          some f : AnalysisState.graphFindings |
-            f.findingKind = EmptyCapSkipped and f.affectedCapability = cap)
+          some mf : cap.mergedView.mergeFindings | mf.mfKind = MergeEmptyCapSkipped)
 }
 
 // --- Inductive invariants for merge-coverage properties ---
@@ -1216,13 +1284,17 @@ pred merge_coverage_inv {
       implies some c.capability
 }
 
-// Inductive initiation: invariant holds at init
+// Safety: initiation of the merge-coverage invariant (no transition induction).
 assert merge_coverage_initiation {
   no AnalysisState.graphClaims implies merge_coverage_inv
 }
 
-// Inductive preservation: invariant preserved by all transitions
-// (checked via standard check commands below)
+// Reachable-state preservation is checked below. A genuine inductive step
+// would require arbitrary invariant states, not the global init/transitions fact.
+// Safety: all reachable states retain merge-coverage structural health.
+assert merge_coverage_reachable_invariant {
+  always merge_coverage_inv
+}
 ```
 
 ### Requirement: Task Evidence Consistency [CGC-TASK-EVIDENCE]
@@ -1275,7 +1347,8 @@ findings.some(f => f.category === "coverage.task_gap"); //=> true
 
 // Task claims: claims originating from task files
 fun task_claims : set Claim {
-  { c : Claim | some c.provenance and c.provenance.sourceFile in TaskFile }
+  { c : Claim | some c.provenance and c.provenance.sourceFile in TaskFile and
+      c.source.completedTaskSummary = True }
 }
 
 // A task claim contradicts a spec claim (semantic comparison, opaque)
@@ -1298,9 +1371,11 @@ pred emit_task_conflict [tc : TaskContradiction] {
   // Guard
   tc.task_claim in AnalysisState.graphClaims
   tc.spec_claim in AnalysisState.graphClaims
+  analyzable_claim[tc.task_claim]
+  analyzable_claim[tc.spec_claim]
   AnalysisState.phase = Analyzing
   // Effect
-  some f : Finding {
+  some f : Finding - AnalysisState.graphFindings {
     f.findingKind = TaskConflict
     f.upstream = tc.task_claim
     f.downstream = tc.spec_claim
@@ -1322,9 +1397,10 @@ pred emit_task_gap [c : Claim] {
   // Guard
   task_claim_uncovered[c]
   c in AnalysisState.graphClaims
+  analyzable_claim[c]
   AnalysisState.phase = Analyzing
   // Effect
-  some f : Finding {
+  some f : Finding - AnalysisState.graphFindings {
     f.findingKind = TaskGap
     f.upstream = c
     no f.downstream
@@ -1353,7 +1429,7 @@ assert task_gaps_surfaced {
   always (
     AnalysisState.phase = Complete implies
       all c : task_claims & AnalysisState.graphClaims |
-        task_claim_uncovered[c] implies
+        (task_claim_uncovered[c] and analyzable_claim[c]) implies
           some f : AnalysisState.graphFindings |
             f.findingKind = TaskGap and f.upstream = c)
 }
@@ -1373,7 +1449,7 @@ WHEN the same set of parsed documents is processed on two separate runs, THE spe
 **Postcondition:** Claim graph construction is a deterministic function of parsed input.
 
 ##### Evidence
-- Implementation: [claim-graph.ts:153 buildClaimGraph()](/src/domain/claim-graph.ts#L153)
+- Implementation: [claim-graph.ts:159 buildClaimGraph()](/src/domain/claim-graph.ts#L159)
 - Test: [extended.determinism.test.ts:103 claim graph is identical across runs for same parsed input](/test/determinism/extended.determinism.test.ts#L103), [run.determinism.test.ts:18 produces stable summary output for same deterministic input](/test/determinism/run.determinism.test.ts#L18)
 - Example:
 ```typescript
@@ -1388,27 +1464,53 @@ JSON.stringify(a.graph.claims) === JSON.stringify(b.graph.claims); //=> true
 #### Requirement model
 
 ```alloy
-// --- Claim graph determinism ---
-// Determinism is modeled by asserting that the claim graph construction
-// is a function: same inputs produce the same outputs (set equivalence).
-
-// Two analysis runs share the same input if they have the same artifacts and sections
-pred same_input [run1Claims, run2Claims : set Claim] {
-  // Same provenance sources means same input
-  run1Claims.provenance.sourceFile = run2Claims.provenance.sourceFile
-  run1Claims.provenance.sourceSection = run2Claims.provenance.sourceSection
+// --- Claim graph determinism: normalized values and rejected-input inventory ---
+// A snapshot identifies parsed values and selected merged views, not just files.
+sig AnalysisRun {
+  parsedInputs : set SourceItem,
+  mergedInputs : set MergedCapabilitySpec,
+  declaredCapabilities : set Capability,
+  runClaims : set Claim,
+  runGraph : set Claim,
+  runRejected : set Claim
 }
-
-// Determinism: same input implies same claim set (set equivalence)
-pred graph_deterministic [run1Claims, run2Claims : set Claim] {
-  same_input[run1Claims, run2Claims] implies run1Claims = run2Claims
+fun run_extracted_sources [r : AnalysisRun] : set SourceItem {
+  { s : r.parsedInputs | s.sourceArtifact not in CapabilitySpec or
+      (s.parentRequirement in r.mergedInputs.activeReqs and
+       (no s.parsedScenario or s.parsedScenario in r.mergedInputs.activeScenarios)) }
 }
-
-// Safety: construction is deterministic (set equivalence, not byte order)
+fact run_construction_contract {
+  all r : AnalysisRun | {
+    r.runClaims = { c : Claim | c.source in run_extracted_sources[r] and normalized_claim[c] }
+    r.runGraph = { c : r.runClaims | analyzable_claim[c] }
+    r.runRejected = r.runClaims - r.runGraph
+    r.declaredCapabilities in { cap : Capability | some cap.declaredIn }
+  }
+}
+pred same_input [a, b : AnalysisRun] {
+  a.parsedInputs = b.parsedInputs
+  a.mergedInputs = b.mergedInputs
+  a.declaredCapabilities = b.declaredCapabilities
+}
+pred graph_deterministic [a, b : AnalysisRun] {
+  same_input[a, b] implies a.runClaims = b.runClaims and
+    a.runGraph = b.runGraph and a.runRejected = b.runRejected
+}
+// Safety: equal complete snapshots select equal canonical values and partitions.
+// Concrete claim ordering/serialization is verified by the cited tests.
 assert claim_graph_is_deterministic_function {
-  all run1Claims, run2Claims : set Claim |
-    same_input[run1Claims, run2Claims] implies
-      (run1Claims = run2Claims)
+  all a, b : AnalysisRun | graph_deterministic[a, b]
+}
+pred snapshot_matches_invocation[r : AnalysisRun] {
+  r.parsedInputs = extracted_sources
+  r.mergedInputs = MergedCapabilitySpec
+  r.declaredCapabilities = { cap : Capability | some cap.declaredIn }
+}
+// Safety: the snapshot projection matches the operational handoff at analysis.
+assert snapshot_matches_operational_graph {
+  always (AnalysisState.phase in Analyzing + Complete implies
+    all r : AnalysisRun | snapshot_matches_invocation[r] implies
+      r.runGraph = AnalysisState.graphClaims and r.runRejected = rejected_source_input)
 }
 ```
 
@@ -1443,19 +1545,164 @@ JSON.stringify(a) === JSON.stringify(b); //=> true
 #### Requirement model
 
 ```alloy
-// --- Coverage analysis determinism ---
-// Same claim graph as input produces the same set of findings.
+// --- Coverage determinism: external implementation-test boundary ---
+// analyzeCoverage computes comparisons deterministically from the graph and
+// selected capability inputs. Equal comparison outcomes are NOT extra premises
+// in the product requirement. This module abstracts semantic matching and does
+// not implement the token/negation algorithms or serialize findings to bytes.
+pred same_claim_graph [a, b : AnalysisRun] {
+  a.runGraph = b.runGraph
+  a.runRejected = b.runRejected
+  a.mergedInputs = b.mergedInputs
+  a.declaredCapabilities = b.declaredCapabilities
+}
+sig SerializedBytes {}
+sig CoverageEvaluation { inputRun : one AnalysisRun, outputBytes : one SerializedBytes }
+// Safety contract (externally verified): identical graph/merge inputs produce
+// identical finding bytes. No canonical-serializer fact or assertion assumes
+// this contract and then presents its repetition as independent Alloy evidence.
+pred repeated_coverage_contract {
+  all a, b : CoverageEvaluation | same_claim_graph[a.inputRun, b.inputRun] implies
+    a.outputBytes = b.outputBytes
+}
+```
 
-pred same_claim_graph [run1Claims, run2Claims : set Claim] {
-  run1Claims = run2Claims
+### Requirement: Preserve Every Source Formal Disposition [CGC-FORMAL-SCOPE]
+WHEN the claim graph is built, THE spec-check tool SHALL assign every extracted specification statement a source-local identity and explicit eligible or excluded disposition independently of authored identifiers.
+
+**References:**
+- [Proposal: Preconditions, Postconditions, and Invariants](../../changes/archive/2026-11-15-improve-ears-smt-analysis/proposal.md#preconditions-postconditions-and-invariants)
+- [Design: Source and identity](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#source-and-identity)
+
+#### Scenario: Excluded Statements Remain Reviewable [CGC-SCOPE-EXCLUDED]
+WHEN a statement is excluded from solver formalization, THE spec-check tool SHALL retain it for qualitative review, coverage context, provenance, and analyzed-scope reporting.
+
+##### Evidence
+- Implementation: [claim-graph.ts:275 claimFromRequirement()](/src/domain/claim-graph.ts#L275), [claim-graph.ts:298 claimFromScenario()](/src/domain/claim-graph.ts#L298), [grouping.ts:208 isFormalizableClaim()](/src/domain/formal/grouping.ts#L208)
+- Test: [surface-claims.test.ts:34 retains excluded source claims but assigns indexes after admission](/test/contract/surface-claims.test.ts#L34), [formalization-predicates.test.ts:103 all-ineligible source performs no model invocation](/test/contract/formalization-predicates.test.ts#L103)
+- Test (property): [surface.property.test.ts:24 retains every extracted claim and indexes only the admitted subset](/test/property/surface.property.test.ts#L24)
+- Example:
+```typescript
+const { parseSpecText } = await import("./src/domain/parser/spec.ts");
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const { groupFormalizationClaims } = await import("./src/domain/formal/grouping.ts");
+const claims = buildClaimGraph({ specs: [parseSpecText("excluded.md", "### Requirement: Note\nUnsupported prose.\n")] }).graph.claims;
+claims.length; //=> 1
+claims[0].surface.disposition.kind; //=> excluded
+claims[0].provenance.file; //=> excluded.md
+groupFormalizationClaims(claims, new Map()).length; //=> 0
+```
+
+#### Scenario: Duplicate Display Identifiers Do Not Merge Claims [CGC-SCOPE-IDENTITY]
+WHEN authored identifiers are missing or duplicated, THE spec-check tool SHALL retain distinct source-local identities and SHALL assign eligible indexes only after the eligibility filter without using display IDs to join sample outcomes.
+
+##### Evidence
+- Implementation: [surface-block.ts:37 extractSurfaceBlock()](/src/domain/parser/surface-block.ts#L37), [grouping.ts:225 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L225), [source-formalize.ts:179 indexedEntries()](/src/domain/formal/source-formalize.ts#L179)
+- Test: [surface-claims.test.ts:34 retains excluded source claims but assigns indexes after admission](/test/contract/surface-claims.test.ts#L34), [safety-liveness.invariant.test.ts:287 SAFE-14: duplicate and missing IDs retain distinct identity](/test/invariant/safety-liveness.invariant.test.ts#L287)
+- Test (property): [surface.property.test.ts:24 retains every extracted claim and indexes only the admitted subset](/test/property/surface.property.test.ts#L24)
+- Example:
+```typescript
+const { parseSpecText } = await import("./src/domain/parser/spec.ts");
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const { groupFormalizationClaims } = await import("./src/domain/formal/grouping.ts");
+const parsed = parseSpecText("identity.md", "### Requirement: Excluded [DUP]\nUnsupported prose.\n\n### Requirement: First [DUP]\nTHE engine SHALL respond.\n\n### Requirement: Second [DUP]\nTHE engine SHOULD log.\n\n### Requirement: No identifier\nTHE engine MAY stop.\n");
+const claims = buildClaimGraph({ specs: [parsed] }).graph.claims;
+new Set(claims.map(c => c.surface.source.ordinal)).size; //=> 4
+const indexed = groupFormalizationClaims(claims, new Map()).flatMap(g => g.claims);
+indexed.map(c => c.index).join(","); //=> 0,1,2
+indexed[0].claim === claims[1] && indexed[1].claim === claims[2] && indexed[2].claim === claims[3]; //=> true
+```
+
+#### Scenario: Total Disposition Accounting [CGC-SCOPE-PARTITION]
+WHEN admission completes, THE spec-check tool SHALL expose disjoint eligible and excluded sets whose union equals the extracted specification-statement set.
+
+##### Evidence
+- Implementation: [surface-block.ts:37 extractSurfaceBlock()](/src/domain/parser/surface-block.ts#L37), [claim-graph.ts:159 buildClaimGraph()](/src/domain/claim-graph.ts#L159), [grouping.ts:208 isFormalizableClaim()](/src/domain/formal/grouping.ts#L208), [grouping.ts:225 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L225)
+- Test: [surface-claims.test.ts:34 retains excluded source claims but assigns indexes after admission](/test/contract/surface-claims.test.ts#L34)
+- Test (property): [surface.property.test.ts:24 retains every extracted claim and indexes only the admitted subset](/test/property/surface.property.test.ts#L24)
+- Example:
+```typescript
+const { parseSpecText } = await import("./src/domain/parser/spec.ts");
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const { isFormalizableClaim } = await import("./src/domain/formal/grouping.ts");
+const claims = buildClaimGraph({ specs: [parseSpecText("partition.md", "### Requirement: Included\nTHE engine SHALL respond.\n\n### Requirement: Excluded\nUnsupported prose.\n")] }).graph.claims;
+const eligible = claims.filter(isFormalizableClaim);
+const excluded = claims.filter(c => !isFormalizableClaim(c));
+eligible.length === 1 && excluded.length === 1; //=> true
+eligible.length + excluded.length === claims.length; //=> true
+eligible.every(c => !excluded.includes(c)); //=> true
+```
+
+#### Requirement model
+
+```alloy
+sig EligibleIndex {}
+sig Admission {
+  admissionRun : one AnalysisRun,
+  extracted : set Claim,
+  eligible : set Claim,
+  excluded : set Claim,
+  eligibleIndex : Claim -> lone EligibleIndex,
+  reviewable : set Claim,
+  coverageContext : set Claim,
+  scopeReported : set Claim
+}
+fact total_source_disposition {
+  all a : Admission | {
+    a.extracted = { c : a.admissionRun.runClaims |
+      c.source.sourceArtifact in CapabilitySpec }
+    // Source disposition is preserved. Invalid provenance is an additional
+    // admission exclusion; rejected source claims remain in the inventory.
+    a.eligible = { c : a.extracted | c.disposition = Eligible and analyzable_claim[c] }
+    a.excluded = a.extracted - a.eligible
+    a.reviewable = a.extracted
+    a.coverageContext = a.extracted
+    a.scopeReported = a.extracted
+    a.eligibleIndex.EligibleIndex = a.eligible
+    all c : a.eligible | one c.(a.eligibleIndex)
+    all disj c, d : a.eligible | c.(a.eligibleIndex) != d.(a.eligibleIndex)
+  }
+}
+// Sample errors do not alter admission; joins use eligible indexes, not IDs.
+abstract sig SampleStatus {}
+one sig CandidateSample, ErrorSample extends SampleStatus {}
+sig SampleOutcome {
+  admission : one Admission,
+  index : one EligibleIndex,
+  outcomeClaim : one Claim,
+  status : one SampleStatus
+} {
+  outcomeClaim in admission.eligible
+  outcomeClaim.(admission.eligibleIndex) = index
+}
+// Safety: every extracted spec statement has exactly one admission disposition.
+assert disposition_partition_is_total {
+  all a : Admission | no a.eligible & a.excluded and
+    a.eligible + a.excluded = a.extracted
+}
+// Safety: exclusions retain review, coverage-context and scope-report visibility.
+assert excluded_statements_remain_reviewable {
+  all a : Admission | a.excluded in
+    a.reviewable & a.coverageContext & a.scopeReported
+}
+// Safety: distinct source statements retain distinct source-local identities.
+assert display_identifiers_cannot_merge_claims {
+  all disj c, d : normalized_input | c.source.localIdentity != d.source.localIdentity
+}
+// Safety: excluded statements receive no eligible sample index.
+assert eligible_indexes_follow_filter {
+  all a : Admission | no a.excluded & a.eligibleIndex.EligibleIndex
+}
+// Safety: sample errors do not retroactively revoke source admission.
+assert sample_errors_do_not_change_disposition {
+  all o : SampleOutcome | o.status = ErrorSample implies
+    o.outcomeClaim in o.admission.eligible
 }
 
-// Determinism: same graph implies same findings (set equivalence)
-assert coverage_analysis_deterministic {
-  all run1Claims, run2Claims : set Claim,
-      run1Findings, run2Findings : set Finding |
-    same_claim_graph[run1Claims, run2Claims] implies
-      run1Findings = run2Findings
+// Safety: each sample index resolves to exactly its source-local eligible claim.
+assert sample_outcomes_join_source_local_identity {
+  all o : SampleOutcome | one c : o.admission.eligible |
+    c.(o.admission.eligibleIndex) = o.index and c = o.outcomeClaim
 }
 ```
 
@@ -1464,6 +1711,7 @@ assert coverage_analysis_deterministic {
 ```alloy
 // --- Transition system ---
 
+// Event: idle step; frame every mutable relation.
 pred stutter {
   AnalysisState.phase' = AnalysisState.phase
   AnalysisState.graphClaims' = AnalysisState.graphClaims
@@ -1472,31 +1720,39 @@ pred stutter {
   all f : Finding | f.emitted' = f.emitted
 }
 
-// Start merge from idle: catalog resolution has determined inputs
+// Event: start merge-result handoff after catalog resolution has selected inputs.
 pred start_merge {
+  // Guard: Idle with selected artifacts; capabilities need not exist.
   AnalysisState.phase = Idle
   merge_precondition
+  // Effect: enter the handoff phase.
   AnalysisState.phase' = Merging
+  // Frame: claims, findings, completion and emission flags are unchanged.
   AnalysisState.graphClaims' = AnalysisState.graphClaims
   AnalysisState.graphFindings' = AnalysisState.graphFindings
   AnalysisState.analysisComplete' = AnalysisState.analysisComplete
   all f : Finding | f.emitted' = f.emitted
 }
 
-// Complete merge: merged views are now available, advance to normalization
+// Event: finish the immutable merge-result handoff and begin normalization.
 pred complete_merge {
+  // Guard: handoff is in progress; merge-result facts describe supplied inputs.
   AnalysisState.phase = Merging
-  // Guard: structural fact ensures all caps with specFiles have mergedViews
+  // Effect: enable normalization.
   AnalysisState.phase' = Normalizing
+  // Frame: no claims/findings are constructed during merge handoff.
   AnalysisState.graphClaims' = AnalysisState.graphClaims
   AnalysisState.graphFindings' = AnalysisState.graphFindings
   AnalysisState.analysisComplete' = AnalysisState.analysisComplete
   all f : Finding | f.emitted' = f.emitted
 }
 
-// Transition to analyzing phase (after normalization)
+// Event: begin coverage only after all valid graph input has been normalized.
 pred begin_analysis {
+  // Guard: complete valid graph, with rejected source values separately retained.
   AnalysisState.phase = Normalizing
+  AnalysisState.graphClaims = graph_input
+  // Effect: enter analysis without a completion marker.
   AnalysisState.phase' = Analyzing
   AnalysisState.graphClaims' = AnalysisState.graphClaims
   AnalysisState.graphFindings' = AnalysisState.graphFindings
@@ -1504,9 +1760,12 @@ pred begin_analysis {
   all f : Finding | f.emitted' = f.emitted
 }
 
-// Transition to complete phase
+// Event: complete analysis after all result obligations are discharged.
 pred complete_analysis {
+  // Guard: analysis is active and all required findings are present.
   AnalysisState.phase = Analyzing
+  analysis_postcondition
+  // Effect: publish completion; graph/findings/emission flags are framed.
   AnalysisState.phase' = Complete
   AnalysisState.graphClaims' = AnalysisState.graphClaims
   AnalysisState.graphFindings' = AnalysisState.graphFindings
@@ -1522,31 +1781,11 @@ pred init_state {
   all f : Finding | f.emitted = False
 }
 
-// Start normalization from merge-complete state
-pred start_normalization {
-  AnalysisState.phase = Normalizing
-  AnalysisState.graphFindings' = AnalysisState.graphFindings
-  AnalysisState.analysisComplete' = AnalysisState.analysisComplete
-  // Claims may be added during normalization
-  AnalysisState.graphClaims in AnalysisState.graphClaims'
-  all c : AnalysisState.graphClaims' - AnalysisState.graphClaims | {
-    some c.provenance
-    // Spec-derived claims carry capability identity from non-empty merged caps
-    (c.provenance.sourceFile in CapabilitySpec) implies {
-      some c.capability
-      capability_active_for_coverage[c.capability]
-    }
-  }
-  AnalysisState.phase' = AnalysisState.phase
-  all f : Finding | f.emitted' = f.emitted
-}
-
 fact transitions {
   init_state and always (
     // Phase transitions
     start_merge
     or complete_merge
-    or start_normalization
     or normalize_claims
     or begin_analysis
     or complete_analysis
@@ -1555,7 +1794,6 @@ fact transitions {
     or (some cp : ContradictionPair | emit_contradiction[cp])
     or (some c : Claim | emit_semantic_drift[c])
     or (some cap : Capability | emit_missing_spec_file[cap])
-    or (some cap : Capability | emit_empty_capability_skipped[cap])
     or (some r : Reference | emit_unsupported_ref[r])
     or (some tc : TaskContradiction | emit_task_conflict[tc])
     or (some c : Claim | emit_task_gap[c])
@@ -1569,7 +1807,7 @@ fact transitions {
 
 // --- Global invariants ---
 
-// Invariant: findings always have valid evidence (at least one side cited,
+// Safety: findings always have valid evidence (at least one side cited,
 // or the finding is a capability-level finding like MissingSpecFile/EmptyCapSkipped)
 assert findings_have_evidence {
   always (all f : AnalysisState.graphFindings |
@@ -1577,7 +1815,7 @@ assert findings_have_evidence {
     f.findingKind in (MissingSpecFile + EmptyCapSkipped))
 }
 
-// Invariant: analysis phase progresses forward (no regression)
+// Safety: analysis phases progress forward without regression.
 assert phase_monotonic {
   always (
     (AnalysisState.phase = Complete implies after AnalysisState.phase = Complete)
@@ -1587,22 +1825,126 @@ assert phase_monotonic {
   )
 }
 
-// Liveness: analysis eventually completes (with strong fairness)
-// Strong fairness: each phase transition eventually fires when enabled
+// Completion contract: all required results, including rejected-input defects.
+// Safety checks at Complete verify this guard. Separate candidate availability,
+// actual-action witnesses and liveness checks below verify reporting progress.
+pred analysis_postcondition {
+  analysis_results_present[AnalysisState.graphFindings]
+}
+pred analysis_results_present[fs : set Finding] {
+  reference_results_present[fs]
+  all c : rejected_inputs |
+    some f : fs | f.findingKind = AnalysisDefect and f.upstream = c and f.severity = High
+  all c : AnalysisState.graphClaims | {
+    (analyzable_claim[c] and c in upstream_claims and claim_uncovered[c]) implies
+      some f : fs | f.findingKind = CoverageGap and f.upstream = c
+    (analyzable_claim[c] and c in task_claims and task_claim_uncovered[c]) implies
+      some f : fs | f.findingKind = TaskGap and f.upstream = c
+    (analyzable_claim[c] and c in upstream_claims and claim_partially_covered[c]) implies
+      some f : fs | f.findingKind = SemanticDrift and f.upstream = c
+  }
+  all cp : ContradictionPair |
+    cp.contra_upstream + cp.contra_downstream in AnalysisState.graphClaims and
+    analyzable_claim[cp.contra_upstream] and analyzable_claim[cp.contra_downstream] implies
+      some f : fs | f.findingKind = Contradiction and
+        f.upstream = cp.contra_upstream and f.downstream = cp.contra_downstream
+  all tc : TaskContradiction |
+    tc.task_claim + tc.spec_claim in AnalysisState.graphClaims and
+    analyzable_claim[tc.task_claim] and analyzable_claim[tc.spec_claim] implies
+      some f : fs | f.findingKind = TaskConflict and
+        f.upstream = tc.task_claim and f.downstream = tc.spec_claim
+}
+
+// Report candidates describe the guards/evidence of the concrete emit actions.
+// They do not assert that a required descriptor exists or has been emitted.
+fun reporting_candidates : set Finding {
+  { f : Finding | no f.affectedCapability and (
+    (f.findingKind = AnalysisDefect and f.upstream in rejected_inputs and
+      no f.downstream and f.severity = High)
+    or (f.findingKind = UnsupportedRef and f.upstream in AnalysisState.graphClaims and
+      analyzable_claim[f.upstream] and reference_unsupported[f.affectedReference] and
+      no f.downstream and f.severity = Medium)
+    or (f.findingKind = CoverageGap and f.upstream in upstream_claims & AnalysisState.graphClaims and
+      analyzable_claim[f.upstream] and claim_uncovered[f.upstream] and
+      no f.downstream and f.severity = max_severity[f.upstream.obligation])
+    or (f.findingKind = TaskGap and f.upstream in task_claims & AnalysisState.graphClaims and
+      analyzable_claim[f.upstream] and task_claim_uncovered[f.upstream] and
+      no f.downstream and f.severity = Medium)
+    or (f.findingKind = Contradiction and f.severity = max_severity[f.upstream.obligation] and
+      f.upstream + f.downstream in AnalysisState.graphClaims and
+      some cp : ContradictionPair | cp.contra_upstream = f.upstream and cp.contra_downstream = f.downstream)
+    or (f.findingKind = TaskConflict and f.severity = max_severity[f.downstream.obligation] and
+      f.upstream + f.downstream in AnalysisState.graphClaims and
+      some tc : TaskContradiction | tc.task_claim = f.upstream and tc.spec_claim = f.downstream)
+    or (f.findingKind = SemanticDrift and f.upstream in upstream_claims & AnalysisState.graphClaims and
+      claim_partially_covered[f.upstream] and f.severity = max_severity[f.upstream.obligation] and
+      some link : CoverageLink | link.upstreamClaim = f.upstream and
+        link.downstreamClaim = f.downstream and link.downstreamClaim in AnalysisState.graphClaims and
+        f.omissions = link.omittedDetails and link.partial = True)
+  ) } +
+  { f : Finding | f.findingKind = MissingSpecFile and some f.affectedCapability and
+    capability_missing_spec[f.affectedCapability] and no f.upstream + f.downstream and f.severity = High }
+}
+// Explicit finite-scope resource premise, not a global fact or scheduling rule.
+// If the scope lacks a necessary descriptor, candidate-capacity checks/witnesses
+// expose the shortage instead of calling the input fairly completable.
+pred reporting_capacity { analysis_results_present[reporting_candidates] }
+pred reporting_enabled {
+  AnalysisState.phase = Analyzing
+  some reporting_candidates - AnalysisState.graphFindings
+}
+// Event family: actual guarded reporting actions, not assumed result growth.
+pred reporting_step {
+  (some c : Claim | emit_coverage_gap[c] or emit_semantic_drift[c] or
+    emit_task_gap[c] or reject_provenance_free_claim[c] or reject_capability_free_spec_claim[c])
+  or (some cp : ContradictionPair | emit_contradiction[cp])
+  or (some cap : Capability | emit_missing_spec_file[cap])
+  or (some r : Reference | emit_unsupported_ref[r])
+  or (some tc : TaskContradiction | emit_task_conflict[tc])
+}
+
+// Weak action-service fairness excludes endless stuttering for enabled work.
+// It schedules concrete actions, never assumes that all results already exist.
 pred analysis_fairness {
-  // If start_merge is enabled (in Idle with capabilities), merge eventually begins
+  // Guard: Idle with selected artifacts (including proposal-only inputs).
   always ((AnalysisState.phase = Idle and merge_precondition) implies eventually start_merge)
   // If merge is in progress, it eventually completes
   always (AnalysisState.phase = Merging implies eventually complete_merge)
-  // If normalization is enabled (in Normalizing with content), it eventually fires
-  always ((AnalysisState.phase = Normalizing and normalization_precondition and merge_complete_precondition)
+  always ((AnalysisState.phase = Normalizing and AnalysisState.graphClaims != graph_input)
     implies eventually normalize_claims)
-  // If completion is enabled (in Analyzing), it eventually fires
-  always (AnalysisState.phase = Analyzing implies eventually complete_analysis)
+  always ((AnalysisState.phase = Normalizing and AnalysisState.graphClaims = graph_input)
+    implies eventually begin_analysis)
+  always (reporting_enabled implies eventually reporting_step)
+  always ((AnalysisState.phase = Analyzing and analysis_postcondition)
+    implies eventually complete_analysis)
 }
 
+// Liveness: with enough descriptor capacity at analysis, fair actions complete.
 assert analysis_eventually_completes {
-  analysis_fairness implies eventually AnalysisState.phase = Complete
+  analysis_fairness and always (AnalysisState.phase = Analyzing implies reporting_capacity)
+    implies eventually AnalysisState.phase = Complete
+}
+
+// Liveness: fair reporting drains all required results when capacity suffices.
+assert fair_analysis_eventually_reports_all_results {
+  analysis_fairness and always (AnalysisState.phase = Analyzing implies reporting_capacity) implies eventually
+    (AnalysisState.phase = Complete and analysis_postcondition)
+}
+// Liveness: rejected inputs eventually receive defects under the same premises.
+assert fair_defect_reporting {
+  analysis_fairness and always (AnalysisState.phase = Analyzing implies reporting_capacity) implies
+    always (all c : rejected_inputs | eventually
+      (some f : AnalysisState.graphFindings | f.findingKind = AnalysisDefect and f.upstream = c))
+}
+// Safety: pending obligations have a concrete candidate when capacity suffices.
+assert pending_results_have_candidates {
+  always (AnalysisState.phase = Analyzing and reporting_capacity and not analysis_postcondition
+    implies reporting_enabled)
+}
+// Safety: a reporting action emits a new candidate and cannot silently stutter.
+assert reporting_actions_make_progress {
+  always (reporting_step implies one AnalysisState.graphFindings' - AnalysisState.graphFindings and
+    AnalysisState.graphFindings' - AnalysisState.graphFindings in reporting_candidates)
 }
 
 // Safety: once complete, no new findings are added
@@ -1638,7 +1980,6 @@ assert analysis_events_respect_phase {
     (some cp : ContradictionPair | emit_contradiction[cp]) or
     (some c : Claim | emit_semantic_drift[c]) or
     (some cap : Capability | emit_missing_spec_file[cap]) or
-    (some cap : Capability | emit_empty_capability_skipped[cap]) or
     (some r : Reference | emit_unsupported_ref[r]) or
     (some tc : TaskContradiction | emit_task_conflict[tc]) or
     (some c : Claim | emit_task_gap[c]) or
@@ -1665,7 +2006,7 @@ assert no_claims_before_normalization {
 // Fact: coverage links connect upstream artifacts to downstream artifacts
 fact coverage_link_wellformedness {
   all link : CoverageLink {
-    link.upstreamClaim in upstream_claims
+    link.upstreamClaim in upstream_claims + task_claims
     link.downstreamClaim in downstream_claims
   }
 }
@@ -1677,68 +2018,54 @@ fact coverage_links_respect_merge {
       capability_active_for_coverage[link.downstreamClaim.capability]
 }
 
-// Fact: no two findings report the same (kind, upstream, downstream) triple
-// (structural uniqueness prevents duplicate reports)
+// Semantic comparison results are immutable inputs over normalized,
+// traceable claims. Defective claims remain reviewable, without conclusions.
+fact comparison_inputs_are_traceable {
+  all link : CoverageLink | {
+    link.upstreamClaim + link.downstreamClaim in normalized_input
+    analyzable_claim[link.upstreamClaim]
+    analyzable_claim[link.downstreamClaim]
+  }
+  all cp : ContradictionPair | {
+    cp.contra_upstream + cp.contra_downstream in normalized_input
+    analyzable_claim[cp.contra_upstream]
+    analyzable_claim[cp.contra_downstream]
+  }
+  all tc : TaskContradiction | {
+    tc.task_claim + tc.spec_claim in normalized_input
+    analyzable_claim[tc.task_claim]
+    analyzable_claim[tc.spec_claim]
+  }
+}
+
+// Fact: uniqueness uses the five-field identity (kind, upstream, downstream,
+// capability, reference); two unsupported citations on one claim stay distinct.
 fact finding_uniqueness {
   all disj f1, f2 : Finding |
     not (f1.findingKind = f2.findingKind and
          f1.upstream = f2.upstream and
          f1.downstream = f2.downstream and
-         f1.affectedCapability = f2.affectedCapability)
+         f1.affectedCapability = f2.affectedCapability and
+         f1.affectedReference = f2.affectedReference)
 }
 
 // --- Completeness liveness ---
 
-// Strong fairness for analysis events: if an event is infinitely often
-// enabled, it eventually fires.
+// Finite immutable input and monotone findings make fair reporting drain.
 pred analysis_event_fairness {
   analysis_fairness
-  // If a contradiction pair exists in the graph, it is eventually reported
-  all cp : ContradictionPair |
-    always (
-      (cp.contra_upstream in AnalysisState.graphClaims and
-       cp.contra_downstream in AnalysisState.graphClaims and
-       AnalysisState.phase = Analyzing)
-      implies eventually emit_contradiction[cp])
-  // If an unsupported reference exists, it is eventually reported
-  all r : Reference |
-    always (
-      (reference_unsupported[r] and AnalysisState.phase = Analyzing)
-      implies eventually emit_unsupported_ref[r])
-  // If a task contradiction exists, it is eventually reported
-  all tc : TaskContradiction |
-    always (
-      (tc.task_claim in AnalysisState.graphClaims and
-       tc.spec_claim in AnalysisState.graphClaims and
-       AnalysisState.phase = Analyzing)
-      implies eventually emit_task_conflict[tc])
-  // If a partially covered claim exists, drift is eventually reported
-  all c : Claim |
-    always (
-      (c in upstream_claims and c in AnalysisState.graphClaims and
-       claim_partially_covered[c] and AnalysisState.phase = Analyzing)
-      implies eventually emit_semantic_drift[c])
-  // If an uncovered upstream claim exists, gap is eventually reported
-  all c : Claim |
-    always (
-      (c in upstream_claims and c in AnalysisState.graphClaims and
-       claim_uncovered[c] and AnalysisState.phase = Analyzing)
-      implies eventually emit_coverage_gap[c])
-  // If an empty capability exists, it is eventually surfaced
-  all cap : Capability |
-    always (
-      (capability_merged_empty[cap] and AnalysisState.phase = Analyzing)
-      implies eventually emit_empty_capability_skipped[cap])
 }
 
-// Liveness: with event fairness, all contradictions are eventually surfaced
+// Liveness: analyzable contradictions are eventually reported, independently
+// of the completed-state reporting guard.
 assert all_contradictions_surfaced {
-  analysis_event_fairness implies
-    always (AnalysisState.phase = Complete implies
+  analysis_event_fairness and always (AnalysisState.phase = Analyzing implies reporting_capacity) implies
+    always (AnalysisState.phase = Analyzing implies
       all cp : ContradictionPair |
         (cp.contra_upstream in AnalysisState.graphClaims and
-         cp.contra_downstream in AnalysisState.graphClaims) implies
-          some f : AnalysisState.graphFindings |
+         cp.contra_downstream in AnalysisState.graphClaims and
+         analyzable_claim[cp.contra_upstream] and analyzable_claim[cp.contra_downstream]) implies
+          eventually some f : AnalysisState.graphFindings |
             f.findingKind = Contradiction and
             f.upstream = cp.contra_upstream and
             f.downstream = cp.contra_downstream)
@@ -1746,113 +2073,243 @@ assert all_contradictions_surfaced {
 
 // Liveness: with event fairness, all unsupported refs are eventually surfaced
 assert all_unsupported_refs_surfaced {
-  analysis_event_fairness implies
-    always (AnalysisState.phase = Complete implies
+  analysis_event_fairness and always (AnalysisState.phase = Analyzing implies reporting_capacity) implies
+    always (AnalysisState.phase = Analyzing implies
       all r : Reference |
-        reference_unsupported[r] implies
-          some f : AnalysisState.graphFindings |
-            f.findingKind = UnsupportedRef and f.upstream = r.refSource)
+        (reference_unsupported[r] and r.refSource in AnalysisState.graphClaims and
+         analyzable_claim[r.refSource]) implies
+          eventually some f : AnalysisState.graphFindings |
+            f.findingKind = UnsupportedRef and f.affectedReference = r)
 }
 
 // Liveness: with event fairness, all semantic drift is eventually surfaced
 assert all_drift_surfaced {
-  analysis_event_fairness implies
-    always (AnalysisState.phase = Complete implies
+  analysis_event_fairness and always (AnalysisState.phase = Analyzing implies reporting_capacity) implies
+    always (AnalysisState.phase = Analyzing implies
       all c : upstream_claims & AnalysisState.graphClaims |
-        claim_partially_covered[c] implies
-          some f : AnalysisState.graphFindings |
+        (claim_partially_covered[c] and analyzable_claim[c]) implies
+          eventually some f : AnalysisState.graphFindings |
             f.findingKind = SemanticDrift and f.upstream = c)
 }
 
-// Liveness: with event fairness, all empty capabilities are surfaced
+// Safety postcondition: all empty capabilities have merge skip evidence.
 assert all_empty_caps_surfaced {
-  analysis_event_fairness implies
     always (AnalysisState.phase = Complete implies
       all cap : Capability |
         capability_merged_empty[cap] implies
-          some f : AnalysisState.graphFindings |
-            f.findingKind = EmptyCapSkipped and f.affectedCapability = cap)
+          some mf : cap.mergedView.mergeFindings | mf.mfKind = MergeEmptyCapSkipped)
 }
 
-// --- Merge determinism ---
-// The merge phase is a pure function: same inputs produce same merged views.
-// Modeled as a static constraint since merge has no temporal behavior.
-fact merge_determinism {
-  all disj mc1, mc2 : MergedCapabilitySpec |
-    mc1.mergeSource = mc2.mergeSource implies mc1 = mc2
-}
+// Merge-result identity is constrained by merged_view_consistency above.
+// Cross-run merge determinism belongs to the authoritative merge model/tests;
+// having one view per capability does not independently establish that property.
 
 // --- Verification commands ---
+// Default scopes include source structure and evidence vocabulary. These
+// commands check finite lasso traces; passing checks are bounded evidence.
 
-run show_claim_graph {} for 3 Claim, 2 Finding, 2 Artifact, 2 Section, 2 Provenance, 2 Capability, 2 Reference, 1 CoverageLink, 1 ContradictionPair, 1 TaskContradiction, 2 MergedCapabilitySpec, 3 ParsedRequirement, 3 ReqIdentifier, 2 MergeFinding, 5 steps
+run show_claim_graph {} for 3 but 8 steps expect 1
 
 run scenario_coverage_gap_found {
-  eventually (some f : AnalysisState.graphFindings | f.findingKind = CoverageGap)
-} for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 1 Capability, 1 Reference, 1 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 1 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 1 MergeFinding, 10 steps
+  completes_after_reporting_kind[CoverageGap]
+} for 3 but 15 steps expect 1
 
 run scenario_contradiction_found {
-  eventually (some f : AnalysisState.graphFindings | f.findingKind = Contradiction)
-} for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 1 Capability, 1 Reference, 0 CoverageLink, 1 ContradictionPair, 0 TaskContradiction, 1 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 1 MergeFinding, 10 steps
+  completes_after_reporting_kind[Contradiction]
+} for 3 but 15 steps expect 1
 
 run scenario_full_analysis {
+  analysis_fairness
+  always (AnalysisState.phase = Analyzing implies reporting_capacity)
+  eventually some AnalysisState.graphClaims
+  eventually #(AnalysisState.graphFindings) >= 3
   eventually AnalysisState.phase = Complete
-} for 4 Claim, 4 Finding, 3 Artifact, 3 Section, 3 Provenance, 1 Capability, 2 Reference, 1 CoverageLink, 1 ContradictionPair, 1 TaskContradiction, 1 MergedCapabilitySpec, 3 ParsedRequirement, 3 ReqIdentifier, 2 MergeFinding, 12 steps
+} for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 4 ParsedRequirement, 4 ReqIdentifier, 15 steps expect 1
 
 run scenario_merge_then_analyze {
   eventually (AnalysisState.phase = Merging) ;
   eventually (AnalysisState.phase = Normalizing) ;
   eventually (AnalysisState.phase = Complete)
-} for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 2 Capability, 1 Reference, 1 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 2 MergedCapabilitySpec, 3 ParsedRequirement, 3 ReqIdentifier, 2 MergeFinding, 12 steps
+} for 3 but 10 steps expect 1
 
 run scenario_empty_cap_skipped {
-  eventually (some f : AnalysisState.graphFindings | f.findingKind = EmptyCapSkipped)
-} for 2 Claim, 2 Finding, 2 Artifact, 2 Section, 2 Provenance, 2 Capability, 0 Reference, 0 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 2 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 2 MergeFinding, 10 steps
+  some cap : Capability | capability_merged_empty[cap] and
+    some mf : cap.mergedView.mergeFindings | mf.mfKind = MergeEmptyCapSkipped
+  eventually AnalysisState.phase = Complete
+} for 3 but 8 steps expect 1
 
 run scenario_removed_req_excluded {
-  some mc : MergedCapabilitySpec | some mc.removedReqs and some mc.activeReqs
-} for 0 Claim, 0 Finding, 2 Artifact, 1 Section, 0 Provenance, 1 Capability, 0 Reference, 0 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 1 MergedCapabilitySpec, 4 ParsedRequirement, 4 ReqIdentifier, 2 MergeFinding, 1 steps
+  some mc : MergedCapabilitySpec | some mc.removedBaseReqs and some mc.activeReqs and
+    some s : SourceItem | s.parentRequirement in mc.removedBaseReqs and
+      some s.parsedScenario and
+      eventually (AnalysisState.phase = Complete and some AnalysisState.graphClaims and
+        no c : AnalysisState.graphClaims | c.source = s)
+} for 3 but 4 ParsedRequirement, 4 ReqIdentifier, 15 steps expect 1
 
 // --- Existing safety and liveness checks ---
 
-check provenance_integrity for 3 Claim, 2 Finding, 2 Artifact, 2 Section, 2 Provenance, 1 Capability, 1 Reference, 1 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 1 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 1 MergeFinding, 15 steps expect 0
-check mandatory_produces_high_severity for 4 Claim, 4 Finding, 2 Artifact, 2 Section, 2 Provenance, 1 Capability, 1 Reference, 1 CoverageLink, 1 ContradictionPair, 0 TaskContradiction, 1 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 1 MergeFinding, 10 steps expect 0
-check informational_no_high_severity for 4 Claim, 4 Finding, 2 Artifact, 2 Section, 2 Provenance, 1 Capability, 1 Reference, 1 CoverageLink, 1 ContradictionPair, 0 TaskContradiction, 1 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 1 MergeFinding, 10 steps expect 0
-check contradiction_cites_both for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 0 Capability, 0 Reference, 0 CoverageLink, 1 ContradictionPair, 0 TaskContradiction, 0 MergedCapabilitySpec, 0 ParsedRequirement, 0 ReqIdentifier, 0 MergeFinding, 10 steps expect 0
-check drift_identifies_omission for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 0 Capability, 0 Reference, 1 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 0 MergedCapabilitySpec, 0 ParsedRequirement, 0 ReqIdentifier, 0 MergeFinding, 10 steps expect 0
-check archived_refs_never_flagged for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 1 Capability, 2 Reference, 0 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 1 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 1 MergeFinding, 10 steps expect 0
-check task_conflict_cites_both for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 0 Capability, 0 Reference, 0 CoverageLink, 0 ContradictionPair, 1 TaskContradiction, 0 MergedCapabilitySpec, 0 ParsedRequirement, 0 ReqIdentifier, 0 MergeFinding, 10 steps expect 0
-check findings_have_evidence for 4 Claim, 4 Finding, 3 Artifact, 3 Section, 3 Provenance, 1 Capability, 1 Reference, 1 CoverageLink, 1 ContradictionPair, 1 TaskContradiction, 1 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 1 MergeFinding, 15 steps expect 0
-check complete_is_stable for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 1 Capability, 1 Reference, 1 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 1 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 1 MergeFinding, 15 steps expect 0
-check analysis_eventually_completes for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 1 Capability, 1 Reference, 1 CoverageLink, 1 ContradictionPair, 1 TaskContradiction, 1 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 1 MergeFinding, 20 steps expect 1
-// Note: expect 1 because bounded model checking of liveness with fairness
-// at small scope/steps can produce spurious counterexamples from traces that
-// loop before reaching Complete. The property is enforced by the synchronous
-// implementation which always terminates.
+// Preserve the earlier useful claim/finding/requirement scopes and 20-step
+// liveness horizon. New source-identity scopes match the four-claim budget.
+check provenance_integrity for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 4 ParsedRequirement, 4 ReqIdentifier, 20 steps expect 0
+check mandatory_produces_high_severity for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check advisory_produces_medium_severity for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check informational_no_high_severity for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check contradiction_cites_both for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check drift_identifies_omission for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check archived_refs_never_flagged for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check task_conflict_cites_both for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check findings_have_evidence for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check complete_is_stable for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check analysis_eventually_completes for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+// Alloy lasso counterexamples are real model behaviors, not spurious merely
+// because they stutter. Scheduler fairness is stated explicitly above.
 
 // --- Extended property checks ---
 
-check claims_monotonic for 3 Claim, 2 Finding, 2 Artifact, 2 Section, 2 Provenance, 1 Capability, 1 Reference, 1 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 1 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 1 MergeFinding, 15 steps expect 0
-check findings_monotonic for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 1 Capability, 1 Reference, 1 CoverageLink, 1 ContradictionPair, 0 TaskContradiction, 1 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 1 MergeFinding, 15 steps expect 0
-check emission_irreversible for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 1 Capability, 1 Reference, 1 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 1 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 1 MergeFinding, 15 steps expect 0
-check analysis_events_respect_phase for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 1 Capability, 1 Reference, 1 CoverageLink, 1 ContradictionPair, 1 TaskContradiction, 1 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 1 MergeFinding, 10 steps expect 0
-check no_findings_before_analysis for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 1 Capability, 1 Reference, 1 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 1 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 1 MergeFinding, 15 steps expect 0
-check all_contradictions_surfaced for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 0 Capability, 0 Reference, 0 CoverageLink, 1 ContradictionPair, 0 TaskContradiction, 0 MergedCapabilitySpec, 0 ParsedRequirement, 0 ReqIdentifier, 0 MergeFinding, 20 steps expect 0
-check all_unsupported_refs_surfaced for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 1 Capability, 2 Reference, 0 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 1 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 1 MergeFinding, 20 steps expect 0
-check all_drift_surfaced for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 0 Capability, 0 Reference, 1 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 0 MergedCapabilitySpec, 0 ParsedRequirement, 0 ReqIdentifier, 0 MergeFinding, 20 steps expect 0
+check claims_monotonic for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check findings_monotonic for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check emission_irreversible for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check analysis_events_respect_phase for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check no_findings_before_analysis for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check all_contradictions_surfaced for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check all_unsupported_refs_surfaced for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check all_drift_surfaced for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
 
 // --- Merge-related property checks (new) ---
 
-check spec_claims_carry_capability for 3 Claim, 2 Finding, 2 Artifact, 2 Section, 2 Provenance, 2 Capability, 0 Reference, 0 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 2 MergedCapabilitySpec, 3 ParsedRequirement, 3 ReqIdentifier, 2 MergeFinding, 15 steps expect 0
-check no_claims_from_empty_capabilities for 3 Claim, 2 Finding, 2 Artifact, 2 Section, 2 Provenance, 2 Capability, 0 Reference, 0 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 2 MergedCapabilitySpec, 3 ParsedRequirement, 3 ReqIdentifier, 2 MergeFinding, 15 steps expect 0
-check empty_caps_produce_no_claims for 3 Claim, 2 Finding, 2 Artifact, 2 Section, 2 Provenance, 2 Capability, 0 Reference, 0 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 2 MergedCapabilitySpec, 3 ParsedRequirement, 3 ReqIdentifier, 2 MergeFinding, 10 steps expect 0
-check empty_caps_excluded_from_coverage for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 2 Capability, 0 Reference, 1 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 2 MergedCapabilitySpec, 3 ParsedRequirement, 3 ReqIdentifier, 2 MergeFinding, 15 steps expect 0
-check removed_reqs_never_produce_claims for 3 Claim, 2 Finding, 2 Artifact, 2 Section, 2 Provenance, 1 Capability, 0 Reference, 0 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 1 MergedCapabilitySpec, 4 ParsedRequirement, 4 ReqIdentifier, 2 MergeFinding, 10 steps expect 0
-check no_silent_delta_discard for 0 Claim, 0 Finding, 2 Artifact, 0 Section, 0 Provenance, 2 Capability, 0 Reference, 0 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 2 MergedCapabilitySpec, 4 ParsedRequirement, 4 ReqIdentifier, 3 MergeFinding, 1 steps expect 0
-check all_empty_caps_surfaced for 3 Claim, 3 Finding, 2 Artifact, 2 Section, 2 Provenance, 2 Capability, 0 Reference, 0 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 2 MergedCapabilitySpec, 3 ParsedRequirement, 3 ReqIdentifier, 2 MergeFinding, 20 steps expect 0
-check phase_monotonic for 3 Claim, 2 Finding, 2 Artifact, 2 Section, 2 Provenance, 1 Capability, 1 Reference, 1 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 1 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 1 MergeFinding, 15 steps expect 0
-check no_claims_before_normalization for 3 Claim, 2 Finding, 2 Artifact, 2 Section, 2 Provenance, 1 Capability, 0 Reference, 0 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 1 MergedCapabilitySpec, 2 ParsedRequirement, 2 ReqIdentifier, 1 MergeFinding, 15 steps expect 0
+check spec_claims_carry_capability for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 4 ParsedRequirement, 4 ReqIdentifier, 20 steps expect 0
+check no_claims_from_empty_capabilities for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 4 ParsedRequirement, 4 ReqIdentifier, 20 steps expect 0
+check empty_caps_produce_no_claims for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 4 ParsedRequirement, 4 ReqIdentifier, 20 steps expect 0
+check empty_caps_excluded_from_coverage for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 4 ParsedRequirement, 4 ReqIdentifier, 20 steps expect 0
+check removed_reqs_never_produce_claims for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 4 ParsedRequirement, 4 ReqIdentifier, 20 steps expect 0
+check no_silent_delta_discard for 3 but 4 ParsedRequirement, 4 ReqIdentifier, 1 steps expect 0
+check all_empty_caps_surfaced for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 4 ParsedRequirement, 4 ReqIdentifier, 20 steps expect 0
+check phase_monotonic for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check no_claims_before_normalization for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
 
-// --- Inductive checks for merge-coverage (2-step, fast for larger state spaces) ---
+// --- Merge-coverage initiation and reachable-state checks ---
 
-check merge_coverage_initiation for 4 Claim, 3 Finding, 3 Artifact, 3 Section, 3 Provenance, 3 Capability, 0 Reference, 0 CoverageLink, 0 ContradictionPair, 0 TaskContradiction, 3 MergedCapabilitySpec, 6 ParsedRequirement, 6 ReqIdentifier, 3 MergeFinding, 1 steps expect 0
+check merge_coverage_initiation for 4 but 6 ParsedRequirement, 6 ReqIdentifier, 1 steps expect 0
+check merge_coverage_reachable_invariant for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 4 ParsedRequirement, 4 ReqIdentifier, 20 steps expect 0
+
+// --- Source, modality, admission, failure-boundary and determinism checks ---
+run scenario_provenance_defect {
+  some c : rejected_source_input | not sufficient_provenance[c] and
+    eventually (some f : AnalysisState.graphFindings |
+      f.findingKind = AnalysisDefect and f.upstream = c and f.severity = High)
+  eventually AnalysisState.phase = Complete
+} for 3 but 8 steps expect 1
+run scenario_supported_live_reference {
+  some r : Reference | r.isArchived = False and reference_supported[r] and
+    eventually (AnalysisState.phase = Complete and r.refSource in AnalysisState.graphClaims and
+      no f : AnalysisState.graphFindings | f.affectedReference = r)
+} for 3 but 8 steps expect 1
+run scenario_mixed_archive_and_unsupported_reference {
+  some disj historical, bad : Reference | historical.refSource = bad.refSource and
+    historical.isArchived = True and reference_unsupported[bad]
+  eventually (some f : AnalysisState.graphFindings | f.findingKind = UnsupportedRef)
+} for 3 but 8 steps expect 1
+run scenario_permission_conflicts_with_prohibition {
+  some disj p, prohibition : SemanticRule |
+    p.ruleClaim in normalized_input and prohibition.ruleClaim in normalized_input and
+    p.ruleClaim.permission = True and prohibition.ruleClaim.obligation = Mandatory and
+    permission_conflicts_with_baseline[p, prohibition]
+} for 3 but 1 steps expect 1
+run scenario_duplicate_display_ids_remain_distinct {
+  some disj c, d : normalized_input | some c.source.displayIdentifier and
+    c.source.displayIdentifier = d.source.displayIdentifier and
+    c.source.sourceArtifact + d.source.sourceArtifact in CapabilitySpec and
+    c.source.parentRequirement = d.source.parentRequirement and
+    some c.source.parsedScenario and some d.source.parsedScenario
+} for 3 but 1 steps expect 1
+run scenario_excluded_statement_and_sample_error {
+  some a : Admission | some a.excluded and some a.eligible and
+    some o : SampleOutcome | o.admission = a and o.status = ErrorSample
+} for 3 but 1 steps expect 1
+run scenario_two_equal_runs {
+  some disj a, b : AnalysisRun | same_input[a, b] and snapshot_matches_invocation[a] and
+    some a.runGraph and eventually (AnalysisState.phase = Complete and
+      a.runGraph = AnalysisState.graphClaims)
+} for 3 but 15 steps expect 1
+run scenario_merge_failure {
+  some mc : MergedCapabilitySpec, r : ParsedRequirement |
+    r in mc.skippedReqs and r.reqDeltaOp in DeltaModified + DeltaRemoved and
+    some mf : mc.mergeFindings | mf.mfAffectedReq = r
+} for 3 but 1 steps expect 1
+run scenario_task_coverage_link {
+  some link : CoverageLink | link.upstreamClaim in task_claims
+  no DownstreamInput.received
+  all link : CoverageLink | link.partial = False
+  eventually AnalysisState.phase = Complete
+} for 3 but exactly 2 Claim, exactly 2 SourceItem, 2 Artifact,
+  0 Finding, 0 Reference, 0 SemanticRule, 0 AnalysisRun, 0 Admission,
+  0 SampleOutcome, 0 ParsedScenario, 0 ContradictionPair, 0 TaskContradiction,
+  1 Capability, 1 MergedCapabilitySpec, 1 ParsedRequirement,
+  exactly 1 CoverageLink, 8 steps expect 1
+
+check normalization_preserves_source_structure for 3 but 8 steps expect 0
+check defective_inputs_are_reported for 3 but 8 steps expect 0
+check structural_modal_is_authoritative for 3 but 8 steps expect 0
+check advisory_and_permission_do_not_constrain_baseline for 3 but 1 steps expect 0
+check permission_absence_is_not_a_violation for 3 but 1 steps expect 0
+check completed_reference_validation for 3 but 8 steps expect 0
+check unsupported_reference_names_exact_target for 3 but 8 steps expect 0
+check missing_specs_surfaced for 3 but 8 steps expect 0
+check uncovered_claims_surfaced for 3 but 8 steps expect 0
+check task_gaps_surfaced for 3 but 8 steps expect 0
+check claim_graph_is_deterministic_function for 3 but 1 steps expect 0
+check snapshot_matches_operational_graph for 3 but 15 steps expect 0
+check disposition_partition_is_total for 3 but 1 steps expect 0
+check excluded_statements_remain_reviewable for 3 but 1 steps expect 0
+check display_identifiers_cannot_merge_claims for 3 but 1 steps expect 0
+check eligible_indexes_follow_filter for 3 but 1 steps expect 0
+check sample_errors_do_not_change_disposition for 3 but 1 steps expect 0
+check sample_outcomes_join_source_local_identity for 3 but 1 steps expect 0
+check fair_analysis_eventually_reports_all_results for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check fair_defect_reporting for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+
+// Nonvacuity: exercise pending work and the actual reporting actions before
+// completion, rather than relying solely on Complete => reporting postconditions.
+pred completes_after_reporting_kind[k : FindingKind] {
+  eventually (AnalysisState.phase = Analyzing and reporting_enabled and reporting_step and
+    some f : AnalysisState.graphFindings' - AnalysisState.graphFindings | f.findingKind = k)
+  eventually AnalysisState.phase = Complete
+}
+run scenario_drift_action { completes_after_reporting_kind[SemanticDrift] }
+  for 3 but 15 steps expect 1
+run scenario_missing_spec_action { completes_after_reporting_kind[MissingSpecFile] }
+  for 3 but 15 steps expect 1
+run scenario_unsupported_ref_action { completes_after_reporting_kind[UnsupportedRef] }
+  for 3 but 15 steps expect 1
+run scenario_task_conflict_action { completes_after_reporting_kind[TaskConflict] }
+  for 3 but 15 steps expect 1
+run scenario_task_gap_action { completes_after_reporting_kind[TaskGap] }
+  for 3 but 15 steps expect 1
+run scenario_defect_action { completes_after_reporting_kind[AnalysisDefect] }
+  for 3 but 15 steps expect 1
+run scenario_rejected_spec_remains_in_scope {
+  some a : Admission, c : a.extracted & rejected_source_input |
+    c in a.excluded & a.reviewable & a.coverageContext & a.scopeReported and
+    c not in a.eligible and
+    eventually (AnalysisState.phase = Complete and c not in AnalysisState.graphClaims)
+} for 3 but 15 steps expect 1
+run scenario_insufficient_finding_scope {
+  some rejected_source_input
+  analysis_fairness
+  eventually always (AnalysisState.phase = Analyzing and not analysis_postcondition and
+    not reporting_capacity and not reporting_enabled)
+} for 3 but 0 Finding, 15 steps expect 1
+
+check no_silent_orphan_consumption for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check conclusion_provenance_integrity for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check skipped_and_replaced_blocks_never_produce_claims for 3 but 4 ParsedRequirement, 4 ReqIdentifier, 20 steps expect 0
+check graph_scenarios_follow_merge_handoff for 3 but 4 ParsedRequirement, 4 ReqIdentifier, 20 steps expect 0
+check pending_results_have_candidates for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check reporting_actions_make_progress for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 20 steps expect 0
+check only_active_caps_analyzed for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 4 ParsedRequirement, 4 ReqIdentifier, 20 steps expect 0
+check empty_caps_surfaced for 3 but 4 Claim, 4 SourceItem, 4 SourceIdentity, 4 Finding, 4 ParsedRequirement, 4 ReqIdentifier, 20 steps expect 0
 ```
+
+**Verification boundary:** Commands use the explicit scopes above, including the restored four-claim/four-finding budgets and up to 20 trace steps. Merge decisions, concrete semantic comparison and serialization require the authoritative merge model and implementation evidence cited above. Completion postconditions, action reachability and fairness-conditioned progress are distinct checks; insufficient finding capacity is explicitly witnessed rather than silently assumed away. The previous 2026-11-15 results apply to the earlier model, not this revision.
+
+Reproduce with `java -jar /path/to/alloy-6.2.0.jar exec -s minisat -c '*' -t none -o /path/to/results openspec/specs/claim-graph-and-coverage/spec.md`.

@@ -16,6 +16,8 @@ import {
 } from "../branded.js";
 import type { LogicFunctionSymbol, LogicIrClaim, LogicSort } from "../logic-ir.js";
 import { sanitizeIdentifier as sanitizeIdentifierImpl } from "./identifiers.js";
+import { compileTypedClaim, compileTypedGroup, type TypedCompilationPreparation } from "./typed-smtlib.js";
+import { parseExpressionSyntax, type ExpressionSyntax } from "./expression-parser.js";
 
 /** Maximum claims accepted per compile group. */
 export const CLAIMS_PER_GROUP_MAX = 1024;
@@ -24,18 +26,14 @@ export const CLAIMS_PER_GROUP_MAX = 1024;
 export const DECLARATIONS_PER_CLAIM_MAX = 2048;
 
 /**
- * Identifier-like token pattern shared by every assertion-sanitization path.
+ * SMT operator/sort tokens retained by the literal-aware raw-IR projection.
  *
  * @remarks
- * A token is a leading `[A-Za-z_]` followed by any run of
- * `[A-Za-z0-9_\-.:]`. This matches SMT-LIB word keywords (`and`, `or`, `not`,
- * `ite`) and escaping-requiring identifiers (`user_id`, `a.b`, `is-valid`,
- * `ns:x`), while non-letter operators (`=>`, `=`, `<`, `+`), whitespace, and
- * parentheses do not match. The `g` flag drives `String.prototype.replace`,
- * which resets `lastIndex` to 0 on completion; because every consumer runs the
- * replacement synchronously, sharing this single constant is safe.
+ * Source-based analysis renders resolved typed nodes. Raw domain/oracle inputs
+ * use the same bounded syntax lexer, so quoted symbols and string values cannot
+ * accidentally alias operator tokens or undergo textual identifier replacement.
  */
-const ASSERTION_TOKEN_REGEX = /[A-Za-z_][A-Za-z0-9_\-.:]*/gu;
+const SMT_KEYWORDS = new Set(["and", "or", "not", "ite", "true", "false", "xor", "distinct", "div", "mod", "abs", "to_real", "to_int", "is_int", "forall", "exists", "let", "as", "!", "Bool", "Int", "Real", "String", "str.contains", "str.len", "str.prefixof", "str.suffixof", "=>", "=", "<", ">", "<=", ">=", "+", "-", "*", "/"]);
 
 /**
  * Result of compiling a single Logic IR claim into SMT-LIB text.
@@ -126,6 +124,7 @@ export interface CompiledSpecSmtlib {
   readonly claimIds: readonly string[];
   readonly assertionNameMap: ReadonlyMap<string, string>;
   readonly conflicts: readonly SpecMergeConflict[];
+  readonly invalidReason?: string;
 }
 
 /**
@@ -142,17 +141,17 @@ export interface CompiledSpecSmtlib {
 export const sanitizeIdentifier = sanitizeIdentifierImpl;
 
 /**
- * Sanitize every identifier-like token in a standalone SMT-LIB expression.
+ * Canonically render identifiers in a literal-aware standalone expression.
  *
  * @param expr - Any SMT-LIB expression string (guard, consequent, etc.).
  * @returns The expression with each identifier token replaced by its
  *   {@link sanitizeIdentifier} form; operators, whitespace, and parentheses are
- *   preserved verbatim.
+ *   preserved semantically; whitespace is rendered canonically.
  *
  * @remarks
  * This is the token-parity counterpart of the global compile path: it applies
- * the exact same {@link ASSERTION_TOKEN_REGEX} plus {@link sanitizeIdentifier}
- * mapping used by {@link compileSpecSmtlib}, so an expression sanitized here
+ * the same bounded syntax parsing plus {@link sanitizeIdentifier}
+ * mapping used by raw {@link compileSpecSmtlib} inputs, so an expression sanitized here
  * references the same symbols that the compiled preamble declares.
  *
  * Preconditions: `expr` is any JS string.
@@ -164,14 +163,13 @@ export const sanitizeIdentifier = sanitizeIdentifierImpl;
  * - Escaping-requiring identifiers (`user_id`, `a.b`, `is-valid`, `ns:x`) map to
  *   the same fixed-width `_HEX6` encoding the global compile emits.
  *
- * Documented limitation: identifier-like tokens inside string literals are also
- * matched, mirroring the pre-existing global-compile behavior, so parity is
- * preserved between the two paths.
+ * Literal contents are never renamed. Source-profile string theory support
+ * remains gated separately by typed expression/fragment validation.
  *
  * Failure modes: none — pure computation.
  */
 export function sanitizeAssertionExpr(expr: string): string {
-  return expr.replace(ASSERTION_TOKEN_REGEX, (token) => sanitizeIdentifierImpl(token));
+  return sanitizeAssertion(expr, sanitizeIdentifierImpl);
 }
 
 /**
@@ -201,7 +199,8 @@ export function sanitizeAssertionExpr(expr: string): string {
  *
  * Failure modes: none — pure, deterministic computation over in-memory data.
  */
-export function compileSmtlib(claim: LogicIrClaim): CompiledSmtlib {
+export function compileSmtlib(claim: LogicIrClaim, preparation?: TypedCompilationPreparation): CompiledSmtlib {
+  if (claim.signature !== undefined) return compileTypedClaim(claim, preparation);
   const identifierMap = new Map<string, SanitizedClaimId>();
 
   const sanitize = (value: string): SanitizedClaimId => {
@@ -291,6 +290,7 @@ export function compileSpecSmtlib(specFile: string, claims: readonly LogicIrClai
     );
   }
 
+  if (claims.some((claim) => claim.signature !== undefined)) return compileTypedGroup(specFile, claims);
   const globalIdentifierMap = new Map<string, SanitizedClaimId>();
   const sanitize = (value: string): SanitizedClaimId => {
     const existing = globalIdentifierMap.get(value);
@@ -623,7 +623,7 @@ export function parseUnsatCore(stdout: string): readonly string[] {
 }
 
 /**
- * Sanitize identifier-like tokens inside an assertion expression, reusing a
+ * Render identifier syntax nodes inside an assertion expression, reusing a
  * caller-provided memoized sanitizer so symbols match the surrounding
  * declarations.
  *
@@ -631,8 +631,8 @@ export function parseUnsatCore(stdout: string): readonly string[] {
  * @param sanitize - The compile scope's memoized identifier mapper; sharing it
  *   guarantees a token maps to the same sanitized symbol here as where the
  *   declaration was emitted.
- * @returns `expr` with every {@link ASSERTION_TOKEN_REGEX} token replaced by its
- *   sanitized form; operators, parentheses, and whitespace are preserved.
+ * @returns Canonical expression syntax with resolved identifier escaping;
+ *   operators/literals retain meaning and whitespace may normalize.
  *
  * @remarks
  * Preconditions: `sanitize` is the same mapper used for the enclosing claim's
@@ -641,7 +641,15 @@ export function parseUnsatCore(stdout: string): readonly string[] {
  * not throw).
  */
 function sanitizeAssertion(expr: string, sanitize: (value: string) => SanitizedClaimId): string {
-  return expr.replace(ASSERTION_TOKEN_REGEX, (token) => sanitize(token));
+  const parsed = parseExpressionSyntax(expr);
+  if (!parsed.ok) return expr;
+  const render = (node: ExpressionSyntax): string => {
+    if (node.kind === "list") return `(${node.items.map(render).join(" ")})`;
+    if (node.kind === "string") return `"${node.text.replace(/"/gu, '""')}"`;
+    if (node.kind === "atom" && (SMT_KEYWORDS.has(node.text) || /^-?\d+(?:\.\d+)?$/u.test(node.text))) return node.text;
+    return sanitize(node.text);
+  };
+  return render(parsed.value);
 }
 
 /**

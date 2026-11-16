@@ -131,9 +131,9 @@ WHEN one capability has both finalized and selected delta spec inputs, THE spec-
 **Postcondition:** Downstream specs-forward phases do not analyze separate finalized and delta claim sets for the same capability.
 
 ##### Evidence
-- Implementation: [merge.ts:24 mergeSpecsByCapability()](/src/domain/parser/merge.ts#L24), [claim-graph.ts:247 extractMergedSpecClaims()](/src/domain/claim-graph.ts#L247)
+- Implementation: [merge.ts:24 mergeSpecsByCapability()](/src/domain/parser/merge.ts#L24), [claim-graph.ts:253 extractMergedSpecClaims()](/src/domain/claim-graph.ts#L253)
 - Test: [merge.test.ts:76 applies REMOVED then MODIFIED then ADDED deterministically](/test/contract/merge.test.ts#L76)
-- Test (integration): [merge-liveness.integration.test.ts:181 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L181)
+- Test (integration): [merge-liveness.integration.test.ts:237 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L237)
 
 #### Scenario: Finalized-Only Capability Passes Through Unchanged [MCA-MERGE-FINAL]
 WHEN a capability has a finalized spec and no selected delta spec, THE spec-check tool SHALL produce a merged capability view whose requirement and scenario content matches the finalized spec content in the same order.
@@ -206,7 +206,7 @@ WHEN a `MODIFIED` requirement block matches a surviving base requirement by cano
 ##### Evidence
 - Implementation: [merge.ts:296 applyModified()](/src/domain/parser/merge.ts#L296)
 - Test: [merge.test.ts:76 applies REMOVED then MODIFIED then ADDED deterministically](/test/contract/merge.test.ts#L76)
-- Test (integration): [merge-liveness.integration.test.ts:181 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L181)
+- Test (integration): [merge-liveness.integration.test.ts:237 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L237)
 
 #### Scenario: Removed Requirement Deletes Base Block [MCA-DELTA-REM]
 WHEN a `REMOVED` requirement block matches a surviving base requirement by canonical identifier, THE spec-check tool SHALL remove that base requirement block and all of its nested scenarios from the merged capability view.
@@ -216,7 +216,7 @@ WHEN a `REMOVED` requirement block matches a surviving base requirement by canon
 ##### Evidence
 - Implementation: [merge.ts:244 applyRemoved()](/src/domain/parser/merge.ts#L244)
 - Test: [merge.test.ts:76 applies REMOVED then MODIFIED then ADDED deterministically](/test/contract/merge.test.ts#L76)
-- Test (integration): [merge-liveness.integration.test.ts:181 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L181)
+- Test (integration): [merge-liveness.integration.test.ts:237 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L237)
 
 #### Scenario: Collision Checking Uses Projected Final State [MCA-DELTA-SURVIVING]
 WHEN the merge layer checks whether an `ADDED` or `MODIFIED` requirement block would introduce an identifier collision, THE spec-check tool SHALL first apply `REMOVED` deletions, SHALL process `MODIFIED` replacements in source order against the current surviving state with the matched block excluded from its own collision check, and SHALL check `ADDED` blocks against the resulting post-modification state and previously accepted additions.
@@ -225,7 +225,6 @@ WHEN the merge layer checks whether an `ADDED` or `MODIFIED` requirement block w
 
 ##### Evidence
 - Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [merge.ts:296 applyModified()](/src/domain/parser/merge.ts#L296), [merge.ts:357 applyAdded()](/src/domain/parser/merge.ts#L357)
-- Test: [merge.test.ts:120 surfaces ADDED collisions in requirement and scenario namespaces](/test/contract/merge.test.ts#L120)
 
 #### Scenario: Requirement And Scenario Collision Namespaces Remain Separate [MCA-DELTA-NAMESPACE]
 WHEN the merge layer checks for duplicate identifiers introduced by delta application, THE spec-check tool SHALL treat requirement identifiers and scenario identifiers as separate canonical namespaces.
@@ -234,19 +233,17 @@ WHEN the merge layer checks for duplicate identifiers introduced by delta applic
 
 ##### Evidence
 - Implementation: [merge.ts:281 buildNamespaceSets()](/src/domain/parser/merge.ts#L281), [merge.ts:296 applyModified()](/src/domain/parser/merge.ts#L296), [merge.ts:357 applyAdded()](/src/domain/parser/merge.ts#L357)
-- Test: [merge.test.ts:120 surfaces ADDED collisions in requirement and scenario namespaces](/test/contract/merge.test.ts#L120)
 
 #### Scenario: Modified Replacement Collision Preserves Prior Valid State [MCA-DELTA-MOD-COLLISION]
 IF a `MODIFIED` replacement would introduce a requirement or scenario identifier collision outside the matched base block, THEN THE spec-check tool SHALL emit `spec_merge.duplicate_modified_identifier`, SHALL skip the replacement, and SHALL preserve the original matched base block unchanged.
 
 **Postcondition:** The merged capability remains deterministic and collision-free without silently discarding base behavior.
 
+**Ordering clarification:** A replacement that collides with another block still present at its source-order turn is rejected even if a later replacement would free that identifier. Failed replacements preserve their prior base blocks.
+
 ##### Evidence
 - Implementation: [merge.ts:296 applyModified()](/src/domain/parser/merge.ts#L296)
 - Test: [merge.test.ts:196 skips modified replacement when it introduces external collisions](/test/contract/merge.test.ts#L196)
-
-
-**Ordering clarification:** A replacement that collides with another block still present at its source-order turn is rejected even if a later replacement would free that identifier. Failed replacements preserve their prior base blocks.
 
 #### Requirement model
 
@@ -368,7 +365,7 @@ IF a delta spec contains requirements or scenarios before the first recognized d
 ##### Evidence
 - Implementation: [merge.ts:159 partitionDelta()](/src/domain/parser/merge.ts#L159)
 - Test: [merge.test.ts:161 surfaces pre-section content](/test/contract/merge.test.ts#L161)
-- Test (integration): [merge-pipeline.integration.test.ts:61 keeps merge findings visible and ordered before downstream findings](/test/integration/merge-pipeline.integration.test.ts#L61)
+- Test (integration): [merge-pipeline.integration.test.ts:136 keeps merge findings visible and ordered before downstream findings](/test/integration/merge-pipeline.integration.test.ts#L136)
 
 #### Scenario: Missing Identifier In Modified Or Removed Operation Surfaced [MCA-MERGE-MISSING-ID]
 IF a `MODIFIED` or `REMOVED` requirement block lacks a canonical identifier, THEN THE spec-check tool SHALL emit `spec_merge.modified_missing_identifier` or `spec_merge.removed_missing_identifier` respectively and SHALL skip that operation.
@@ -441,9 +438,9 @@ IF a capability produces zero surviving merged requirements after removals and e
 **Postcondition:** Vacuous capability groups are not analyzed as if they contained active behavior.
 
 ##### Evidence
-- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [run-cli.ts:233 runAnalysisPhases()](/src/cli/run-cli.ts#L233), [pipeline-helpers.ts:264 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L264)
+- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [run-cli.ts:388 runAnalysisPhases()](/src/cli/run-cli.ts#L388), [pipeline-helpers.ts:270 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L270)
 - Test: [merge.test.ts:215 emits empty capability finding when no surviving requirements remain](/test/contract/merge.test.ts#L215)
-- Test (integration): [merge-liveness.integration.test.ts:85 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L85)
+- Test (integration): [merge-liveness.integration.test.ts:135 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L135)
 
 #### Requirement model
 
@@ -473,25 +470,31 @@ WHEN the spec-check tool emits merged requirements, merged scenarios, and derive
 #### Scenario: Source Provenance Survives Merge [MCA-MERGE-SOURCE]
 WHEN a selected item originates from a finalized or delta spec, THE spec-check tool SHALL retain its original source spans, EARS/scenario structure, formal disposition, justification, and supporting-content references without rewriting them as synthetic source locations.
 
+##### Evidence
+- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [claim-graph.ts:275 claimFromRequirement()](/src/domain/claim-graph.ts#L275), [claim-graph.ts:298 claimFromScenario()](/src/domain/claim-graph.ts#L298)
+- Test: [merge.test.ts:290 preserves provenance and does not remove base blocks without explicit cause](/test/contract/merge.test.ts#L290), [surface-claims.test.ts:15 modified payload replaces the original without rewriting provenance](/test/contract/surface-claims.test.ts#L15)
+- Test (property): [merge.property.test.ts:122 preserves provenance, avoids silent discard, and emits complete skip findings](/test/property/merge.property.test.ts#L122)
+
 #### Scenario: Synthetic Logical Key Groups Capability Artifacts [MCA-MERGE-LOGICAL]
 WHEN merged capability artifacts are named or grouped, THE spec-check tool SHALL use `<merged-spec/{capability}>` separately from each item's source-file provenance.
+
+##### Evidence
+- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365), [pipeline-helpers.ts:422 sanitizeLogicalFileForArtifacts()](/src/cli/pipeline-helpers.ts#L422)
+- Test: [pipeline-helpers.test.ts:137 groups by Claim.capability instead of provenance.file](/test/contract/pipeline-helpers.test.ts#L137), [merge-logic-routing.test.ts:57 writes logic artifacts under synthetic merged logicalFile artifact key](/test/contract/merge-logic-routing.test.ts#L57)
+- Test (integration): [merge-liveness.integration.test.ts:135 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L135)
 
 #### Scenario: Synthetic Logical Key Defines Compile-Group Boundary [MCA-MERGE-GROUP-KEY]
 WHEN selected claims share a merged capability key, THE spec-check tool SHALL group their admitted formal scope under that key and SHALL apply existing compile-group identity validation before submission.
 
+##### Evidence
+- Implementation: [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365), [logic-analysis.ts:150 runLogicAnalysis()](/src/domain/formal/logic-analysis.ts#L150), [logic-analysis.ts:209 preflightGroupClaimIds()](/src/domain/formal/logic-analysis.ts#L209)
+- Test: [merge-logic-routing.test.ts:35 runs one logic group per merged capability and detects contradictions in one run](/test/contract/merge-logic-routing.test.ts#L35), [logic-analysis.test.ts:556 rejects duplicate raw claim IDs as invalid group before compile and solver work](/test/contract/logic-analysis.test.ts#L556), [logic-analysis.test.ts:619 detects constructed sanitized-id collision in preflight](/test/contract/logic-analysis.test.ts#L619)
+
 #### Scenario: Merged Output Ordering Is Deterministic [MCA-MERGE-ORDER]
 WHEN identical finalized and delta inputs are merged, THE spec-check tool SHALL produce identical selected item order, retained structure, dispositions, findings, and logical grouping identity.
 
-##### Historical verification evidence
-- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [claim-graph.ts:247 extractMergedSpecClaims()](/src/domain/claim-graph.ts#L247)
-- Test: [merge.test.ts:290 preserves provenance and does not remove base blocks without explicit cause](/test/contract/merge.test.ts#L290)
-- Test (property): [merge.property.test.ts:122 preserves provenance, avoids silent discard, and emits complete skip findings](/test/property/merge.property.test.ts#L122)
-- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345), [pipeline-helpers.ts:403 sanitizeLogicalFileForArtifacts()](/src/cli/pipeline-helpers.ts#L403)
-- Test: [merge-logic-routing.test.ts:57 writes logic artifacts under synthetic merged logicalFile artifact key](/test/contract/merge-logic-routing.test.ts#L57)
-- Test (integration): [merge-liveness.integration.test.ts:85 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L85)
-- Implementation: [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345), [logic-analysis.ts:146 runLogicAnalysis()](/src/domain/formal/logic-analysis.ts#L146), [logic-analysis.ts:200 preflightGroupClaimIds()](/src/domain/formal/logic-analysis.ts#L200)
-- Test: [merge-logic-routing.test.ts:35 runs one logic group per merged capability and detects contradictions in one run](/test/contract/merge-logic-routing.test.ts#L35)
-- Implementation: [merge.ts:24 mergeSpecsByCapability()](/src/domain/parser/merge.ts#L24), [merge.ts:414 groupBlocks()](/src/domain/parser/merge.ts#L414), [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345)
+##### Evidence
+- Implementation: [merge.ts:24 mergeSpecsByCapability()](/src/domain/parser/merge.ts#L24), [merge.ts:414 groupBlocks()](/src/domain/parser/merge.ts#L414), [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365)
 - Test: [merge.test.ts:76 applies REMOVED then MODIFIED then ADDED deterministically](/test/contract/merge.test.ts#L76), [merge.test.ts:277 is deterministic across repeated runs](/test/contract/merge.test.ts#L277), [merge.determinism.test.ts:20 is byte-for-byte deterministic across repeated invocations](/test/determinism/merge.determinism.test.ts#L20)
 - Test (property): [merge.property.test.ts:60 random valid inputs are deterministic across 3 runs](/test/property/merge.property.test.ts#L60)
 
@@ -522,8 +525,8 @@ WHEN a merged capability contains at least one surviving requirement after merge
 **Postcondition:** No non-empty merged capability is silently omitted from downstream processing.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:264 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L264), [run-cli.ts:233 runAnalysisPhases()](/src/cli/run-cli.ts#L233), [pipeline-helpers.ts:345 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L345)
-- Test (integration): [merge-liveness.integration.test.ts:85 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L85)
+- Implementation: [pipeline-helpers.ts:270 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L270), [run-cli.ts:388 runAnalysisPhases()](/src/cli/run-cli.ts#L388), [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365)
+- Test (integration): [merge-liveness.integration.test.ts:135 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L135)
 
 #### Scenario: Merge Precondition Assertion Catches Internal Errors [MCA-LIVENESS-ASSERT]
 IF `mergeSpecsByCapability()` receives input that violates its precondition (more than one delta per capability), THEN THE spec-check tool SHALL raise a fatal pipeline exception rather than producing undefined merge behavior.
@@ -604,7 +607,7 @@ IF a merged capability spec supplied to the map builder has an empty `logicalFil
 **Postcondition:** Empty logical-file values never silently enter the grouping map.
 
 ##### Evidence
-- Implementation: [grouping.ts:136 buildLogicalFileByCapability()](/src/domain/formal/grouping.ts#L136), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Implementation: [grouping.ts:136 buildLogicalFileByCapability()](/src/domain/formal/grouping.ts#L136), [run-cli.ts:546 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L546)
 - Test: [semantic-grouping.test.ts:87 returns every empty logical-file value as validation data](/test/contract/semantic-grouping.test.ts#L87)
 
 #### Scenario: Every Provided Capability Mapped [MCA-GROUP-KEY-COMPLETE]
@@ -613,7 +616,7 @@ WHEN the map builder receives a set of merged capability specs, THE resulting ma
 **Postcondition:** No provided capability is silently omitted from the map.
 
 ##### Evidence
-- Implementation: [grouping.ts:136 buildLogicalFileByCapability()](/src/domain/formal/grouping.ts#L136), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Implementation: [grouping.ts:136 buildLogicalFileByCapability()](/src/domain/formal/grouping.ts#L136), [run-cli.ts:546 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L546)
 - Test: [semantic-grouping.test.ts:68 maps every supplied capability without normalizing logical files](/test/contract/semantic-grouping.test.ts#L68)
 
 #### Requirement model
@@ -638,7 +641,7 @@ WHEN a merged spec has at least one requirement, THE spec-check tool SHALL treat
 **Postcondition:** The spec is included in grouping-map construction.
 
 ##### Evidence
-- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [run-cli.ts:546 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L546)
 - Test: [semantic-grouping.test.ts:56 selects requirement and defensive scenario-only specs in input order](/test/contract/semantic-grouping.test.ts#L56)
 - Test (integration): [semantic-batching.integration.test.ts:173 aligns merged grouping, provenance, bounds, prompt, cleanup, and evidence](/test/integration/semantic-batching.integration.test.ts#L173)
 
@@ -648,7 +651,7 @@ WHEN a merged spec has at least one scenario and no requirements (a defensive ca
 **Postcondition:** Scenario-only capabilities keep their semantic grouping key.
 
 ##### Evidence
-- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [run-cli.ts:546 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L546)
 - Test: [semantic-grouping.test.ts:56 selects requirement and defensive scenario-only specs in input order](/test/contract/semantic-grouping.test.ts#L56)
 
 #### Scenario: Empty Spec Is Inactive [MCA-ACTIVE-EMPTY]
@@ -657,7 +660,7 @@ WHEN a merged spec has zero requirements and zero scenarios, THE spec-check tool
 **Postcondition:** Vacuous specs contribute no grouping entries.
 
 ##### Evidence
-- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Implementation: [grouping.ts:102 activeMergedSpecsForGrouping()](/src/domain/formal/grouping.ts#L102), [run-cli.ts:546 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L546)
 - Test: [semantic-grouping.test.ts:56 selects requirement and defensive scenario-only specs in input order](/test/contract/semantic-grouping.test.ts#L56)
 
 #### Requirement model
@@ -682,10 +685,10 @@ WHEN solver grouping computes a claim's grouping key, THE key SHALL be produced 
 **Postcondition:** The capability fallback rule has a single authoritative implementation.
 
 ##### Evidence
-- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [pipeline-helpers.ts:356 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L356), [run-cli.ts:443 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L443)
+- Implementation: [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185), [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365), [run-cli.ts:546 runMergeAndGroupingMap()](/src/cli/run-cli.ts#L546)
 - Test: [semantic-grouping.test.ts:112 selects mapped, provenance, and synthetic fallback keys exactly](/test/contract/semantic-grouping.test.ts#L112)
 - Test (property): [semantic-batching.property.test.ts:179 matches solver grouping after the same explicit filtering](/test/property/semantic-batching.property.test.ts#L179)
-- Test (integration): [merge-liveness.integration.test.ts:199 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L199)
+- Test (integration): [merge-liveness.integration.test.ts:135 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L135)
 
 #### Scenario: Filtering Precedes Grouping [MCA-SOLVER-FILTER-FIRST]
 WHEN solver analysis excludes claims (for example, non-spec claims), THE spec-check tool SHALL apply those exclusions before grouping and SHALL NOT encode solver-specific policy inside the shared key helper.
@@ -693,7 +696,7 @@ WHEN solver analysis excludes claims (for example, non-spec claims), THE spec-ch
 **Postcondition:** The key function remains policy-free and identical across phases.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:356 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L356), [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185)
+- Implementation: [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365), [grouping.ts:185 selectClaimLogicalFile()](/src/domain/formal/grouping.ts#L185)
 - Test: [pipeline-helpers.test.ts:218 excludes non-spec claims from capability-grouped logic path](/test/contract/pipeline-helpers.test.ts#L218)
 - Test (property): [semantic-batching.property.test.ts:179 matches solver grouping after the same explicit filtering](/test/property/semantic-batching.property.test.ts#L179)
 
@@ -714,8 +717,17 @@ WHEN concept discovery begins, THE spec-check tool SHALL provide only the select
 #### Scenario: Removed Or Replaced Statements Do Not Supply Concepts [MCA-CONCEPT-REMOVED]
 WHEN a requirement block is removed or replaced by merge operations, THE spec-check tool SHALL exclude its superseded statement text and nested scenarios from concept discovery and formal analysis while retaining ordinary merge provenance.
 
+##### Evidence
+- Implementation: [merge.ts:244 applyRemoved()](/src/domain/parser/merge.ts#L244), [merge.ts:296 applyModified()](/src/domain/parser/merge.ts#L296), [claim-graph.ts:253 extractMergedSpecClaims()](/src/domain/claim-graph.ts#L253), [source-formalize.ts:80 processGroup()](/src/domain/formal/source-formalize.ts#L80)
+- Test: [surface-claims.test.ts:15 modified payload replaces the original without rewriting provenance](/test/contract/surface-claims.test.ts#L15), [surface-claims.test.ts:64 ineligible content remains selected but removed blocks do not](/test/contract/surface-claims.test.ts#L64)
+- Test (integration): [merge-liveness.integration.test.ts:237 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L237)
+
 #### Scenario: Formal Ineligibility Does Not Delete Merge Content [MCA-CONCEPT-INELIGIBLE]
 WHEN a selected statement is formally ineligible, THE spec-check tool SHALL retain the selected merge content and its disposition instead of treating ineligibility as an implicit removal operation.
+
+##### Evidence
+- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [claim-graph.ts:275 claimFromRequirement()](/src/domain/claim-graph.ts#L275), [claim-graph.ts:298 claimFromScenario()](/src/domain/claim-graph.ts#L298), [grouping.ts:208 isFormalizableClaim()](/src/domain/formal/grouping.ts#L208)
+- Test: [surface-claims.test.ts:64 ineligible content remains selected but removed blocks do not](/test/contract/surface-claims.test.ts#L64), [surface-claims.test.ts:34 retains excluded source claims but assigns indexes after admission](/test/contract/surface-claims.test.ts#L34)
 
 #### Requirement model
 

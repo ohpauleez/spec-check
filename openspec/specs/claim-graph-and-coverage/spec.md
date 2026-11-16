@@ -308,19 +308,20 @@ WHEN a claim is derived from a source item, THE spec-check tool SHALL retain its
 **Postcondition:** Every ordinary graph claim traces to its originating artifact section; malformed inputs remain separately reviewable.
 
 ##### Evidence
-- Implementation: [buildClaimGraph(), claimFromRequirement(), claimFromScenario(), extractProposalClaims(), extractDesignClaims(), extractTaskClaims()](/src/domain/claim-graph.ts)
-- Test: [claim-graph.test.ts — obligation levels and provenance](/test/contract/claim-graph.test.ts), [safety-liveness.invariant.test.ts — SAFE-2](/test/invariant/safety-liveness.invariant.test.ts)
-- Test (property): [claim-graph.property.test.ts — source traceability](/test/property/claim-graph.property.test.ts)
+- Implementation: [claim-graph.ts:275 claimFromRequirement()](/src/domain/claim-graph.ts#L275), [claim-graph.ts:298 claimFromScenario()](/src/domain/claim-graph.ts#L298), [claim-graph.ts:322 extractProposalClaims()](/src/domain/claim-graph.ts#L322), [claim-graph.ts:366 extractDesignClaims()](/src/domain/claim-graph.ts#L366), [claim-graph.ts:398 extractTaskClaims()](/src/domain/claim-graph.ts#L398)
+- Test: [claim-graph.test.ts:8 assigns obligation levels and keeps provenance](/test/contract/claim-graph.test.ts#L8), [surface-claims.test.ts:15 modified payload replaces the original without rewriting provenance](/test/contract/surface-claims.test.ts#L15)
+- Test (property): [claim-graph.property.test.ts:9 every claim has provenance with a file, and no claim exists without a traceable source](/test/property/claim-graph.property.test.ts#L9), [surface.property.test.ts:9 maps every normalized offset to an original character or join boundary](/test/property/surface.property.test.ts#L9)
 
 #### Scenario: Reject Provenance-Free Finding Input [CGC-CLAIM-FAIL]
 IF a downstream step receives a claim without sufficient provenance, THEN THE spec-check tool SHALL surface an analysis-defect finding instead of issuing an untraceable conclusion.
 
 **Postcondition:** Rejected claims remain evidence, without entering the ordinary graph or supporting coverage conclusions.
 
+**Evidence boundary:** The separate rejected-input set models the no-consumption policy. The implementation and test below establish orphan detection only: `buildClaimGraph` still returns the malformed claim in the ordinary graph, and coverage does not reject it.
+
 ##### Evidence
-- Implementation: [detectOrphanClaims()](/src/domain/claim-graph.ts)
-- Test: [claim-graph.test.ts — orphaned claim without provenance](/test/contract/claim-graph.test.ts)
-- Model boundary: the separate rejected-input set makes the no-consumption policy explicit; the implementation evidence above establishes defect detection, not a proof of this stronger handoff policy.
+- Implementation: [claim-graph.ts:470 detectOrphanClaims()](/src/domain/claim-graph.ts#L470)
+- Test: [claim-graph.test.ts:51 surfaces orphaned claim without provenance](/test/contract/claim-graph.test.ts#L51)
 
 #### Scenario: Populate Capability Identity On Spec-Derived Claims [CGC-CLAIM-CAP]
 WHEN a claim is derived from a merged requirement or scenario, THE spec-check tool SHALL retain the merged capability identity separately from original source provenance.
@@ -328,11 +329,25 @@ WHEN a claim is derived from a merged requirement or scenario, THE spec-check to
 **Postcondition:** Downstream grouping uses capability identity without re-inferring it from original file paths.
 
 ##### Evidence
-- Implementation: [extractMergedSpecClaims()](/src/domain/claim-graph.ts), [groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts)
-- Test: [claim-graph.test.ts — merged capability identity](/test/contract/claim-graph.test.ts), [pipeline-helpers.test.ts — grouping by capability](/test/contract/pipeline-helpers.test.ts)
+- Implementation: [claim-graph.ts:253 extractMergedSpecClaims()](/src/domain/claim-graph.ts#L253), [pipeline-helpers.ts:365 groupRepresentativesBySpec()](/src/cli/pipeline-helpers.ts#L365)
+- Test: [claim-graph.test.ts:123 populates Claim.capability for merged spec-derived claims](/test/contract/claim-graph.test.ts#L123), [surface-claims.test.ts:15 modified payload replaces the original without rewriting provenance](/test/contract/surface-claims.test.ts#L15), [pipeline-helpers.test.ts:137 groups by Claim.capability instead of provenance.file](/test/contract/pipeline-helpers.test.ts#L137)
 
 #### Scenario: Preserve Source Structure Across Normalization [CGC-CLAIM-CLAUSES]
 WHEN a parsed item supplies EARS clauses or scenario metadata, THE spec-check tool SHALL carry those structures into formalization context without flattening them into prose-only claims.
+
+##### Evidence
+- Implementation: [claim-graph.ts:275 claimFromRequirement()](/src/domain/claim-graph.ts#L275), [claim-graph.ts:298 claimFromScenario()](/src/domain/claim-graph.ts#L298), [source-formalize.ts:192 perform()](/src/domain/formal/source-formalize.ts#L192)
+- Test: [surface-claims.test.ts:15 modified payload replaces the original without rewriting provenance](/test/contract/surface-claims.test.ts#L15), [formalization-predicates.test.ts:22 actor swaps change context and actor context survives batch recovery and additional samples](/test/contract/formalization-predicates.test.ts#L22), [formalization-predicates.test.ts:72 source negation and postcondition control the response skeleton](/test/contract/formalization-predicates.test.ts#L72)
+- Example:
+```typescript
+const { parseSpecText } = await import("./src/domain/parser/spec.ts");
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const parsed = parseSpecText("structure.md", "### Requirement: Respond [CGC-DEMO]\nWHEN called, THE engine MUST NOT stop.\n**Postcondition:** Result exists.\n");
+const claim = buildClaimGraph({ specs: [parsed] }).graph.claims[0];
+claim.surface === parsed.requirements[0].surface; //=> true
+claim.surface.clauses.negatedResponse; //=> true
+claim.surface.fields.postcondition.text; //=> Result exists.
+```
 
 #### Requirement model
 
@@ -553,9 +568,9 @@ WHEN a statement uses structural `SHALL` or `MUST`, THE spec-check tool SHALL as
 **Postcondition:** Mandatory obligations remain distinct from advisory and permission semantics.
 
 ##### Evidence
-- Implementation: [deriveObligation()](/src/domain/claim-graph.ts)
-- Test: [claim-graph.test.ts — obligation levels](/test/contract/claim-graph.test.ts)
-- Test (property): [claim-graph.property.test.ts — obligation assignment](/test/property/claim-graph.property.test.ts)
+- Implementation: [claim-graph.ts:447 deriveObligation()](/src/domain/claim-graph.ts#L447)
+- Test: [claim-graph.test.ts:8 assigns obligation levels and keeps provenance](/test/contract/claim-graph.test.ts#L8), [surface-claims.test.ts:51 derives MUST and scoped modal negation from parser-owned slots](/test/contract/surface-claims.test.ts#L51)
+- Test (property): [claim-graph.property.test.ts:39 obligation assignment is consistent across EARS patterns](/test/property/claim-graph.property.test.ts#L39)
 
 #### Scenario: SHOULD Requirement Classified As Advisory [CGC-OBLIG-ADVISORY]
 WHEN a statement uses structural `SHOULD`, THE spec-check tool SHALL assign advisory obligation for analysis separately from the mandatory baseline.
@@ -563,9 +578,9 @@ WHEN a statement uses structural `SHOULD`, THE spec-check tool SHALL assign advi
 **Postcondition:** Advisory rules cannot constrain the mandatory baseline.
 
 ##### Evidence
-- Implementation: [deriveObligation()](/src/domain/claim-graph.ts)
-- Test: [claim-graph.test.ts — advisory obligation](/test/contract/claim-graph.test.ts)
-- Test (property): [claim-graph.property.test.ts — obligation assignment](/test/property/claim-graph.property.test.ts)
+- Implementation: [claim-graph.ts:447 deriveObligation()](/src/domain/claim-graph.ts#L447)
+- Test: [claim-graph.test.ts:8 assigns obligation levels and keeps provenance](/test/contract/claim-graph.test.ts#L8), [surface-claims.test.ts:51 derives MUST and scoped modal negation from parser-owned slots](/test/contract/surface-claims.test.ts#L51), [formalization-predicates.test.ts:84 uses a frozen registry for batched and additional samples](/test/contract/formalization-predicates.test.ts#L84)
+- Test (property): [claim-graph.property.test.ts:39 obligation assignment is consistent across EARS patterns](/test/property/claim-graph.property.test.ts#L39)
 
 #### Scenario: Informational Content Classified [CGC-OBLIG-INFO]
 WHEN a design property or informational section lacks an authoritative structural modal, THE spec-check tool SHALL retain informational classification without promoting prose occurrences of modal words into behavioral obligations.
@@ -573,9 +588,9 @@ WHEN a design property or informational section lacks an authoritative structura
 **Postcondition:** Informational content remains coverage context without becoming a mandatory rule.
 
 ##### Evidence
-- Implementation: [extractProposalClaims(), extractDesignClaims()](/src/domain/claim-graph.ts)
-- Test: [claim-graph.test.ts — informational content](/test/contract/claim-graph.test.ts), [safety-liveness.invariant.test.ts — SAFE-9](/test/invariant/safety-liveness.invariant.test.ts)
-- Test (property): [claim-graph.property.test.ts — obligation assignment](/test/property/claim-graph.property.test.ts)
+- Implementation: [claim-graph.ts:322 extractProposalClaims()](/src/domain/claim-graph.ts#L322), [claim-graph.ts:366 extractDesignClaims()](/src/domain/claim-graph.ts#L366), [claim-graph.ts:447 deriveObligation()](/src/domain/claim-graph.ts#L447)
+- Test: [claim-graph.test.ts:107 classifies informational content at informational obligation](/test/contract/claim-graph.test.ts#L107), [surface-claims.test.ts:51 derives MUST and scoped modal negation from parser-owned slots](/test/contract/surface-claims.test.ts#L51), [safety-liveness.invariant.test.ts:161 SAFE-9: claims with non-standard obligation produce only informational findings](/test/invariant/safety-liveness.invariant.test.ts#L161)
+- Test (property): [claim-graph.property.test.ts:39 obligation assignment is consistent across EARS patterns](/test/property/claim-graph.property.test.ts#L39)
 
 #### Scenario: MAY Requirement Classified As Informational [CGC-OBLIG-OPTIONAL]
 WHEN a statement uses structural `MAY`, THE spec-check tool SHALL retain informational obligation metadata and explicit permission semantics rather than require the response.
@@ -583,8 +598,8 @@ WHEN a statement uses structural `MAY`, THE spec-check tool SHALL retain informa
 **Postcondition:** Absence of the permitted behavior is not a violation; an explicit permission may still conflict with mandatory prohibitions.
 
 ##### Evidence
-- Implementation: [deriveObligation()](/src/domain/claim-graph.ts)
-- Test: [claim-graph.test.ts — MAY is informational](/test/contract/claim-graph.test.ts)
+- Implementation: [claim-graph.ts:447 deriveObligation()](/src/domain/claim-graph.ts#L447), [predicate-lowering.ts:89 lowerPredicates()](/src/domain/formal/predicate-lowering.ts#L89)
+- Test: [claim-graph.test.ts:78 classifies MAY requirement as informational obligation](/test/contract/claim-graph.test.ts#L78), [surface-claims.test.ts:51 derives MUST and scoped modal negation from parser-owned slots](/test/contract/surface-claims.test.ts#L51), [static-queries.test.ts:45 separates advisory and permission conflicts from mandatory satisfiability](/test/contract/static-queries.test.ts#L45)
 
 #### Requirement model
 
@@ -970,8 +985,9 @@ WHEN a requirement is removed from the active merged capability view by a valid 
 **Postcondition:** Coverage reflects the same active capability behavior used by claim extraction and logic.
 
 ##### Evidence
-- Implementation: [merge.ts:244 applyRemoved()](/src/domain/parser/merge.ts#L244), [pipeline-helpers.ts:265 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L265)
-- Test (integration): [merge-liveness.integration.test.ts:226 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L226)
+- Implementation: [merge.ts:244 applyRemoved()](/src/domain/parser/merge.ts#L244), [claim-graph.ts:253 extractMergedSpecClaims()](/src/domain/claim-graph.ts#L253), [pipeline-helpers.ts:270 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L270)
+- Test: [surface-claims.test.ts:64 ineligible content remains selected but removed blocks do not](/test/contract/surface-claims.test.ts#L64)
+- Test (integration): [merge-liveness.integration.test.ts:237 routes only active merged requirements to logic inputs (removed excluded, modified retained)](/test/integration/merge-liveness.integration.test.ts#L237)
 - Example:
 ```typescript
 const { mergeSpecsByCapability } = await import("./src/domain/parser/merge.ts");
@@ -1013,9 +1029,9 @@ IF a capability produces zero surviving merged requirements and the merge layer 
 **Postcondition:** Coverage analysis does not report misleading results for vacuous capability groups.
 
 ##### Evidence
-- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [pipeline-helpers.ts:265 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L265)
+- Implementation: [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88), [pipeline-helpers.ts:270 runClaimGraphPhase()](/src/cli/pipeline-helpers.ts#L270)
 - Test: [merge.test.ts:215 emits empty capability finding when no surviving requirements remain](/test/contract/merge.test.ts#L215), [pipeline-helpers.test.ts:61 submits every non-empty merged capability to claim extraction and coverage exactly once](/test/contract/pipeline-helpers.test.ts#L61)
-- Test (integration): [merge-liveness.integration.test.ts:124 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L124)
+- Test (integration): [merge-liveness.integration.test.ts:135 processes each non-empty merged capability exactly once across downstream phases](/test/integration/merge-liveness.integration.test.ts#L135)
 - Example:
 ```typescript
 const { runClaimGraphPhase } = await import("./src/cli/pipeline-helpers.ts");
@@ -1433,7 +1449,7 @@ WHEN the same set of parsed documents is processed on two separate runs, THE spe
 **Postcondition:** Claim graph construction is a deterministic function of parsed input.
 
 ##### Evidence
-- Implementation: [claim-graph.ts:153 buildClaimGraph()](/src/domain/claim-graph.ts#L153)
+- Implementation: [claim-graph.ts:159 buildClaimGraph()](/src/domain/claim-graph.ts#L159)
 - Test: [extended.determinism.test.ts:103 claim graph is identical across runs for same parsed input](/test/determinism/extended.determinism.test.ts#L103), [run.determinism.test.ts:18 produces stable summary output for same deterministic input](/test/determinism/run.determinism.test.ts#L18)
 - Example:
 ```typescript
@@ -1561,11 +1577,61 @@ WHEN the claim graph is built, THE spec-check tool SHALL assign every extracted 
 #### Scenario: Excluded Statements Remain Reviewable [CGC-SCOPE-EXCLUDED]
 WHEN a statement is excluded from solver formalization, THE spec-check tool SHALL retain it for qualitative review, coverage context, provenance, and analyzed-scope reporting.
 
+##### Evidence
+- Implementation: [claim-graph.ts:275 claimFromRequirement()](/src/domain/claim-graph.ts#L275), [claim-graph.ts:298 claimFromScenario()](/src/domain/claim-graph.ts#L298), [grouping.ts:208 isFormalizableClaim()](/src/domain/formal/grouping.ts#L208)
+- Test: [surface-claims.test.ts:34 retains excluded source claims but assigns indexes after admission](/test/contract/surface-claims.test.ts#L34), [formalization-predicates.test.ts:103 all-ineligible source performs no model invocation](/test/contract/formalization-predicates.test.ts#L103)
+- Test (property): [surface.property.test.ts:24 retains every extracted claim and indexes only the admitted subset](/test/property/surface.property.test.ts#L24)
+- Example:
+```typescript
+const { parseSpecText } = await import("./src/domain/parser/spec.ts");
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const { groupFormalizationClaims } = await import("./src/domain/formal/grouping.ts");
+const claims = buildClaimGraph({ specs: [parseSpecText("excluded.md", "### Requirement: Note\nUnsupported prose.\n")] }).graph.claims;
+claims.length; //=> 1
+claims[0].surface.disposition.kind; //=> excluded
+claims[0].provenance.file; //=> excluded.md
+groupFormalizationClaims(claims, new Map()).length; //=> 0
+```
+
 #### Scenario: Duplicate Display Identifiers Do Not Merge Claims [CGC-SCOPE-IDENTITY]
 WHEN authored identifiers are missing or duplicated, THE spec-check tool SHALL retain distinct source-local identities and SHALL assign eligible indexes only after the eligibility filter without using display IDs to join sample outcomes.
 
+##### Evidence
+- Implementation: [surface-block.ts:37 extractSurfaceBlock()](/src/domain/parser/surface-block.ts#L37), [grouping.ts:225 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L225), [source-formalize.ts:179 indexedEntries()](/src/domain/formal/source-formalize.ts#L179)
+- Test: [surface-claims.test.ts:34 retains excluded source claims but assigns indexes after admission](/test/contract/surface-claims.test.ts#L34), [safety-liveness.invariant.test.ts:287 SAFE-14: duplicate and missing IDs retain distinct identity](/test/invariant/safety-liveness.invariant.test.ts#L287)
+- Test (property): [surface.property.test.ts:24 retains every extracted claim and indexes only the admitted subset](/test/property/surface.property.test.ts#L24)
+- Example:
+```typescript
+const { parseSpecText } = await import("./src/domain/parser/spec.ts");
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const { groupFormalizationClaims } = await import("./src/domain/formal/grouping.ts");
+const parsed = parseSpecText("identity.md", "### Requirement: Excluded [DUP]\nUnsupported prose.\n\n### Requirement: First [DUP]\nTHE engine SHALL respond.\n\n### Requirement: Second [DUP]\nTHE engine SHOULD log.\n\n### Requirement: No identifier\nTHE engine MAY stop.\n");
+const claims = buildClaimGraph({ specs: [parsed] }).graph.claims;
+new Set(claims.map(c => c.surface.source.ordinal)).size; //=> 4
+const indexed = groupFormalizationClaims(claims, new Map()).flatMap(g => g.claims);
+indexed.map(c => c.index).join(","); //=> 0,1,2
+indexed[0].claim === claims[1] && indexed[1].claim === claims[2] && indexed[2].claim === claims[3]; //=> true
+```
+
 #### Scenario: Total Disposition Accounting [CGC-SCOPE-PARTITION]
 WHEN admission completes, THE spec-check tool SHALL expose disjoint eligible and excluded sets whose union equals the extracted specification-statement set.
+
+##### Evidence
+- Implementation: [surface-block.ts:37 extractSurfaceBlock()](/src/domain/parser/surface-block.ts#L37), [claim-graph.ts:159 buildClaimGraph()](/src/domain/claim-graph.ts#L159), [grouping.ts:208 isFormalizableClaim()](/src/domain/formal/grouping.ts#L208), [grouping.ts:225 groupFormalizationClaims()](/src/domain/formal/grouping.ts#L225)
+- Test: [surface-claims.test.ts:34 retains excluded source claims but assigns indexes after admission](/test/contract/surface-claims.test.ts#L34)
+- Test (property): [surface.property.test.ts:24 retains every extracted claim and indexes only the admitted subset](/test/property/surface.property.test.ts#L24)
+- Example:
+```typescript
+const { parseSpecText } = await import("./src/domain/parser/spec.ts");
+const { buildClaimGraph } = await import("./src/domain/claim-graph.ts");
+const { isFormalizableClaim } = await import("./src/domain/formal/grouping.ts");
+const claims = buildClaimGraph({ specs: [parseSpecText("partition.md", "### Requirement: Included\nTHE engine SHALL respond.\n\n### Requirement: Excluded\nUnsupported prose.\n")] }).graph.claims;
+const eligible = claims.filter(isFormalizableClaim);
+const excluded = claims.filter(c => !isFormalizableClaim(c));
+eligible.length === 1 && excluded.length === 1; //=> true
+eligible.length + excluded.length === claims.length; //=> true
+eligible.every(c => !excluded.includes(c)); //=> true
+```
 
 #### Requirement model
 

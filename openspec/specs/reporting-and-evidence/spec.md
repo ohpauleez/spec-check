@@ -782,7 +782,7 @@ WHEN catalog construction reports `no_recognized_docs`, THE spec-check tool SHAL
 **Postcondition:** Users can distinguish missing relevant inputs from archive-policy exclusions.
 
 ##### Evidence
-- Implementation: [run-cli.ts:83 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L83), [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222)
+- Implementation: [run-cli.ts:92 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L92), [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222)
 - Test: [cli.test.ts:184 formats no_recognized_docs with input count](/test/contract/cli.test.ts#L184), [catalog.test.ts:101 returns no_recognized_docs for directories without OpenSpec docs](/test/contract/catalog.test.ts#L101)
 - Test (integration): [catalog-abort.integration.test.ts:53 aborts pipeline on no_recognized_docs — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L53)
 - Example:
@@ -799,7 +799,7 @@ WHEN catalog construction reports `all_archived`, THE spec-check tool SHALL emit
 **Postcondition:** Users receive the specific remediation that can admit their chosen archived inputs.
 
 ##### Evidence
-- Implementation: [run-cli.ts:83 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L83), [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222)
+- Implementation: [run-cli.ts:92 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L92), [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222)
 - Test: [cli.test.ts:191 formats all_archived with archived count and --allow-archive guidance](/test/contract/cli.test.ts#L191), [catalog.test.ts:27 excludes archived change specs by default](/test/contract/catalog.test.ts#L27)
 - Test (integration): [catalog-abort.integration.test.ts:82 aborts pipeline on all_archived without --allow-archive — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L82)
 - Example:
@@ -816,7 +816,7 @@ WHEN catalog construction reports `all_filtered`, THE spec-check tool SHALL emit
 **Postcondition:** Policy-based exclusions remain explainable instead of collapsing into a generic empty result.
 
 ##### Evidence
-- Implementation: [run-cli.ts:83 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L83), [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222)
+- Implementation: [run-cli.ts:92 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L92), [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222)
 - Test: [cli.test.ts:198 formats all_filtered with count and filter reason](/test/contract/cli.test.ts#L198), [catalog.test.ts:113 returns all_filtered when all recognized docs are excluded by capability resolution](/test/contract/catalog.test.ts#L113)
 - Test (integration): [catalog-abort.integration.test.ts:111 aborts pipeline on all_filtered — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L111)
 - Example:
@@ -923,7 +923,7 @@ WHEN specs-forward analysis completes for a run, THE spec-check tool SHALL emit 
 **Postcondition:** Reviewers can inspect each analytical pass separately instead of relying only on a synthesized summary.
 
 ##### Evidence
-- Implementation: [render.ts:138 writePhaseReports()](/src/domain/reporting/render.ts#L138), [run-cli.ts:553 runReportingPhase()](/src/cli/run-cli.ts#L553)
+- Implementation: [render.ts:138 writePhaseReports()](/src/domain/reporting/render.ts#L138), [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596)
 - Test: [reporting.test.ts:25 writes phase reports at correct naming convention](/test/contract/reporting.test.ts#L25)
 - Test (integration): [specs-forward.integration.test.ts:18 produces phase reports and summary](/test/integration/specs-forward.integration.test.ts#L18), [pipeline.integration.test.ts:330 full pipeline produces summary with all finding categories](/test/integration/pipeline.integration.test.ts#L330)
 
@@ -933,7 +933,7 @@ WHEN code-backwards analysis completes for a run, THE spec-check tool SHALL pers
 **Postcondition:** Code-derived intermediate artifacts are available for reviewer inspection alongside reports.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:468 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L468)
+- Implementation: [pipeline-helpers.ts:478 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L478)
 - Test (integration): [pipeline.integration.test.ts:165 code-derived spec generation produces gen_specs files per capability](/test/integration/pipeline.integration.test.ts#L165)
 
 #### Scenario: Explain Skipped Report Scope [RAE-REPORT-SKIP]
@@ -942,7 +942,7 @@ IF an optional phase is not enabled for a run, THEN THE spec-check tool SHALL ex
 **Postcondition:** Reviewers can distinguish intentionally skipped analysis from missing output.
 
 ##### Evidence
-- Implementation: [render.ts:247 writeSummaryReport()](/src/domain/reporting/render.ts#L247), [pipeline-helpers.ts:81 computeSkippedPhases()](/src/cli/pipeline-helpers.ts#L81)
+- Implementation: [render.ts:247 writeSummaryReport()](/src/domain/reporting/render.ts#L247), [pipeline-helpers.ts:87 computeSkippedPhases()](/src/cli/pipeline-helpers.ts#L87)
 - Test: [reporting.test.ts:52 includes skipped-phase explanations](/test/contract/reporting.test.ts#L52)
 - Test (integration): [specs-forward.integration.test.ts:18 produces phase reports and summary](/test/integration/specs-forward.integration.test.ts#L18)
 
@@ -952,7 +952,7 @@ IF the catalog phase ends in `CatalogError`, THEN THE spec-check tool SHALL NOT 
 **Postcondition:** Report output accurately reflects that analysis never proceeded past catalog construction.
 
 ##### Evidence
-- Implementation: [run-cli.ts:284 runIngestionPhases()](/src/cli/run-cli.ts#L284)
+- Implementation: [run-cli.ts:313 runIngestionPhases()](/src/cli/run-cli.ts#L313)
 - Test (integration): [catalog-abort.integration.test.ts:53 aborts pipeline on no_recognized_docs — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L53), [catalog-abort.integration.test.ts:82 aborts pipeline on all_archived without --allow-archive — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L82), [catalog-abort.integration.test.ts:111 aborts pipeline on all_filtered — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L111)
 
 #### Requirement model
@@ -1142,7 +1142,7 @@ WHEN final-report generation starts, THE spec-check tool SHALL have already fina
 **Postcondition:** The report agent can read a completion manifest that describes the complete core evidence bundle.
 
 ##### Evidence
-- Implementation: [run-cli.ts:553 runReportingPhase()](/src/cli/run-cli.ts#L553)
+- Implementation: [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596)
 - Test (integration): [merge-pipeline.integration.test.ts:215 persists a nonfatal final-report warning and refreshes the summary checksum](/test/integration/merge-pipeline.integration.test.ts#L215)
 
 #### Scenario: Save Valid Final Report [RAE-FINAL-SAVE]
@@ -1161,7 +1161,7 @@ IF final-report generation or validation fails after core completion, THEN THE s
 **Postcondition:** Core completion remains true even though no final report is available; the warning may produce the existing findings-present exit code.
 
 ##### Evidence
-- Implementation: [final-report-lifecycle.ts:65 coordinateFinalReportLifecycle()](/src/cli/final-report-lifecycle.ts#L65), [run-cli.ts:553 runReportingPhase()](/src/cli/run-cli.ts#L553), [run-cli.ts:632 finalReportFailureFinding()](/src/cli/run-cli.ts#L632), [final-report.ts:164 reduceFinalReportLifecycle()](/src/domain/reporting/final-report.ts#L164)
+- Implementation: [final-report-lifecycle.ts:65 coordinateFinalReportLifecycle()](/src/cli/final-report-lifecycle.ts#L65), [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596), [run-cli.ts:694 finalReportFailureFinding()](/src/cli/run-cli.ts#L694), [final-report.ts:164 reduceFinalReportLifecycle()](/src/domain/reporting/final-report.ts#L164)
 - Test: [final-report.test.ts:425 maps terminal OpenCode %s to a nonfatal agent failure](/test/contract/final-report.test.ts#L425), [final-report.test.ts:451 enforces guarded transitions and terminal stuttering](/test/contract/final-report.test.ts#L451)
 - Test (property): [final-report.property.test.ts:32 legal success and failure histories reach exactly one terminal state](/test/property/final-report.property.test.ts#L32), [final-report.property.test.ts:55 generated stuttering and failure-point histories preserve lifecycle invariants](/test/property/final-report.property.test.ts#L55)
 - Test (integration): [merge-pipeline.integration.test.ts:215 persists a nonfatal final-report warning and refreshes the summary checksum](/test/integration/merge-pipeline.integration.test.ts#L215), [merge-pipeline.integration.test.ts:259 persists warning for final-report %s degradation](/test/integration/merge-pipeline.integration.test.ts#L259)
@@ -1479,8 +1479,8 @@ WHEN a relative output directory is configured, THE spec-check tool SHALL resolv
 **Postcondition:** Prompt and permission behavior is independent of the caller's relative path spelling.
 
 ##### Evidence
-- Implementation: [config.ts:198 resolveRunConfig()](/src/cli/config.ts#L198), [final-report.ts:264 generateFinalReport()](/src/domain/reporting/final-report.ts#L264)
-- Test: [config.test.ts:69 resolves every configured output spelling to an absolute path](/test/contract/config.test.ts#L69), [config.test.ts:92 resolves output supplied only by the config file](/test/contract/config.test.ts#L92)
+- Implementation: [config.ts:202 resolveRunConfig()](/src/cli/config.ts#L202), [final-report.ts:264 generateFinalReport()](/src/domain/reporting/final-report.ts#L264)
+- Test: [config.test.ts:71 resolves every configured output spelling to an absolute path](/test/contract/config.test.ts#L71), [config.test.ts:94 resolves output supplied only by the config file](/test/contract/config.test.ts#L94)
 
 #### Scenario: Preserve Paths With Spaces [RAE-FINAL-PATH-SPACE]
 WHEN an absolute evidence or report path contains spaces, THE spec-check tool SHALL pass and compare that path without shell interpolation or token splitting.
@@ -1488,7 +1488,7 @@ WHEN an absolute evidence or report path contains spaces, THE spec-check tool SH
 **Postcondition:** The exact configured destination remains authoritative.
 
 ##### Evidence
-- Implementation: [final-report.ts:264 generateFinalReport()](/src/domain/reporting/final-report.ts#L264), [final-report.ts:174 buildFinalReportPrompt()](/src/domain/prompts/final-report.ts#L174), [process.ts:115 runProcess()](/src/adapters/process.ts#L115)
+- Implementation: [final-report.ts:264 generateFinalReport()](/src/domain/reporting/final-report.ts#L264), [final-report.ts:174 buildFinalReportPrompt()](/src/domain/prompts/final-report.ts#L174), [process.ts:119 runProcess()](/src/adapters/process.ts#L119)
 - Test: [final-report.test.ts:44 substitutes absolute paths exactly without replacement interpolation](/test/contract/final-report.test.ts#L44), [opencode.test.ts:48 constructs restricted final-report argv and inline environment](/test/contract/opencode.test.ts#L48)
 - Test (property): [final-report.property.test.ts:19 preserves generated literal paths exactly](/test/property/final-report.property.test.ts#L19)
 
@@ -1635,7 +1635,7 @@ WHEN OpenCode is started for the final-report phase, THE spec-check tool SHALL u
 **Postcondition:** The agent can inspect workspace evidence under the declared permission boundary. V2 receives no `--pure`, `--dir`, or separate `--variant`; v1 receives no v2-only flags. If discovery requires a different supported isolation transport, the design and this protocol scenario must be revised before accepting compatibility.
 
 ##### Evidence
-- Implementation: [opencode-protocol.ts:17 buildOpencodeArgs()](/src/adapters/opencode-protocol.ts#L17), [opencode-protocol.ts:42 buildOpencodeEnvironment()](/src/adapters/opencode-protocol.ts#L42), [opencode.ts:385 attemptOpencodeOnce()](/src/adapters/opencode.ts#L385), [final-report.ts:264 generateFinalReport()](/src/domain/reporting/final-report.ts#L264), [final-report.ts:215 buildFinalReportAgentPolicy()](/src/domain/prompts/final-report.ts#L215)
+- Implementation: [opencode-protocol.ts:17 buildOpencodeArgs()](/src/adapters/opencode-protocol.ts#L17), [opencode-protocol.ts:42 buildOpencodeEnvironment()](/src/adapters/opencode-protocol.ts#L42), [opencode.ts:396 attemptOpencodeOnce()](/src/adapters/opencode.ts#L396), [final-report.ts:264 generateFinalReport()](/src/domain/reporting/final-report.ts#L264), [final-report.ts:215 buildFinalReportAgentPolicy()](/src/domain/prompts/final-report.ts#L215)
 - Test: [opencode.test.ts:48 constructs restricted final-report argv and inline environment](/test/contract/opencode.test.ts#L48), [opencode.test.ts:78 isolates final-report config roots when provided](/test/contract/opencode.test.ts#L78), [final-report.test.ts:92 allows external analyzed inputs for reads without broadening edits](/test/contract/final-report.test.ts#L92), [distribution.test.ts:15 bundles the authoritative final-report prompt and restricted protocol](/test/contract/distribution.test.ts#L15), [opencode-compatibility.test.ts:36 uses native restricted v2 config, cwd, and non-inherited server exclusion](/test/contract/opencode-compatibility.test.ts#L36)
 
 #### Scenario: Validate Acknowledgment Shape [RAE-FINAL-PROTO-ACK]
@@ -1644,7 +1644,7 @@ IF final-report stdout does not decode to exactly the required non-empty `report
 **Postcondition:** Malformed UTF-8, malformed event lines, error events, raw payloads outside text events, missing text payloads, Markdown fences, prose wrappers, extra payload fields, and invalid field values are rejected. Non-text status and usage events are ignored.
 
 ##### Evidence
-- Implementation: [opencode.ts:306 classifyProcessResult()](/src/adapters/opencode.ts#L306), [opencode.ts:659 parseOpencodePayload()](/src/adapters/opencode.ts#L659), [opencode.ts:1006 validatePhaseSchema()](/src/adapters/opencode.ts#L1006), [final-report.ts:428 parseAcknowledgment()](/src/domain/reporting/final-report.ts#L428)
+- Implementation: [opencode.ts:318 classifyProcessResult()](/src/adapters/opencode.ts#L318), [opencode.ts:683 parseOpencodePayload()](/src/adapters/opencode.ts#L683), [opencode.ts:1030 validatePhaseSchema()](/src/adapters/opencode.ts#L1030), [final-report.ts:428 parseAcknowledgment()](/src/domain/reporting/final-report.ts#L428)
 - Test: [opencode.test.ts:131 rejects %s final-report acknowledgment](/test/contract/opencode.test.ts#L131), [opencode.test.ts:154 rejects fenced or prose-wrapped final-report acknowledgments](/test/contract/opencode.test.ts#L154), [opencode.test.ts:169 rejects a raw final-report payload outside a text event](/test/contract/opencode.test.ts#L169), [opencode.test.ts:184 rejects malformed UTF-8 in the final-report event stream](/test/contract/opencode.test.ts#L184), [process-output.test.ts:7 kills a child when combined captured output exceeds the configured byte bound](/test/contract/process-output.test.ts#L7), [process-output.test.ts:18 marks malformed UTF-8 without hiding it behind replacement decoding](/test/contract/process-output.test.ts#L18)
 
 #### Scenario: Preserve Prompt Parity [RAE-FINAL-PROMPT-PARITY]
@@ -1890,7 +1890,7 @@ WHEN a new run starts and `report.md` exists from a prior run, THE spec-check to
 **Postcondition:** A prior report cannot be attributed to the new evidence bundle.
 
 ##### Evidence
-- Implementation: [run-cli.ts:170 runCliPipeline()](/src/cli/run-cli.ts#L170), [final-report.ts:423 removeFinalReport()](/src/domain/reporting/final-report.ts#L423)
+- Implementation: [run-cli.ts:179 runCliPipeline()](/src/cli/run-cli.ts#L179), [final-report.ts:423 removeFinalReport()](/src/domain/reporting/final-report.ts#L423)
 - Test: [final-report.test.ts:313 removes stale files and directories idempotently](/test/contract/final-report.test.ts#L313)
 - Test (integration): [merge-pipeline.integration.test.ts:271 removes stale report output before the current final-report attempt](/test/integration/merge-pipeline.integration.test.ts#L271)
 
@@ -1900,7 +1900,7 @@ WHEN a new run starts, THE spec-check tool SHALL first invalidate the prior `man
 **Postcondition:** Artifacts omitted by the current run cannot be mistaken for current unmanifested evidence.
 
 ##### Evidence
-- Implementation: [run-cli.ts:170 runCliPipeline()](/src/cli/run-cli.ts#L170), [run-cli.ts:235 MANAGED_OUTPUT_PATHS](/src/cli/run-cli.ts#L235), [fs.ts:137 removeOutputTree()](/src/adapters/fs.ts#L137)
+- Implementation: [run-cli.ts:179 runCliPipeline()](/src/cli/run-cli.ts#L179), [run-cli.ts:263 MANAGED_OUTPUT_PATHS](/src/cli/run-cli.ts#L263), [fs.ts:137 removeOutputTree()](/src/adapters/fs.ts#L137)
 - Test: [fs.test.ts:66 removes interrupted atomic-write siblings only for managed root files](/test/contract/fs.test.ts#L66)
 - Test (integration): [merge-pipeline.integration.test.ts:271 removes stale report output before the current final-report attempt](/test/integration/merge-pipeline.integration.test.ts#L271), [merge-pipeline.integration.test.ts:318 supports consecutive runs against the same output directory](/test/integration/merge-pipeline.integration.test.ts#L318)
 
@@ -1910,7 +1910,7 @@ IF managed-output cleanup fails after prior-manifest invalidation, THEN THE spec
 **Postcondition:** Residue can remain for operator inspection, but no stale manifest attests it as the new run.
 
 ##### Evidence
-- Implementation: [run-cli.ts:170 runCliPipeline()](/src/cli/run-cli.ts#L170)
+- Implementation: [run-cli.ts:179 runCliPipeline()](/src/cli/run-cli.ts#L179)
 - Test (integration): [merge-pipeline.integration.test.ts:305 surfaces run-start managed-output cleanup failure before ingestion](/test/integration/merge-pipeline.integration.test.ts#L305)
 
 #### Scenario: Remove Invalid Candidate [RAE-FINAL-CLEAN-FAILED]
@@ -1919,7 +1919,7 @@ IF report generation or validation fails on a handled path, THEN THE spec-check 
 **Postcondition:** The warning terminal state has no report residue.
 
 ##### Evidence
-- Implementation: [final-report-lifecycle.ts:65 coordinateFinalReportLifecycle()](/src/cli/final-report-lifecycle.ts#L65), [run-cli.ts:553 runReportingPhase()](/src/cli/run-cli.ts#L553), [final-report.ts:423 removeFinalReport()](/src/domain/reporting/final-report.ts#L423)
+- Implementation: [final-report-lifecycle.ts:65 coordinateFinalReportLifecycle()](/src/cli/final-report-lifecycle.ts#L65), [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596), [final-report.ts:423 removeFinalReport()](/src/domain/reporting/final-report.ts#L423)
 - Test: [final-report.test.ts:313 removes stale files and directories idempotently](/test/contract/final-report.test.ts#L313), [safety-liveness.invariant.test.ts:268 LIVE-13: every handled final-report branch reaches one terminal outcome](/test/invariant/safety-liveness.invariant.test.ts#L268)
 - Test (property): [final-report.property.test.ts:32 legal success and failure histories reach exactly one terminal state](/test/property/final-report.property.test.ts#L32), [final-report.property.test.ts:85 executes production coordination against independent filesystem observations and reference histories](/test/property/final-report.property.test.ts#L85)
 
@@ -1929,7 +1929,7 @@ IF the spec-check tool cannot establish that the designated report path is absen
 **Postcondition:** The system never reports successful cleanup when invalid residue may remain.
 
 ##### Evidence
-- Implementation: [final-report-lifecycle.ts:65 coordinateFinalReportLifecycle()](/src/cli/final-report-lifecycle.ts#L65), [run-cli.ts:553 runReportingPhase()](/src/cli/run-cli.ts#L553)
+- Implementation: [final-report-lifecycle.ts:65 coordinateFinalReportLifecycle()](/src/cli/final-report-lifecycle.ts#L65), [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596)
 - Test (property): [final-report.property.test.ts:55 generated stuttering and failure-point histories preserve lifecycle invariants](/test/property/final-report.property.test.ts#L55), [final-report.property.test.ts:85 executes production coordination against independent filesystem observations and reference histories](/test/property/final-report.property.test.ts#L85)
 - Test (integration): [merge-pipeline.integration.test.ts:332 surfaces cleanup failure instead of claiming warning-without-report](/test/integration/merge-pipeline.integration.test.ts#L332)
 
@@ -1939,7 +1939,7 @@ IF report cleanup, marker invalidation, warning-summary rewrite, or manifest ref
 **Postcondition:** Report, summary, and manifest presence reflect only side effects completed before the failed operation. After successful marker invalidation, no completion manifest remains.
 
 ##### Evidence
-- Implementation: [final-report-lifecycle.ts:65 coordinateFinalReportLifecycle()](/src/cli/final-report-lifecycle.ts#L65), [run-cli.ts:553 runReportingPhase()](/src/cli/run-cli.ts#L553), [final-report.ts:164 reduceFinalReportLifecycle()](/src/domain/reporting/final-report.ts#L164)
+- Implementation: [final-report-lifecycle.ts:65 coordinateFinalReportLifecycle()](/src/cli/final-report-lifecycle.ts#L65), [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596), [final-report.ts:164 reduceFinalReportLifecycle()](/src/domain/reporting/final-report.ts#L164)
 - Test (property): [final-report.property.test.ts:55 generated stuttering and failure-point histories preserve lifecycle invariants](/test/property/final-report.property.test.ts#L55), [final-report.property.test.ts:85 executes production coordination against independent filesystem observations and reference histories](/test/property/final-report.property.test.ts#L85)
 - Test (integration): [merge-pipeline.integration.test.ts:332 surfaces cleanup failure instead of claiming warning-without-report](/test/integration/merge-pipeline.integration.test.ts#L332), [merge-pipeline.integration.test.ts:358 surfaces warning-summary persistence failure as OutputError](/test/integration/merge-pipeline.integration.test.ts#L358), [merge-pipeline.integration.test.ts:377 surfaces refreshed-manifest failure as OutputError](/test/integration/merge-pipeline.integration.test.ts#L377)
 
@@ -2125,7 +2125,7 @@ WHEN a final-report warning is created, THE warning SHALL contain warning severi
 **Postcondition:** Reviewers can distinguish optional-report degradation from missing analysis.
 
 ##### Evidence
-- Implementation: [run-cli.ts:632 finalReportFailureFinding()](/src/cli/run-cli.ts#L632)
+- Implementation: [run-cli.ts:694 finalReportFailureFinding()](/src/cli/run-cli.ts#L694)
 - Test (integration): [merge-pipeline.integration.test.ts:215 persists a nonfatal final-report warning and refreshes the summary checksum](/test/integration/merge-pipeline.integration.test.ts#L215), [merge-pipeline.integration.test.ts:259 persists warning for final-report %s degradation](/test/integration/merge-pipeline.integration.test.ts#L259)
 
 #### Scenario: Refresh Summary Checksum [RAE-FINAL-WARN-HASH]
@@ -2134,7 +2134,7 @@ WHEN the warning changes `report_summary.md`, THE spec-check tool SHALL first in
 **Postcondition:** Every core manifest checksum matches its final core artifact.
 
 ##### Evidence
-- Implementation: [final-report-lifecycle.ts:65 coordinateFinalReportLifecycle()](/src/cli/final-report-lifecycle.ts#L65), [run-cli.ts:553 runReportingPhase()](/src/cli/run-cli.ts#L553), [run-cli.ts:615 writeCoreManifest()](/src/cli/run-cli.ts#L615)
+- Implementation: [final-report-lifecycle.ts:65 coordinateFinalReportLifecycle()](/src/cli/final-report-lifecycle.ts#L65), [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596), [run-cli.ts:675 writeCoreManifest()](/src/cli/run-cli.ts#L675)
 - Test (property): [final-report.property.test.ts:104 an unmanifested report cannot change core entries and warning bytes do](/test/property/final-report.property.test.ts#L104), [final-report.property.test.ts:85 executes production coordination against independent filesystem observations and reference histories](/test/property/final-report.property.test.ts#L85)
 - Test (integration): [merge-pipeline.integration.test.ts:215 persists a nonfatal final-report warning and refreshes the summary checksum](/test/integration/merge-pipeline.integration.test.ts#L215), [merge-pipeline.integration.test.ts:358 surfaces warning-summary persistence failure as OutputError](/test/integration/merge-pipeline.integration.test.ts#L358), [merge-pipeline.integration.test.ts:377 surfaces refreshed-manifest failure as OutputError](/test/integration/merge-pipeline.integration.test.ts#L377)
 
@@ -2144,7 +2144,7 @@ WHEN the final-report warning is persisted, THE spec-check tool SHALL retain `ma
 **Postcondition:** The run is complete with an observable warning and no report.
 
 ##### Evidence
-- Implementation: [final-report-lifecycle.ts:65 coordinateFinalReportLifecycle()](/src/cli/final-report-lifecycle.ts#L65), [run-cli.ts:553 runReportingPhase()](/src/cli/run-cli.ts#L553), [final-report.ts:164 reduceFinalReportLifecycle()](/src/domain/reporting/final-report.ts#L164)
+- Implementation: [final-report-lifecycle.ts:65 coordinateFinalReportLifecycle()](/src/cli/final-report-lifecycle.ts#L65), [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596), [final-report.ts:164 reduceFinalReportLifecycle()](/src/domain/reporting/final-report.ts#L164)
 - Test: [final-report.test.ts:451 enforces guarded transitions and terminal stuttering](/test/contract/final-report.test.ts#L451)
 - Test (property): [final-report.property.test.ts:32 legal success and failure histories reach exactly one terminal state](/test/property/final-report.property.test.ts#L32), [final-report.property.test.ts:55 generated stuttering and failure-point histories preserve lifecycle invariants](/test/property/final-report.property.test.ts#L55)
 - Test (integration): [merge-pipeline.integration.test.ts:215 persists a nonfatal final-report warning and refreshes the summary checksum](/test/integration/merge-pipeline.integration.test.ts#L215)
@@ -2337,8 +2337,9 @@ WHEN a finding depends on solver analysis or sampled formalization output, THE s
 **Postcondition:** Formal conclusions remain auditable after the run completes.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:468 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L468)
+- Implementation: [query-executor.ts:124 execute()](/src/domain/formal/query-executor.ts#L124), [source-formalize.ts:152 acceptSample()](/src/domain/formal/source-formalize.ts#L152), [evidence.ts:122 modelHooks()](/src/domain/formal/evidence.ts#L122), [pipeline-helpers.ts:478 runCodeBackwardsWork()](/src/cli/pipeline-helpers.ts#L478)
 - Test: [coverage-gaps.test.ts:44 solver and model artifacts are preserved via writeOutputAtomic](/test/contract/coverage-gaps.test.ts#L44), [global.invariant.test.ts:207 INV-4 + INV-13: solver artifacts are persisted](/test/invariant/global.invariant.test.ts#L207)
+- Test (integration): [semantic-pipeline.integration.test.ts:40 runs the source pipeline with real Z3 and checksummed raw/query artifacts](/test/integration/semantic-pipeline.integration.test.ts#L40)
 
 #### Scenario: Preserve Cross-Side Implication Evidence [RAE-EVID-CROSSIMPLY]
 WHEN a code-backwards classification depends on cross-side implication analysis, THE spec-check tool SHALL preserve the implication queries, solver results, and classification rationale as evidence attached to the finding.
@@ -2346,9 +2347,9 @@ WHEN a code-backwards classification depends on cross-side implication analysis,
 **Postcondition:** Cross-side comparison verdicts are traceable to their formal basis.
 
 ##### Evidence
-- Implementation: [cross-implication.ts:332 runBoundedPairwiseComparison()](/src/domain/code-backwards/cross-implication.ts#L332)
-- Test: [global.invariant.test.ts:207 INV-4 + INV-13: solver artifacts are persisted](/test/invariant/global.invariant.test.ts#L207)
-- Test (integration): [pipeline.integration.test.ts:279 cross-side comparison pipeline with solver + blind comparison](/test/integration/pipeline.integration.test.ts#L279)
+- Implementation: [semantic-comparison.ts:35 compareSemanticClaims()](/src/domain/code-backwards/semantic-comparison.ts#L35), [semantic-comparison.ts:136 compareSemanticCapability()](/src/domain/code-backwards/semantic-comparison.ts#L136), [query-executor.ts:124 execute()](/src/domain/formal/query-executor.ts#L124)
+- Test: [semantic-comparison.test.ts:37 preserves %s unstable selection through aggregate evidence and matching](/test/contract/semantic-comparison.test.ts#L37), [semantic-comparison.test.ts:66 unissued incompatible pairs retain separate metadata records without invented solver executions](/test/contract/semantic-comparison.test.ts#L66)
+- Test (integration): [semantic-pipeline.integration.test.ts:70 keeps independent generated parsing and separate permission comparison in the CLI](/test/integration/semantic-pipeline.integration.test.ts#L70)
 
 #### Scenario: Prevent Unsupported Verdict [RAE-EVID-FAIL]
 IF a final report conclusion would be emitted without preserved provenance or supporting evidence, THEN THE spec-check tool SHALL suppress that unsupported verdict and SHALL surface the missing-evidence condition as a defect.
@@ -2501,7 +2502,7 @@ WHEN the tool surfaces a catalog-empty diagnostic, THE spec-check tool SHALL inc
 **Postcondition:** Catalog errors meet the same reviewability standard as normal findings.
 
 ##### Evidence
-- Implementation: [run-cli.ts:83 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L83)
+- Implementation: [run-cli.ts:92 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L92)
 - Test: [cli.test.ts:209 formats each empty-catalog variant with contextual details](/test/contract/cli.test.ts#L209)
 - Example:
 ```typescript
@@ -2524,7 +2525,7 @@ WHEN the logic-analysis pipeline emits `logic.merge_conflict` or `logic.invalid_
 **Severity:** Merge conflicts and invalid compile groups SHALL be `error` severity independent of source obligation, because declaration conflicts and identity aliasing are structural defects rather than satisfiability outcomes.
 
 ##### Evidence
-- Implementation: [smtlib.ts:77 SpecMergeConflict](/src/domain/formal/smtlib.ts#L77), [logic-analysis.ts:315 conflictToFinding()](/src/domain/formal/logic-analysis.ts#L315), [logic-analysis.ts:200 preflightGroupClaimIds()](/src/domain/formal/logic-analysis.ts#L200), [logic-analysis.ts:562 buildInvalidGroupFinding()](/src/domain/formal/logic-analysis.ts#L562)
+- Implementation: [smtlib.ts:75 SpecMergeConflict](/src/domain/formal/smtlib.ts#L75), [logic-analysis.ts:324 conflictToFinding()](/src/domain/formal/logic-analysis.ts#L324), [logic-analysis.ts:209 preflightGroupClaimIds()](/src/domain/formal/logic-analysis.ts#L209), [logic-analysis.ts:578 buildInvalidGroupFinding()](/src/domain/formal/logic-analysis.ts#L578)
 - Test: [logic-analysis.test.ts:575 maps each merge conflict kind to merge_conflict finding with stable evidence](/test/contract/logic-analysis.test.ts#L575), [logic-analysis.test.ts:556 rejects duplicate raw claim IDs as invalid group before compile and solver work](/test/contract/logic-analysis.test.ts#L556), [logic-analysis.test.ts:619 detects constructed sanitized-id collision in preflight](/test/contract/logic-analysis.test.ts#L619), [smtlib.test.ts:115 detects function signature conflicts and excludes conflicting claims](/test/contract/smtlib.test.ts#L115), [smtlib.test.ts:135 detects variable sort mismatch and excludes later claim](/test/contract/smtlib.test.ts#L135), [smtlib.test.ts:155 detects symbol kind collision across claims](/test/contract/smtlib.test.ts#L155), [smtlib.test.ts:175 detects same-claim symbol kind collision](/test/contract/smtlib.test.ts#L175)
 - Test (property): [logic.property.test.ts:700 function-signature conflict histories keep function-conflict-only scope](/test/property/logic.property.test.ts#L700), [logic.property.test.ts:717 constructed sanitized collisions reject with duplicate_sanitized_claim_id](/test/property/logic.property.test.ts#L717)
 
@@ -2772,7 +2773,7 @@ reporting, THEN metrics SHALL NOT create a completion marker.
 marker.
 
 ##### Evidence
-- Implementation: [run-cli.ts:553 runReportingPhase()](/src/cli/run-cli.ts#L553), [run-cli.ts:650 writeCurrentRunMetrics()](/src/cli/run-cli.ts#L650), [manifest.ts:128 writeManifest()](/src/domain/reporting/manifest.ts#L128)
+- Implementation: [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596), [run-cli.ts:718 writeCurrentRunMetrics()](/src/cli/run-cli.ts#L718), [manifest.ts:133 writeManifest()](/src/domain/reporting/manifest.ts#L133)
 - Test: [metrics.test.ts:13 reconciles phase and run totals and returns its checksum](/test/contract/metrics.test.ts#L13)
 - Test (integration): [merge-pipeline.integration.test.ts:189 writes and manifests opt-in run metrics](/test/integration/merge-pipeline.integration.test.ts#L189)
 
@@ -2899,7 +2900,7 @@ WHEN a run completes core analysis after producing one or more `FormalizationAtt
 **Postcondition:** Manifest presence marks the last successful core run and mechanically binds all durable attempt evidence to it.
 
 ##### Evidence
-- Implementation: [run-cli.ts:553 runReportingPhase()](/src/cli/run-cli.ts#L553), [formalization-evidence.ts:205 writeFormalizationAttemptSet()](/src/domain/reporting/formalization-evidence.ts#L205)
+- Implementation: [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596), [formalization-evidence.ts:208 writeFormalizationAttemptSet()](/src/domain/reporting/formalization-evidence.ts#L208)
 - Test: [manifest.test.ts:73 lists formalization evidence as an ordinary checksummed file without embedding attempts](/test/contract/manifest.test.ts#L73)
 - Test (integration): [merge-liveness.integration.test.ts:447 removes stale formalization evidence at run start and checksums the replacement](/test/integration/merge-liveness.integration.test.ts#L447)
 
@@ -2909,7 +2910,7 @@ IF attempt-evidence files exist but core analysis fails or terminates before `ma
 **Postcondition:** Atomic evidence survival does not weaken core manifest completion semantics.
 
 ##### Evidence
-- Implementation: [run-cli.ts:441 runFormalizationPhaseWithEvidence()](/src/cli/run-cli.ts#L441), [run-cli.ts:553 runReportingPhase()](/src/cli/run-cli.ts#L553)
+- Implementation: [run-cli.ts:482 runFormalizationPhaseWithEvidence()](/src/cli/run-cli.ts#L482), [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596)
 - Test (integration): [merge-liveness.integration.test.ts:367 still aborts when every formalization claim fails](/test/integration/merge-liveness.integration.test.ts#L367)
 
 #### Scenario: Mark Complete Core Run [RAE-MANIFEST-DONE]
@@ -2918,7 +2919,7 @@ WHEN all selected core outputs are written successfully, THE spec-check tool SHA
 **Postcondition:** Consumers can treat manifest presence as the marker of a completed core run whether the optional final report later succeeds or fails.
 
 ##### Evidence
-- Implementation: [manifest.ts:128 writeManifest()](/src/domain/reporting/manifest.ts#L128), [run-cli.ts:553 runReportingPhase()](/src/cli/run-cli.ts#L553)
+- Implementation: [manifest.ts:133 writeManifest()](/src/domain/reporting/manifest.ts#L133), [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596)
 - Test: [manifest.test.ts:19 writes checksums and manifest last](/test/contract/manifest.test.ts#L19)
 - Test (integration): [pipeline.integration.test.ts:215 manifest checksums match actual file content](/test/integration/pipeline.integration.test.ts#L215)
 
@@ -2928,7 +2929,7 @@ IF core analysis fails before all selected core outputs are finalized, THEN THE 
 **Postcondition:** Partial core runs cannot be mistaken for completed analyses.
 
 ##### Evidence
-- Implementation: [run-cli.ts:553 runReportingPhase()](/src/cli/run-cli.ts#L553)
+- Implementation: [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596)
 - Test: [coverage-gaps.test.ts:59 manifest absence signals incomplete run](/test/contract/coverage-gaps.test.ts#L59)
 
 #### Scenario: Invalidate Stale Manifest From Prior Run [RAE-MANIFEST-STALE]
@@ -2937,7 +2938,7 @@ IF the output directory already contains a manifest from a previous run WHEN a n
 **Postcondition:** Only a successfully completed core run can leave a current manifest in the output directory.
 
 ##### Evidence
-- Implementation: [manifest.ts:158 invalidateStaleManifest()](/src/domain/reporting/manifest.ts#L158), [run-cli.ts:170 runCliPipeline()](/src/cli/run-cli.ts#L170)
+- Implementation: [manifest.ts:163 invalidateStaleManifest()](/src/domain/reporting/manifest.ts#L163), [run-cli.ts:179 runCliPipeline()](/src/cli/run-cli.ts#L179)
 - Test: [manifest.test.ts:52 removes stale manifest from prior run](/test/contract/manifest.test.ts#L52), [manifest.test.ts:65 returns false when no stale manifest exists](/test/contract/manifest.test.ts#L65)
 
 #### Scenario: Exclude Final Report From Manifest [RAE-MANIFEST-NO-FINAL]
@@ -2946,7 +2947,7 @@ WHEN `manifest.json` is written or refreshed, THE spec-check tool SHALL NOT incl
 **Postcondition:** The report does not attest to itself and remains a post-completion derivative.
 
 ##### Evidence
-- Implementation: [manifest.ts:88 validateCoreManifestEntries()](/src/domain/reporting/manifest.ts#L88), [run-cli.ts:615 writeCoreManifest()](/src/cli/run-cli.ts#L615)
+- Implementation: [manifest.ts:88 validateCoreManifestEntries()](/src/domain/reporting/manifest.ts#L88), [run-cli.ts:675 writeCoreManifest()](/src/cli/run-cli.ts#L675)
 - Test: [safety-liveness.invariant.test.ts:262 SAFE-18: final report never enters core manifest descriptors](/test/invariant/safety-liveness.invariant.test.ts#L262)
 - Test (property): [final-report.property.test.ts:104 an unmanifested report cannot change core entries and warning bytes do](/test/property/final-report.property.test.ts#L104), [final-report.property.test.ts:117 the production core-manifest guard rejects report descriptors](/test/property/final-report.property.test.ts#L117)
 - Test (integration): [merge-pipeline.integration.test.ts:215 persists a nonfatal final-report warning and refreshes the summary checksum](/test/integration/merge-pipeline.integration.test.ts#L215), [merge-pipeline.integration.test.ts:271 removes stale report output before the current final-report attempt](/test/integration/merge-pipeline.integration.test.ts#L271)
@@ -3095,17 +3096,39 @@ WHEN one specs-forward or generated-spec formalization invocation produces attem
 
 **Postcondition:** Pointer metadata does not duplicate attached claim bodies; raw attempts and normalized samples remain independently inspectable and checksummed.
 
+##### Evidence
+- Implementation: [formalization-evidence.ts:58 buildFormalizationAttemptSet()](/src/domain/reporting/formalization-evidence.ts#L58), [formalization-evidence.ts:208 writeFormalizationAttemptSet()](/src/domain/reporting/formalization-evidence.ts#L208), [source-formalize.ts:192 perform()](/src/domain/formal/source-formalize.ts#L192), [evidence.ts:122 modelHooks()](/src/domain/formal/evidence.ts#L122)
+- Test: [batch-evidence.test.ts:121 records complete pointer-only evidence, cleans up, and persists no claim text](/test/contract/batch-evidence.test.ts#L121), [manifest.test.ts:102 uses deterministic discriminated paths and collision-free generated ordinals](/test/contract/manifest.test.ts#L102), [semantic-evidence.test.ts:6 persists exact raw bytes separately from immutable pointer/status metadata](/test/contract/semantic-evidence.test.ts#L6)
+- Test (integration): [semantic-pipeline.integration.test.ts:40 runs the source pipeline with real Z3 and checksummed raw/query artifacts](/test/integration/semantic-pipeline.integration.test.ts#L40)
+
 #### Scenario: Failed Run May Retain Attempt Evidence [RAE-FORMAL-ATTEMPT-FAILED-RUN]
 IF a run fails or terminates after evidence finalization, THEN THE spec-check tool SHALL permit finalized partial evidence to remain with no successful current core manifest.
+
+##### Evidence
+- Implementation: [run-cli.ts:482 runFormalizationPhaseWithEvidence()](/src/cli/run-cli.ts#L482), [evidence.ts:122 modelHooks()](/src/domain/formal/evidence.ts#L122)
+- Test (integration): [semantic-pipeline.integration.test.ts:116 all rejected predicate attempts retain raw evidence and fail formalization with exit category 9](/test/integration/semantic-pipeline.integration.test.ts#L116)
 
 #### Scenario: Inline And Rejected Attempts Are Durable [RAE-ATTEMPT-ALL-PATHS]
 WHEN inline, additional-sample, rejected-schema, invalid-expression, or all-invalid attempts occur, THE spec-check tool SHALL retain each captured response, attribution, validation outcome, and failure status even if no candidate survives.
 
+##### Evidence
+- Implementation: [opencode.ts:396 attemptOpencodeOnce()](/src/adapters/opencode.ts#L396), [evidence.ts:122 modelHooks()](/src/domain/formal/evidence.ts#L122), [source-formalize.ts:132 recoverClaimSamples()](/src/domain/formal/source-formalize.ts#L132), [source-formalize.ts:169 recordValidation()](/src/domain/formal/source-formalize.ts#L169)
+- Test: [model-evidence.test.ts:11 captures rejected JSON, retry and accepted data with exact attempt identity](/test/contract/model-evidence.test.ts#L11), [semantic-evidence.test.ts:6 persists exact raw bytes separately from immutable pointer/status metadata](/test/contract/semantic-evidence.test.ts#L6), [formalization-predicates.test.ts:138 recovery feedback and rejected samples survive later candidate shortfalls](/test/contract/formalization-predicates.test.ts#L138)
+- Test (integration): [semantic-pipeline.integration.test.ts:116 all rejected predicate attempts retain raw evidence and fail formalization with exit category 9](/test/integration/semantic-pipeline.integration.test.ts#L116), [model-capture.integration.test.ts:6 retains invalid UTF-8 bytes without confusing lossy diagnostics with evidence](/test/integration/model-capture.integration.test.ts#L6)
+
 #### Scenario: Transport Overflow Is Not A Complete Response [RAE-ATTEMPT-OVERFLOW]
 IF a process exceeds its existing capture limit, THEN THE spec-check tool SHALL preserve captured evidence with terminal overflow classification rather than claim a complete raw response or retry beyond the existing overflow policy.
 
+##### Evidence
+- Implementation: [opencode.ts:318 classifyProcessResult()](/src/adapters/opencode.ts#L318), [opencode.ts:396 attemptOpencodeOnce()](/src/adapters/opencode.ts#L396), [opencode.ts:464 callOpencode()](/src/adapters/opencode.ts#L464), [evidence.ts:122 modelHooks()](/src/domain/formal/evidence.ts#L122)
+- Test: [model-evidence.test.ts:36 records terminal overflow and does not retry captured incomplete bytes](/test/contract/model-evidence.test.ts#L36), [opencode.test.ts:198 never retries capture overflow even with a competing timeout flag (%s)](/test/contract/opencode.test.ts#L198)
+
 #### Scenario: Every Model Phase Has A Capture Bound [RAE-ATTEMPT-BOUND]
 WHEN a model attempt executes, THE spec-check tool SHALL enforce an 8-MiB combined stdout/stderr capture ceiling for analysis phases as well as final reporting so admission-time evidence reservation has a finite upper bound.
+
+##### Evidence
+- Implementation: [opencode.ts:396 attemptOpencodeOnce()](/src/adapters/opencode.ts#L396), [process.ts:119 runProcess()](/src/adapters/process.ts#L119)
+- Test: [model-evidence.test.ts:36 records terminal overflow and does not retry captured incomplete bytes](/test/contract/model-evidence.test.ts#L36), [process-output.test.ts:7 kills a child when combined captured output exceeds the configured byte bound](/test/contract/process-output.test.ts#L7)
 
 #### Requirement model
 
@@ -3510,22 +3533,22 @@ WHEN consuming output from either supported major, THE OpenCode adapter SHALL pr
 WHEN an otherwise valid stream includes an unrecognized event type, THE adapter SHALL ignore that event without treating it as response text or proof of successful completion.
 
 ##### Evidence
-- Implementation: [opencode.ts:659 parseOpencodePayload()](/src/adapters/opencode.ts#L659), [opencode.ts:770 extractPayloadFromEvents()](/src/adapters/opencode.ts#L770), [opencode.ts:932 extractTextPart()](/src/adapters/opencode.ts#L932)
+- Implementation: [opencode.ts:683 parseOpencodePayload()](/src/adapters/opencode.ts#L683), [opencode.ts:794 extractPayloadFromEvents()](/src/adapters/opencode.ts#L794), [opencode.ts:956 extractTextPart()](/src/adapters/opencode.ts#L956)
 - Test: [opencode-compatibility.test.ts:53 decodes captured major %s text and usage with no protocol branch](/test/contract/opencode-compatibility.test.ts#L53), [opencode-compatibility.test.ts:78 never accepts an event-only %s stream as a raw model response](/test/contract/opencode-compatibility.test.ts#L78)
 
 #### Scenario: Preserve Invalid Transport Failure [RAE-OC-EVENTS-INVALID]
 IF output violates the existing phase-specific transport/schema contract or its process exits nonzero or by signal, THEN THE adapter SHALL reject the attempt even if partial valid response text was emitted.
 
 ##### Evidence
-- Implementation: [opencode.ts:306 classifyProcessResult()](/src/adapters/opencode.ts#L306), [opencode.ts:659 parseOpencodePayload()](/src/adapters/opencode.ts#L659), [opencode.ts:1006 validatePhaseSchema()](/src/adapters/opencode.ts#L1006)
-- Test: [opencode-compatibility.test.ts:68 rejects major %s captured error and process failure with partial payload](/test/contract/opencode-compatibility.test.ts#L68), [opencode.test.ts:184 rejects malformed UTF-8 in the final-report event stream](/test/contract/opencode.test.ts#L184), [opencode.test.ts:515 rejects non-object payload with schema_validation_error](/test/contract/opencode.test.ts#L515)
+- Implementation: [opencode.ts:318 classifyProcessResult()](/src/adapters/opencode.ts#L318), [opencode.ts:683 parseOpencodePayload()](/src/adapters/opencode.ts#L683), [opencode.ts:1030 validatePhaseSchema()](/src/adapters/opencode.ts#L1030)
+- Test: [opencode-compatibility.test.ts:68 rejects major %s captured error and process failure with partial payload](/test/contract/opencode-compatibility.test.ts#L68), [opencode.test.ts:184 rejects malformed UTF-8 in the final-report event stream](/test/contract/opencode.test.ts#L184), [opencode.test.ts:520 rejects non-object payload with schema_validation_error](/test/contract/opencode.test.ts#L520)
 
 #### Scenario: Preserve Incomplete Usage [RAE-OC-EVENTS-USAGE]
 IF usage fields are missing or malformed under the existing completeness rules, THEN THE adapter SHALL retain incomplete usage attribution rather than fabricate complete zero usage.
 
 ##### Evidence
-- Implementation: [opencode.ts:511 extractOpencodeUsage()](/src/adapters/opencode.ts#L511), [opencode.ts:562 isCompleteUsageEvent()](/src/adapters/opencode.ts#L562), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443)
-- Test: [opencode-compatibility.test.ts:53 decodes captured major %s text and usage with no protocol branch](/test/contract/opencode-compatibility.test.ts#L53), [opencode.test.ts:261 marks usage events incomplete when required provider token fields are absent](/test/contract/opencode.test.ts#L261)
+- Implementation: [opencode.ts:535 extractOpencodeUsage()](/src/adapters/opencode.ts#L535), [opencode.ts:586 isCompleteUsageEvent()](/src/adapters/opencode.ts#L586), [opencode.ts:464 callOpencode()](/src/adapters/opencode.ts#L464)
+- Test: [opencode-compatibility.test.ts:53 decodes captured major %s text and usage with no protocol branch](/test/contract/opencode-compatibility.test.ts#L53), [opencode.test.ts:266 marks usage events incomplete when required provider token fields are absent](/test/contract/opencode.test.ts#L266)
 
 #### Requirement model
 
@@ -3580,14 +3603,14 @@ WHEN recording a new OpenCode model attempt, THE spec-check tool SHALL record it
 WHEN serializing new attempts or handling existing schema-v1 snapshots, THE metrics code SHALL retain `schemaVersion: 1`, serialize the additive optional `opencodeMajor` when present, and continue to accept snapshots without that field.
 
 ##### Evidence
-- Implementation: [telemetry.ts:12 OpencodeAttemptTelemetry](/src/adapters/telemetry.ts#L12), [telemetry.ts:41 RunTelemetrySnapshot](/src/adapters/telemetry.ts#L41), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443), [metrics.ts:23 writeRunMetrics()](/src/domain/reporting/metrics.ts#L23)
+- Implementation: [telemetry.ts:12 OpencodeAttemptTelemetry](/src/adapters/telemetry.ts#L12), [telemetry.ts:41 RunTelemetrySnapshot](/src/adapters/telemetry.ts#L41), [opencode.ts:464 callOpencode()](/src/adapters/opencode.ts#L464), [metrics.ts:23 writeRunMetrics()](/src/domain/reporting/metrics.ts#L23)
 - Test: [opencode-compatibility.test.ts:85 records semantic model/variant and additive major metadata, without a probe attempt](/test/contract/opencode-compatibility.test.ts#L85), [metrics.test.ts:13 reconciles phase and run totals and returns its checksum](/test/contract/metrics.test.ts#L13)
 
 #### Scenario: Keep Probes Out Of Model Usage [RAE-OC-METRICS-PROBE]
 WHEN OpenCode version detection executes, THE spec-check tool SHALL attribute it to dependency work without recording it as a model attempt or token-bearing call.
 
 ##### Evidence
-- Implementation: [run-cli.ts:284 runIngestionPhases()](/src/cli/run-cli.ts#L284), [opencode-runtime.ts:88 detectOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L88), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443)
+- Implementation: [run-cli.ts:313 runIngestionPhases()](/src/cli/run-cli.ts#L313), [opencode-runtime.ts:88 detectOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L88), [opencode.ts:464 callOpencode()](/src/adapters/opencode.ts#L464)
 - Test: [opencode-compatibility.test.ts:85 records semantic model/variant and additive major metadata, without a probe attempt](/test/contract/opencode-compatibility.test.ts#L85)
 - Test (integration): [opencode-runtime.integration.test.ts:43 runs compiled and bundled pipelines against major %s with one probe each](/test/integration/opencode-runtime.integration.test.ts#L43)
 
@@ -3595,7 +3618,7 @@ WHEN OpenCode version detection executes, THE spec-check tool SHALL attribute it
 WHEN core metrics are persisted, THE spec-check tool SHALL preserve the existing totals and pre-manifest checksum rules, omit full argv and credentials from new compatibility metadata, and retain post-completion report attempts only in memory without rewriting the core metrics snapshot.
 
 ##### Evidence
-- Implementation: [run-cli.ts:553 runReportingPhase()](/src/cli/run-cli.ts#L553), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443), [metrics.ts:23 writeRunMetrics()](/src/domain/reporting/metrics.ts#L23)
+- Implementation: [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596), [opencode.ts:464 callOpencode()](/src/adapters/opencode.ts#L464), [metrics.ts:23 writeRunMetrics()](/src/domain/reporting/metrics.ts#L23)
 - Test: [opencode.test.ts:100 attributes final-report attempts without recording prompt content](/test/contract/opencode.test.ts#L100), [opencode-compatibility.test.ts:85 records semantic model/variant and additive major metadata, without a probe attempt](/test/contract/opencode-compatibility.test.ts#L85)
 - Test (property): [metrics.property.test.ts:41 single-pass metrics reconcile with independent reductions for generated retry histories](/test/property/metrics.property.test.ts#L41)
 - Test (integration): [merge-pipeline.integration.test.ts:189 writes and manifests opt-in run metrics](/test/integration/merge-pipeline.integration.test.ts#L189)
@@ -3637,7 +3660,7 @@ WHEN a model call exceeds its process-output capture limit, THE OpenCode adapter
 IF capture overflow is reported with a retry budget larger than one or a competing timeout flag, THEN THE OpenCode adapter SHALL retain output-limit classification and SHALL record at most the single attempted model call rather than retry an oversized response.
 
 ##### Evidence
-- Implementation: [opencode.ts:306 classifyProcessResult()](/src/adapters/opencode.ts#L306), [opencode.ts:158 isTransientFailureKind()](/src/adapters/opencode.ts#L158), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443), [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80)
+- Implementation: [opencode.ts:318 classifyProcessResult()](/src/adapters/opencode.ts#L318), [opencode.ts:170 isTransientFailureKind()](/src/adapters/opencode.ts#L170), [opencode.ts:464 callOpencode()](/src/adapters/opencode.ts#L464), [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80)
 - Test: [opencode.test.ts:198 never retries capture overflow even with a competing timeout flag (%s)](/test/contract/opencode.test.ts#L198)
 
 #### Requirement model
@@ -3677,7 +3700,7 @@ WHEN a production run starts without `SPEC_CHECK_TELEMETRY=1` and without an exp
 WHEN a verification caller explicitly binds a collector or a production run enables telemetry, THE spec-check tool SHALL retain phase/attempt attribution, reconcile totals and logical calls, and preserve existing metrics/manifest snapshot semantics.
 
 ##### Evidence
-- Implementation: [run-cli.ts:162 runCli()](/src/cli/run-cli.ts#L162), [telemetry.ts:88 runWithTelemetryCollector()](/src/adapters/telemetry.ts#L88), [telemetry.ts:105 allocateOpencodeCallId()](/src/adapters/telemetry.ts#L105), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443), [run-cli.ts:553 runReportingPhase()](/src/cli/run-cli.ts#L553)
+- Implementation: [run-cli.ts:171 runCli()](/src/cli/run-cli.ts#L171), [telemetry.ts:88 runWithTelemetryCollector()](/src/adapters/telemetry.ts#L88), [telemetry.ts:105 allocateOpencodeCallId()](/src/adapters/telemetry.ts#L105), [opencode.ts:464 callOpencode()](/src/adapters/opencode.ts#L464), [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596)
 - Test: [opencode-compatibility.test.ts:101 does not re-read stdout for usage parsing without a telemetry context](/test/contract/opencode-compatibility.test.ts#L101), [telemetry.test.ts:14 keeps concurrent phase attribution isolated and sorts logical calls](/test/contract/telemetry.test.ts#L14)
 - Test (property): [metrics.property.test.ts:41 single-pass metrics reconcile with independent reductions for generated retry histories](/test/property/metrics.property.test.ts#L41)
 - Test (integration): [merge-pipeline.integration.test.ts:100 does not create an implicit collector when telemetry is disabled, but preserves explicit injection](/test/integration/merge-pipeline.integration.test.ts#L100), [merge-pipeline.integration.test.ts:119 captures telemetry enablement once at run start (%s)](/test/integration/merge-pipeline.integration.test.ts#L119)
@@ -3796,7 +3819,7 @@ WHEN generating verification evidence for optional-report persistence, THE verif
 WHEN generated histories cover report success, generation/validation failure, and cleanup/marker/summary/manifest failures, THE verification harness SHALL compare actual coordinator transitions and independently stored report/summary/manifest bytes to the model, including preservation of the preexisting core bundle before marker invalidation.
 
 ##### Evidence
-- Implementation: [final-report-lifecycle.ts:65 coordinateFinalReportLifecycle()](/src/cli/final-report-lifecycle.ts#L65), [run-cli.ts:553 runReportingPhase()](/src/cli/run-cli.ts#L553)
+- Implementation: [final-report-lifecycle.ts:65 coordinateFinalReportLifecycle()](/src/cli/final-report-lifecycle.ts#L65), [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596)
 - Test (property): [final-report.property.test.ts:85 executes production coordination against independent filesystem observations and reference histories](/test/property/final-report.property.test.ts#L85)
 
 #### Requirement model
@@ -3858,11 +3881,25 @@ WHEN a formal conclusion is published, THE spec-check tool SHALL link it to sele
 #### Scenario: Every Executed Script Has Replay Evidence [RAE-QUERY-EXACT]
 WHEN any primary, deeper, clustering, comparison, model, or core script executes, THE spec-check tool SHALL preserve exact commands including `check-sat`, raw captured stdout/stderr, solver version/options, status, source attribution, and stable query identity.
 
+##### Evidence
+- Implementation: [query-executor.ts:124 execute()](/src/domain/formal/query-executor.ts#L124), [evidence.ts:77 text()](/src/domain/formal/evidence.ts#L77), [evidence.ts:72 json()](/src/domain/formal/evidence.ts#L72)
+- Test: [static-queries.test.ts:53 records exact scoped coverage witness despite an unrelated invariant](/test/contract/static-queries.test.ts#L53), [solver-decoding.test.ts:46 preserves a SAT auxiliary outcome and raw CRLF bytes even when requested assignments are incomplete](/test/contract/solver-decoding.test.ts#L46)
+- Test (integration): [semantic-pipeline.integration.test.ts:40 runs the source pipeline with real Z3 and checksummed raw/query artifacts](/test/integration/semantic-pipeline.integration.test.ts#L40)
+
 #### Scenario: Failed Auxiliary Extraction Remains Auditable [RAE-QUERY-AUX-FAIL]
 IF a model or core extraction fails, THEN THE spec-check tool SHALL preserve both the primary verdict and auxiliary failure evidence with decoding or attribution explicitly unavailable.
 
+##### Evidence
+- Implementation: [static-analysis.ts:69 checkMandatoryBaseline()](/src/domain/formal/static-analysis.ts#L69), [static-context.ts:93 coreIds()](/src/domain/formal/static-context.ts#L93), [static-context.ts:105 witness()](/src/domain/formal/static-context.ts#L105), [query-executor.ts:124 execute()](/src/domain/formal/query-executor.ts#L124)
+- Test: [static-queries.test.ts:71 preserves original UNSAT when core extraction fails](/test/contract/static-queries.test.ts#L71), [solver-decoding.test.ts:46 preserves a SAT auxiliary outcome and raw CRLF bytes even when requested assignments are incomplete](/test/contract/solver-decoding.test.ts#L46)
+
 #### Scenario: Content Fingerprints Identify In-Place Semantics [RAE-EVIDENCE-IDENTITY]
 WHEN new evidence is serialized, THE spec-check tool SHALL retain current version identifiers while recording exact source/configuration/prompt/compiler/registry identity so historical outputs are not represented as the same current analysis contract.
+
+##### Evidence
+- Implementation: [run-cli.ts:201 runResolvedPhases()](/src/cli/run-cli.ts#L201), [semantic-identity.ts:6 semanticRuntimeIdentity()](/src/adapters/semantic-identity.ts#L6), [source-formalize.ts:80 processGroup()](/src/domain/formal/source-formalize.ts#L80), [source-formalize.ts:192 perform()](/src/domain/formal/source-formalize.ts#L192)
+- Test: [semantic-identity.test.ts:9 changing only source-backed routing changes runtime identity](/test/contract/semantic-identity.test.ts#L9), [semantic-evidence.test.ts:6 persists exact raw bytes separately from immutable pointer/status metadata](/test/contract/semantic-evidence.test.ts#L6)
+- Test (integration): [semantic-pipeline.integration.test.ts:40 runs the source pipeline with real Z3 and checksummed raw/query artifacts](/test/integration/semantic-pipeline.integration.test.ts#L40)
 
 #### Requirement model
 
@@ -3932,14 +3969,42 @@ WHEN analysis completes or degrades, THE spec-check tool SHALL report extracted,
 
 **Postcondition:** Planned checks partition into executed, blocked, and skipped counts. Executed checks partition into SAT, UNSAT, and inconclusive outcomes; blocked/skipped checks do not count as inconclusive solver executions. An explicitly named unestablished aggregate may include all three nondefinitive categories. Compact ledger records retain their multiplicity and reasons rather than silently dropping dependent pair/equivalence scope.
 
+##### Evidence
+- Implementation: [query-executor.ts:44 summarizeQueryLedger()](/src/domain/formal/query-executor.ts#L44), [query-executor.ts:108 unissued()](/src/domain/formal/query-executor.ts#L108), [run-cli.ts:201 runResolvedPhases()](/src/cli/run-cli.ts#L201), [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596)
+- Test: [query-scope.test.ts:7 separates solver uncertainty from unissued blocked/skipped plans](/test/contract/query-scope.test.ts#L7), [static-queries.test.ts:121 retains candidate pair examinations, including infeasible guards, and accounts for dependent checks](/test/contract/static-queries.test.ts#L121), [static-queries.test.ts:136 records the unissued conflict when co-activation is excluded or unknown](/test/contract/static-queries.test.ts#L136)
+- Test (integration): [semantic-pipeline.integration.test.ts:40 runs the source pipeline with real Z3 and checksummed raw/query artifacts](/test/integration/semantic-pipeline.integration.test.ts#L40), [semantic-pipeline.integration.test.ts:145 capacity-skipped formal work completes diagnostics and stale evidence is removed on rerun](/test/integration/semantic-pipeline.integration.test.ts#L145)
+- Example:
+```typescript
+const { summarizeQueryLedger } = await import("./src/domain/formal/query-executor.ts");
+const totals = summarizeQueryLedger([{ scope: "q1", kind: "check", status: "sat" }, { scope: "q2", kind: "check", status: "unknown" }, { scope: "pairs", kind: "check", status: "blocked", count: 3 }]);
+totals.plannedQueries; //=> 5
+totals.executedQueries; //=> 2
+totals.inconclusiveQueries; //=> 1
+totals.blockedQueries; //=> 3
+```
+
 #### Scenario: Valuations Are Not Reachable States [RAE-STRENGTH-STATIC]
 WHEN a static query is SAT or UNSAT, THE spec-check tool SHALL describe its valuation or entailment meaning without claiming executable reachability, temporal safety, all-input realizability, or response completeness beyond the query contract.
+
+##### Evidence
+- Implementation: [static-context.ts:42 staticDiagnostic()](/src/domain/formal/static-context.ts#L42), [static-analysis.ts:69 checkMandatoryBaseline()](/src/domain/formal/static-analysis.ts#L69), [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596)
+- Test (integration): [semantic-pipeline.integration.test.ts:40 runs the source pipeline with real Z3 and checksummed raw/query artifacts](/test/integration/semantic-pipeline.integration.test.ts#L40)
 
 #### Scenario: Partial Comparison Is Not Whole-Capability Alignment [RAE-STRENGTH-PARTIAL]
 WHEN excluded, unmapped, incompatible, or unstable artifacts limit a comparison, THE spec-check tool SHALL retain that qualification in phase reports, summaries, divergence calculations, and final-assessment input rather than count the capability as fully aligned.
 
+##### Evidence
+- Implementation: [semantic-comparison.ts:35 compareSemanticClaims()](/src/domain/code-backwards/semantic-comparison.ts#L35), [comparison-qualification.ts:21 unstableComparison()](/src/domain/code-backwards/comparison-qualification.ts#L21), [comparison-qualification.ts:26 qualificationText()](/src/domain/code-backwards/comparison-qualification.ts#L26), [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596)
+- Test: [semantic-comparison.test.ts:37 preserves %s unstable selection through aggregate evidence and matching](/test/contract/semantic-comparison.test.ts#L37), [semantic-comparison.test.ts:179 partially mapped relations cannot count as whole-capability alignment or win matching](/test/contract/semantic-comparison.test.ts#L179)
+- Test (integration): [semantic-pipeline.integration.test.ts:162 optional final-report failure preserves scope qualifications and a refreshed core manifest](/test/integration/semantic-pipeline.integration.test.ts#L162)
+
 #### Scenario: Model Interpretation Remains Conditional [RAE-STRENGTH-INTENT]
 WHEN a conclusion depends on model-proposed concept alignment or a selected interpretation, THE spec-check tool SHALL state that dependency rather than imply solver validity proves natural-language fidelity or implemented behavior.
+
+##### Evidence
+- Implementation: [static-analysis.ts:26 analyzeStaticGroup()](/src/domain/formal/static-analysis.ts#L26), [static-context.ts:42 staticDiagnostic()](/src/domain/formal/static-context.ts#L42), [comparison-qualification.ts:13 comparisonQualifications()](/src/domain/code-backwards/comparison-qualification.ts#L13), [comparison-qualification.ts:26 qualificationText()](/src/domain/code-backwards/comparison-qualification.ts#L26), [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596)
+- Test: [semantic-comparison.test.ts:78 retains %s sample assessment and proposed-identity dependence without inventing instability](/test/contract/semantic-comparison.test.ts#L78)
+- Test (integration): [semantic-pipeline.integration.test.ts:40 runs the source pipeline with real Z3 and checksummed raw/query artifacts](/test/integration/semantic-pipeline.integration.test.ts#L40)
 
 #### Requirement model
 
@@ -3974,16 +4039,35 @@ WHEN evidence-producing analysis is scheduled, THE spec-check tool SHALL reserve
 #### Scenario: Exhausted Evidence Capacity Skips New Work Visibly [RAE-EVIDENCE-BUDGET]
 IF the effective evidence capacity of 256 MiB per run by default cannot admit new work, THEN THE spec-check tool SHALL skip that work with an explicit scope limitation instead of executing unrecordable queries or silently truncating evidence.
 
+##### Evidence
+- Implementation: [analysis-config.ts:30 ANALYSIS_LIMITS](/src/domain/formal/analysis-config.ts#L30), [evidence.ts:42 reserve()](/src/domain/formal/evidence.ts#L42), [query-executor.ts:124 execute()](/src/domain/formal/query-executor.ts#L124), [source-formalize.ts:57 formalizeSourceClaims()](/src/domain/formal/source-formalize.ts#L57)
+- Test: [semantic-evidence.test.ts:28 in-flight bytes remain charged before asynchronous write completion](/test/contract/semantic-evidence.test.ts#L28)
+- Test (integration): [semantic-pipeline.integration.test.ts:145 capacity-skipped formal work completes diagnostics and stale evidence is removed on rerun](/test/integration/semantic-pipeline.integration.test.ts#L145)
+
 #### Scenario: Required Write Failure Prevents Completion [RAE-EVIDENCE-WRITE]
 IF required attempt or query evidence cannot be atomically written, THEN THE spec-check tool SHALL fail with `OutputError` exit 11 and SHALL leave no successful current-run core manifest.
+
+##### Evidence
+- Implementation: [evidence.ts:6 EvidencePersistenceError](/src/domain/formal/evidence.ts#L6), [evidence.ts:87 artifact()](/src/domain/formal/evidence.ts#L87), [run-cli.ts:179 runCliPipeline()](/src/cli/run-cli.ts#L179), [run-cli.ts:706 requiredOutput()](/src/cli/run-cli.ts#L706)
+- Test: [semantic-evidence.test.ts:21 required write failure is an OutputError and cannot finalize a descriptor](/test/contract/semantic-evidence.test.ts#L21), [model-evidence.test.ts:27 propagates required evidence failures without a model retry](/test/contract/model-evidence.test.ts#L27)
+- Test (integration): [semantic-pipeline.integration.test.ts:97 required generation input persistence failure is OutputError with no manifest or generation attempt](/test/integration/semantic-pipeline.integration.test.ts#L97), [semantic-pipeline.integration.test.ts:128 required registry persistence failure remains OutputError rather than a model retry](/test/integration/semantic-pipeline.integration.test.ts#L128), [semantic-pipeline.integration.test.ts:176 required completion failure (%s) is OutputError with no new manifest](/test/integration/semantic-pipeline.integration.test.ts#L176)
 
 #### Scenario: New Artifacts Join Existing Cleanup And Manifest Rules [RAE-EVIDENCE-MANAGED]
 WHEN discovery, registry, typed IR, alignment, or query evidence paths are introduced, THE spec-check tool SHALL include them in ordered run-start cleanup and successful manifest checksums under the configured output boundary.
 
 **Postcondition:** Before each core manifest publication, recorded semantic evidence is reconciled with the on-disk tree: expected files must exist as regular files with matching checksums, and unexpected files (including temporary artifacts), symlinks, and unsupported types are rejected. Core manifest paths are unique and retain recorder phase provenance. Reconciliation, enumeration, report, and manifest publication failures are required output failures, not successful degraded completion or model errors.
 
+##### Evidence
+- Implementation: [run-cli.ts:263 MANAGED_OUTPUT_PATHS](/src/cli/run-cli.ts#L263), [run-cli.ts:675 writeCoreManifest()](/src/cli/run-cli.ts#L675), [core-artifacts.ts:38 reconcileSemanticEvidence()](/src/adapters/core-artifacts.ts#L38), [evidence.ts:58 files()](/src/domain/formal/evidence.ts#L58)
+- Test: [semantic-reconciliation.test.ts:23 retains recorder checksum/phase provenance without duplicate enumeration descriptors](/test/contract/semantic-reconciliation.test.ts#L23), [semantic-reconciliation.test.ts:32 fails closed on %s artifacts](/test/contract/semantic-reconciliation.test.ts#L32), [semantic-reconciliation.test.ts:45 rejects duplicate paths, path aliases, and unsupported filesystem types](/test/contract/semantic-reconciliation.test.ts#L45)
+- Test (integration): [semantic-pipeline.integration.test.ts:145 capacity-skipped formal work completes diagnostics and stale evidence is removed on rerun](/test/integration/semantic-pipeline.integration.test.ts#L145), [semantic-pipeline.integration.test.ts:176 required completion failure (%s) is OutputError with no new manifest](/test/integration/semantic-pipeline.integration.test.ts#L176)
+
 #### Scenario: Optional Final Report Retains Its Lifecycle [RAE-EVIDENCE-FINAL]
 WHEN core evidence completes, THE spec-check tool SHALL preserve the existing post-manifest optional `report.md` lifecycle and SHALL keep that derivative report outside the core manifest.
+
+##### Evidence
+- Implementation: [run-cli.ts:596 runReportingPhase()](/src/cli/run-cli.ts#L596), [run-cli.ts:675 writeCoreManifest()](/src/cli/run-cli.ts#L675), [final-report-lifecycle.ts:65 coordinateFinalReportLifecycle()](/src/cli/final-report-lifecycle.ts#L65)
+- Test (integration): [semantic-pipeline.integration.test.ts:40 runs the source pipeline with real Z3 and checksummed raw/query artifacts](/test/integration/semantic-pipeline.integration.test.ts#L40), [semantic-pipeline.integration.test.ts:162 optional final-report failure preserves scope qualifications and a refreshed core manifest](/test/integration/semantic-pipeline.integration.test.ts#L162)
 
 #### Requirement model
 
@@ -4105,11 +4189,20 @@ WHEN this analysis change is accepted for release, THE verification harness SHAL
 #### Scenario: Independent Oracle Checks Meaning [RAE-VERIFY-ORACLE]
 WHEN Boolean and enum query cases are evaluated, THE harness SHALL compare production outcomes with a finite-domain evaluator independent of the production compiler and query planner rather than rely only on Z3 syntax acceptance.
 
+##### Evidence
+- Test: [static-queries.test.ts:90 every production query family agrees with the independent finite evaluator](/test/contract/static-queries.test.ts#L90)
+
 #### Scenario: Analyzer Models Have Positive Witnesses [RAE-VERIFY-MODEL]
 WHEN analyzer lifecycle invariants are checked in Alloy, THE harness SHALL run satisfiable witness commands as well as explicit-scope assertions and SHALL record bounded results without claiming a whole-system proof.
 
+##### Evidence
+- Test: [semantic-models.test.ts:11 checks generated-only ownership, snapshot preservation and unstable-contributor credit](/test/contract/semantic-models.test.ts#L11), [semantic-models.test.ts:23 finds all positive witnesses and no counterexample in the declared finite scopes](/test/contract/semantic-models.test.ts#L23)
+
 #### Scenario: Fixed Corpus Reports Cost And Coverage [RAE-VERIFY-CORPUS]
 WHEN the discovery pre-pass is evaluated, THE harness SHALL record corpus identity, model/prompt/configuration/solver identity, token cost, latency, formal coverage, and inconclusive rate without equating higher acceptance with semantic accuracy.
+
+##### Evidence
+- Test: [semantic-evaluation.test.ts:7 binds measured coverage and defect outcomes to exact corpus/model/runtime identities](/test/contract/semantic-evaluation.test.ts#L7)
 
 #### Requirement model
 

@@ -459,7 +459,7 @@ WHEN the provided input paths yield zero recognized proposal, design, or spec do
 **Postcondition:** The CLI can distinguish irrelevant or incorrect inputs from archive-policy filtering.
 
 ##### Evidence
-- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:83 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L83)
+- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:92 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L92)
 - Test: [catalog.test.ts:101 returns no_recognized_docs for directories without OpenSpec docs](/test/contract/catalog.test.ts#L101), [cli.test.ts:184 formats no_recognized_docs with input count](/test/contract/cli.test.ts#L184)
 - Test (integration): [catalog-abort.integration.test.ts:53 aborts pipeline on no_recognized_docs — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L53)
 
@@ -469,7 +469,7 @@ WHILE archived inputs are not explicitly allowed, WHEN all recognized documents 
 **Postcondition:** The CLI can recommend `--allow-archive` as a remediation only when it is actually relevant.
 
 ##### Evidence
-- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:83 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L83)
+- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:92 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L92)
 - Test: [catalog.test.ts:27 excludes archived change specs by default](/test/contract/catalog.test.ts#L27), [cli.test.ts:191 formats all_archived with archived count and --allow-archive guidance](/test/contract/cli.test.ts#L191)
 - Test (integration): [catalog-abort.integration.test.ts:82 aborts pipeline on all_archived without --allow-archive — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L82)
 
@@ -479,7 +479,7 @@ IF recognized documents are present but another admission or filtering policy re
 **Postcondition:** Empty-catalog reporting remains extensible to future filtering policies without collapsing into a generic message.
 
 ##### Evidence
-- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:83 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L83)
+- Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:92 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L92)
 - Test: [catalog.test.ts:113 returns all_filtered when all recognized docs are excluded by capability resolution](/test/contract/catalog.test.ts#L113), [catalog.test.ts:134 reports correct filteredCount when inputs contain both archived and unresolvable docs](/test/contract/catalog.test.ts#L134), [cli.test.ts:198 formats all_filtered with count and filter reason](/test/contract/cli.test.ts#L198)
 - Test (integration): [catalog-abort.integration.test.ts:111 aborts pipeline on all_filtered — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L111)
 
@@ -567,7 +567,7 @@ IF the user invokes `spec-check` with no positional input paths and no `--help` 
 **Postcondition:** No analysis output is produced.
 
 ##### Evidence
-- Implementation: [config.ts:198 resolveRunConfig()](/src/cli/config.ts#L198), [index.ts:127 parseConfigError()](/src/index.ts#L127)
+- Implementation: [config.ts:202 resolveRunConfig()](/src/cli/config.ts#L202), [index.ts:127 parseConfigError()](/src/index.ts#L127)
 - Test: [cli.test.ts:67 resolveRunConfig rejects empty inputs with missing_inputs error](/test/contract/cli.test.ts#L67)
 
 #### Scenario: Unrecognized Flag Rejected [CAT-CLI-BADFLAG]
@@ -610,7 +610,7 @@ IF the resolved `--output` directory is a descendant of or equal to the resolved
 **Postcondition:** The read-only source guarantee and output confinement constraints cannot conflict.
 
 ##### Evidence
-- Implementation: [config.ts:198 resolveRunConfig()](/src/cli/config.ts#L198)
+- Implementation: [config.ts:202 resolveRunConfig()](/src/cli/config.ts#L202)
 - Test: [cli.test.ts:136 rejects output directory inside source directory](/test/contract/cli.test.ts#L136), [cli.test.ts:152 rejects output directory equal to source directory](/test/contract/cli.test.ts#L152), [cli.test.ts:168 accepts output directory outside source directory](/test/contract/cli.test.ts#L168)
 
 #### Scenario: Timeout Flag Accepted [CAT-CLI-TIMEOUT]
@@ -619,8 +619,8 @@ WHEN the user supplies `--timeout-ms` with an integer value within the configure
 **Postcondition:** A single validated timeout policy is available to every LLM-backed phase.
 
 ##### Evidence
-- Implementation: [config.ts:383 parseTimeoutMs()](/src/cli/config.ts#L383), [config.ts:415 validateTimeoutMs()](/src/cli/config.ts#L415)
-- Test: [config.test.ts:26 uses CLI flags over config values](/test/contract/config.test.ts#L26), [config.test.ts:132 rejects timeout below minimum](/test/contract/config.test.ts#L132), [config.test.ts:147 rejects non-integer timeout](/test/contract/config.test.ts#L147), [config.test.ts:181 rejects timeout above maximum](/test/contract/config.test.ts#L181)
+- Implementation: [config.ts:391 parseTimeoutMs()](/src/cli/config.ts#L391), [config.ts:423 validateTimeoutMs()](/src/cli/config.ts#L423)
+- Test: [config.test.ts:28 uses CLI flags over config values](/test/contract/config.test.ts#L28), [config.test.ts:134 rejects timeout below minimum](/test/contract/config.test.ts#L134), [config.test.ts:149 rejects non-integer timeout](/test/contract/config.test.ts#L149), [config.test.ts:183 rejects timeout above maximum](/test/contract/config.test.ts#L183)
 - Example:
 ```typescript
 const { parseArgv } = await import("./src/cli/parse-argv.ts");
@@ -635,8 +635,8 @@ WHEN the user supplies a JSON config file containing a valid numeric `timeoutMs`
 **Postcondition:** Runtime timeout policy can be sourced from either CLI or config file, with CLI taking precedence.
 
 ##### Evidence
-- Implementation: [config.ts:198 resolveRunConfig()](/src/cli/config.ts#L198), [config.ts:383 parseTimeoutMs()](/src/cli/config.ts#L383)
-- Test: [config.test.ts:162 accepts config file timeoutMs without CLI override](/test/contract/config.test.ts#L162)
+- Implementation: [config.ts:202 resolveRunConfig()](/src/cli/config.ts#L202), [config.ts:391 parseTimeoutMs()](/src/cli/config.ts#L391)
+- Test: [config.test.ts:164 accepts config file timeoutMs without CLI override](/test/contract/config.test.ts#L164)
 
 #### Scenario: Archive Admission Flag Accepted [CAT-CLI-ALLOW-ARCH]
 WHEN the user supplies `--allow-archive`, THE spec-check CLI SHALL enable admission of explicitly provided archived documents into the active catalog.
@@ -644,7 +644,7 @@ WHEN the user supplies `--allow-archive`, THE spec-check CLI SHALL enable admiss
 **Postcondition:** Archive admission changes only for explicitly provided archived inputs.
 
 ##### Evidence
-- Implementation: [parse-argv.ts:135 parseArgv()](/src/cli/parse-argv.ts#L135), [config.ts:198 resolveRunConfig()](/src/cli/config.ts#L198)
+- Implementation: [parse-argv.ts:135 parseArgv()](/src/cli/parse-argv.ts#L135), [config.ts:202 resolveRunConfig()](/src/cli/config.ts#L202)
 - Test: [cli.test.ts:128 parses allow-archive as boolean flag](/test/contract/cli.test.ts#L128)
 - Example:
 ```typescript
@@ -813,8 +813,8 @@ WHEN a valid config file is loaded and CLI flags are also present, THE spec-chec
 **Postcondition:** The resolved run configuration reflects CLI precedence.
 
 ##### Evidence
-- Implementation: [config.ts:198 resolveRunConfig()](/src/cli/config.ts#L198)
-- Test: [config.test.ts:26 uses CLI flags over config values](/test/contract/config.test.ts#L26)
+- Implementation: [config.ts:202 resolveRunConfig()](/src/cli/config.ts#L202)
+- Test: [config.test.ts:28 uses CLI flags over config values](/test/contract/config.test.ts#L28)
 
 #### Scenario: Invalid Config Rejected [CAT-CONFIG-FAIL]
 IF the `--config` file exists but contains invalid JSON or violates the expected config structure, THEN THE spec-check CLI SHALL exit with code `2` and a diagnostic message before any analysis begins.
@@ -822,8 +822,8 @@ IF the `--config` file exists but contains invalid JSON or violates the expected
 **Postcondition:** No analysis output is produced from an invalid configuration.
 
 ##### Evidence
-- Implementation: [config.ts:278 loadConfigFile()](/src/cli/config.ts#L278), [config.ts:328 isConfigFileShape()](/src/cli/config.ts#L328)
-- Test: [config.test.ts:110 rejects invalid config JSON](/test/contract/config.test.ts#L110)
+- Implementation: [config.ts:286 loadConfigFile()](/src/cli/config.ts#L286), [config.ts:336 isConfigFileShape()](/src/cli/config.ts#L336)
+- Test: [config.test.ts:112 rejects invalid config JSON](/test/contract/config.test.ts#L112)
 
 #### Requirement model
 
@@ -967,7 +967,7 @@ IF no active documents survive recognition and catalog admission, THEN THE spec-
 **Postcondition:** No qualitative, formal, or reporting phase runs against a vacuous active catalog.
 
 ##### Evidence
-- Implementation: [run-cli.ts:284 runIngestionPhases()](/src/cli/run-cli.ts#L284), [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:83 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L83)
+- Implementation: [run-cli.ts:313 runIngestionPhases()](/src/cli/run-cli.ts#L313), [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:92 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L92)
 - Test: [cli.test.ts:209 formats each empty-catalog variant with contextual details](/test/contract/cli.test.ts#L209)
 - Test (integration): [catalog-abort.integration.test.ts:53 aborts pipeline on no_recognized_docs — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L53), [catalog-abort.integration.test.ts:82 aborts pipeline on all_archived without --allow-archive — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L82), [catalog-abort.integration.test.ts:111 aborts pipeline on all_filtered — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L111)
 
@@ -1169,7 +1169,7 @@ IF `opencode` is required for the selected analysis mode and is not available or
 **Postcondition:** No LLM-backed analysis proceeds without a working `opencode` binary.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:60 checkDependencies()](/src/cli/pipeline-helpers.ts#L60), [opencode-runtime.ts:88 detectOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L88), [run-cli.ts:284 runIngestionPhases()](/src/cli/run-cli.ts#L284)
+- Implementation: [pipeline-helpers.ts:66 checkDependencies()](/src/cli/pipeline-helpers.ts#L66), [opencode-runtime.ts:88 detectOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L88), [run-cli.ts:313 runIngestionPhases()](/src/cli/run-cli.ts#L313)
 - Test: [opencode-runtime.test.ts:54 normalizes spawn failures into inert bounded diagnostics](/test/contract/opencode-runtime.test.ts#L54)
 - Test (integration): [opencode-runtime.integration.test.ts:21 terminates hanging/verbose probes and rejects malformed bytes and non-executable files](/test/integration/opencode-runtime.integration.test.ts#L21)
 
@@ -1179,7 +1179,7 @@ IF `z3` is required for the selected analysis mode and its default PATH command 
 **Postcondition:** Exactly one argv-only `z3 --version` preflight is attempted after successful OpenCode detection, with a fixed `5000` ms timeout and `16384`-byte combined capture limit plus the process adapter's `250` ms cleanup allowance, subject to event-loop scheduling. Only a signal-free zero exit without spawn error, timeout or overflow succeeds. Missing commands, `EACCES`/`EPERM`, other spawn failures, nonzero exit, signal, timeout and overflow are dependency failures, not warnings that permit paid work. No Z3 version policy or SMT query is introduced. Preflight consumes no model retry budget or telemetry attempt. Failed runs publish no new completion manifest; help/version remain dependency-free.
 
 ##### Evidence
-- Implementation: [pipeline-helpers.ts:60 checkDependencies()](/src/cli/pipeline-helpers.ts#L60), [z3.ts:44 probeZ3Dependency()](/src/adapters/z3.ts#L44), [process.ts:115 runProcess()](/src/adapters/process.ts#L115), [run-cli.ts:284 runIngestionPhases()](/src/cli/run-cli.ts#L284)
+- Implementation: [pipeline-helpers.ts:66 checkDependencies()](/src/cli/pipeline-helpers.ts#L66), [z3.ts:45 probeZ3Dependency()](/src/adapters/z3.ts#L45), [process.ts:119 runProcess()](/src/adapters/process.ts#L119), [run-cli.ts:313 runIngestionPhases()](/src/cli/run-cli.ts#L313)
 - Test: [z3-preflight.test.ts:14 uses one bounded version command without allocating model work or imposing a version policy](/test/contract/z3-preflight.test.ts#L14), [z3-preflight.test.ts:28 classifies %s without accepting a merely existing file](/test/contract/z3-preflight.test.ts#L28), [z3-preflight.test.ts:48 fails closed for process result %o](/test/contract/z3-preflight.test.ts#L48), [z3-preflight.test.ts:55 bounds and escapes the configured path, and never prints hostile process output or exceptions](/test/contract/z3-preflight.test.ts#L55)
 - Test (integration): [z3-preflight.integration.test.ts:17 accepts a valid executable and rejects a permission-denied file through both availability paths](/test/integration/z3-preflight.integration.test.ts#L17), [z3-preflight.integration.test.ts:32 %s stops before analysis on unusable explicit/PATH Z3 and keeps informational commands dependency-free](/test/integration/z3-preflight.integration.test.ts#L32), [opencode-runtime.integration.test.ts:43 runs compiled and bundled pipelines against major %s with one probe each](/test/integration/opencode-runtime.integration.test.ts#L43)
 
@@ -1314,7 +1314,7 @@ WHEN a requirement or scenario header violates the canonical identifier format o
 **Postcondition:** Reviewers can identify the failing structural rule without re-parsing the document manually.
 
 ##### Evidence
-- Implementation: [spec.ts:141 parseRequirement()](/src/domain/parser/spec.ts#L141), [spec.ts:236 parseScenario()](/src/domain/parser/spec.ts#L236), [pipeline-helpers.ts:195 collectParserFindings()](/src/cli/pipeline-helpers.ts#L195)
+- Implementation: [spec.ts:28 parseSpecText()](/src/domain/parser/spec.ts#L28), [spec.ts:84 titledIdentifier()](/src/domain/parser/spec.ts#L84), [pipeline-helpers.ts:201 collectParserFindings()](/src/cli/pipeline-helpers.ts#L201)
 
 #### Scenario: Reject Content With No Headings [CAT-STRUCT-FAIL]
 IF an input file contains no recognizable headings, THEN THE spec-check tool SHALL emit a parse-error finding for that file and SHALL exclude that file from downstream phases unless no parseable inputs remain.
@@ -1329,7 +1329,7 @@ WHEN a requirement or scenario declares a bracketed identifier, THE spec-check t
 **Postcondition:** Malformed identifiers are surfaced as structural findings before downstream phases use them for traceability.
 
 ##### Evidence
-- Implementation: [shared.ts:53 parseCanonicalIdentifier()](/src/domain/parser/shared.ts#L53), [spec.ts:300 parseTitledIdentifier()](/src/domain/parser/spec.ts#L300)
+- Implementation: [shared.ts:53 parseCanonicalIdentifier()](/src/domain/parser/shared.ts#L53), [spec.ts:84 titledIdentifier()](/src/domain/parser/spec.ts#L84)
 - Test: [parser.test.ts:21 validates canonical identifier format](/test/contract/parser.test.ts#L21), [parser.test.ts:76 extracts scenario with identifier and postcondition](/test/contract/parser.test.ts#L76)
 - Example:
 ```typescript
@@ -1434,43 +1434,95 @@ WHEN a complete statement matches ubiquitous, state-driven, event-driven, unwant
 
 **Postcondition:** Classification follows structure, not substring presence; generic `conditional` is not a separate type.
 
+##### Evidence
+- Implementation: [ears.ts:46 parseEars()](/src/domain/parser/ears.ts#L46), [ears.ts:97 clause()](/src/domain/parser/ears.ts#L97)
+- Test: [ears-surface.test.ts:18 parses %s](/test/contract/ears-surface.test.ts#L18), [parser.test.ts:142 classifies complex (WHILE+WHEN) pattern](/test/contract/parser.test.ts#L142)
+
 #### Scenario: Non-EARS Requirement Flagged [CAT-EARS-WARN]
 IF a statement lacks a supported EARS or justified supported alternative representation, THEN THE spec-check tool SHALL emit a structural diagnostic and SHALL mark the statement formally ineligible without removing it from parsed output.
+
+##### Evidence
+- Implementation: [ears.ts:46 parseEars()](/src/domain/parser/ears.ts#L46), [surface-block.ts:37 extractSurfaceBlock()](/src/domain/parser/surface-block.ts#L37), [spec.ts:28 parseSpecText()](/src/domain/parser/spec.ts#L28)
+- Test: [parser.test.ts:119 flags non-EARS requirement](/test/contract/parser.test.ts#L119), [ears-surface.test.ts:36 rejects malformed %s](/test/contract/ears-surface.test.ts#L36), [ears-surface.test.ts:104 requires supported meaning despite format justification](/test/contract/ears-surface.test.ts#L104)
 
 #### Scenario: Delta Operation Context Assigned Per Parsed Item [CAT-EARS-DELTA]
 WHEN a finalized or selected delta spec is parsed, THE spec-check tool SHALL assign each requirement and scenario its deterministic `base`, `pre-section`, `ADDED`, `MODIFIED`, `REMOVED`, or `RENAMED` context from the source type and exact enclosing heading.
 
+##### Evidence
+- Implementation: [spec.ts:28 parseSpecText()](/src/domain/parser/spec.ts#L28)
+- Test: [parser.test.ts:214 assigns deltaOperation by exact delta heading and scenario inheritance](/test/contract/parser.test.ts#L214), [parser.test.ts:262 keeps finalized items at base operation and exact headings only](/test/contract/parser.test.ts#L262)
+
 #### Scenario: Scenario Parent Association Preserved [CAT-EARS-PARENT]
 WHEN a scenario follows an identified requirement in the same active section, THE spec-check tool SHALL retain that requirement's identifier as the scenario parent independently of whether either statement is formally eligible.
+
+##### Evidence
+- Implementation: [spec.ts:28 parseSpecText()](/src/domain/parser/spec.ts#L28)
+- Test: [parser.test.ts:214 assigns deltaOperation by exact delta heading and scenario inheritance](/test/contract/parser.test.ts#L214)
 
 #### Scenario: Scenario Without Identified Parent Preserved [CAT-EARS-NO-PARENT]
 IF a scenario has no identified enclosing requirement in the active section, THEN THE spec-check tool SHALL preserve the scenario with no parent identifier for deterministic merge diagnostics.
 
+##### Evidence
+- Implementation: [spec.ts:28 parseSpecText()](/src/domain/parser/spec.ts#L28)
+- Test: [parser.test.ts:303 keeps parentRequirementIdentifier undefined when scenario has no preceding requirement](/test/contract/parser.test.ts#L303)
+
 #### Scenario: Finalized Spec Delta Heading Ignored [CAT-EARS-FINAL-DELTA]
 IF a finalized spec contains delta headings, THEN THE spec-check tool SHALL treat its items as base content and SHALL emit at most one warning containing `finalized specs should not have Delta Spec Headings` for that file.
+
+##### Evidence
+- Implementation: [spec.ts:28 parseSpecText()](/src/domain/parser/spec.ts#L28), [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88)
+- Test: [parser.test.ts:262 keeps finalized items at base operation and exact headings only](/test/contract/parser.test.ts#L262)
 
 #### Scenario: Exact Delta Heading Recognition Only [CAT-EARS-EXACT]
 WHEN a delta heading is evaluated, THE spec-check tool SHALL change operation context only for exact `## ADDED Requirements`, `## MODIFIED Requirements`, `## REMOVED Requirements`, or `## RENAMED Requirements` headings outside fenced content.
 
+##### Evidence
+- Implementation: [spec.ts:28 parseSpecText()](/src/domain/parser/spec.ts#L28), [surface-block.ts:37 extractSurfaceBlock()](/src/domain/parser/surface-block.ts#L37)
+- Test: [parser.test.ts:214 assigns deltaOperation by exact delta heading and scenario inheritance](/test/contract/parser.test.ts#L214), [parser.test.ts:262 keeps finalized items at base operation and exact headings only](/test/contract/parser.test.ts#L262), [ears-surface.test.ts:60 separates fences and keeps embedded headings out of parser control](/test/contract/ears-surface.test.ts#L60)
+
 #### Scenario: Pre-Section Delta Content Preserved Structurally [CAT-EARS-PRE-SECTION]
 IF a delta item occurs before a recognized delta heading, THEN THE spec-check tool SHALL preserve it with `pre-section` context and original source structure for merge exclusion findings.
+
+##### Evidence
+- Implementation: [spec.ts:28 parseSpecText()](/src/domain/parser/spec.ts#L28)
+- Test: [parser.test.ts:214 assigns deltaOperation by exact delta heading and scenario inheritance](/test/contract/parser.test.ts#L214)
 
 #### Scenario: Malformed Clause Order Rejected [CAT-EARS-STRICT]
 IF a statement has reversed drivers, missing required commas or `THEN`, empty clauses, multiple primary modals, unclosed quoting, or trailing normative statements, THEN THE spec-check tool SHALL diagnose the precise source span and SHALL exclude the affected statement from formalization.
 
+##### Evidence
+- Implementation: [ears.ts:46 parseEars()](/src/domain/parser/ears.ts#L46), [surface-block.ts:83 consumeLine()](/src/domain/parser/surface-block.ts#L83)
+- Test: [ears-surface.test.ts:36 rejects malformed %s](/test/contract/ears-surface.test.ts#L36)
+
 #### Scenario: Keyword Substrings Remain Prose [CAT-EARS-TOKENS]
 WHEN a keyword-like substring appears inside a word, quote, inline code span, or response content, THE spec-check tool SHALL treat it as clause content rather than as a structural driver.
+
+##### Evidence
+- Implementation: [ears.ts:46 parseEars()](/src/domain/parser/ears.ts#L46), [ears.ts:111 maskProtected()](/src/domain/parser/ears.ts#L111)
+- Test: [ears-surface.test.ts:44 preserves protected punctuation, substrings and decimal content](/test/contract/ears-surface.test.ts#L44)
 
 #### Scenario: Optional Feature Extension Requires Selection [CAT-EARS-WHERE]
 IF a statement uses `WHERE` without the configured `where` extension, THEN THE spec-check tool SHALL retain its recognized extension structure and SHALL report formal ineligibility with extension-enablement guidance.
 
 **Postcondition:** With `analysis.earsExtensions: ["where"]`, the same well-formed statement is eligible; the default extension list is empty.
 
+##### Evidence
+- Implementation: [ears.ts:46 parseEars()](/src/domain/parser/ears.ts#L46)
+- Test: [ears-surface.test.ts:53 recognizes WHERE structure but gates its eligibility explicitly](/test/contract/ears-surface.test.ts#L53)
+
 #### Scenario: Modal Tokens And Negation Preserved [CAT-EARS-MODALS]
 WHEN a statement uses `SHALL`, `MUST`, `SHOULD`, or `MAY`, THE spec-check tool SHALL retain that structural modal and SHALL allow explicit response negation for `SHALL NOT`, `MUST NOT`, or `SHOULD NOT`.
 
+##### Evidence
+- Implementation: [ears.ts:46 parseEars()](/src/domain/parser/ears.ts#L46)
+- Test: [ears-surface.test.ts:18 parses %s](/test/contract/ears-surface.test.ts#L18)
+
 #### Scenario: Ambiguous Permission Negation Rejected [CAT-EARS-MAY-NOT]
 IF a statement uses `MAY NOT`, THEN THE spec-check tool SHALL diagnose ambiguous permission negation rather than infer a prohibition.
+
+##### Evidence
+- Implementation: [ears.ts:46 parseEars()](/src/domain/parser/ears.ts#L46)
+- Test: [ears-surface.test.ts:36 rejects malformed %s](/test/contract/ears-surface.test.ts#L36)
 
 #### Requirement model
 
@@ -1643,7 +1695,7 @@ WHEN a document contains extra content outside recognized fields, THE spec-check
 **Postcondition:** Analysts can inspect every parser loss boundary as part of the evidence set.
 
 ##### Evidence
-- Implementation: [shared.ts:136 collectUnparsedLines()](/src/domain/parser/shared.ts#L136), [pipeline-helpers.ts:195 collectParserFindings()](/src/cli/pipeline-helpers.ts#L195)
+- Implementation: [shared.ts:136 collectUnparsedLines()](/src/domain/parser/shared.ts#L136), [pipeline-helpers.ts:201 collectParserFindings()](/src/cli/pipeline-helpers.ts#L201)
 - Test: [parser.test.ts:27 recognizes EARS and preserves unparsed lines deterministically](/test/contract/parser.test.ts#L27)
 - Test (property): [parser.property.test.ts:12 is deterministic and preserves unmatched lines](/test/property/parser.property.test.ts#L12)
 
@@ -1697,7 +1749,7 @@ WHEN the same document content is parsed on two separate runs, THE spec-check to
 **Postcondition:** Parser output is a deterministic function of input content.
 
 ##### Evidence
-- Implementation: [spec.ts:43 parseSpec()](/src/domain/parser/spec.ts#L43)
+- Implementation: [spec.ts:17 parseSpec()](/src/domain/parser/spec.ts#L17), [spec.ts:28 parseSpecText()](/src/domain/parser/spec.ts#L28)
 - Test: [extended.determinism.test.ts:80 parser output is identical across runs for same input](/test/determinism/extended.determinism.test.ts#L80)
 - Test (property): [parser.property.test.ts:12 is deterministic and preserves unmatched lines](/test/property/parser.property.test.ts#L12)
 
@@ -1964,7 +2016,7 @@ THE spec-check tool SHALL normalize CRLF to LF, trim outer whitespace, require e
 WHEN a successful probe emits `1.2.3`, `v1.2.3`, `opencode v2.0.15`, or `opencode v2.0.15-rc.1+build.7`, THE spec-check tool SHALL resolve the corresponding canonical semantic version and major and emit one concise detected-version/protocol diagnostic on stderr.
 
 ##### Evidence
-- Implementation: [opencode-runtime.ts:66 parseOpencodeVersion()](/src/adapters/opencode-runtime.ts#L66), [opencode-runtime.ts:88 detectOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L88), [run-cli.ts:284 runIngestionPhases()](/src/cli/run-cli.ts#L284)
+- Implementation: [opencode-runtime.ts:66 parseOpencodeVersion()](/src/adapters/opencode-runtime.ts#L66), [opencode-runtime.ts:88 detectOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L88), [run-cli.ts:313 runIngestionPhases()](/src/cli/run-cli.ts#L313)
 - Test: [opencode-runtime.test.ts:22 accepts the complete release grammar: %s](/test/contract/opencode-runtime.test.ts#L22)
 - Test (integration): [opencode-runtime.integration.test.ts:89 rejects unsupported dependencies with exit 4 and performs no analysis, while help/version never probe](/test/integration/opencode-runtime.integration.test.ts#L89)
 - Example:
@@ -1980,7 +2032,7 @@ release.value.major; //=> 2
 WHEN a valid semantic version has a long suffix, THE spec-check tool SHALL retain its complete canonical version when minting a supported runtime descriptor and SHALL restrict the version presentation in both success and unsupported-major diagnostics to at most 300 inert characters.
 
 ##### Evidence
-- Implementation: [opencode-runtime.ts:42 preview()](/src/adapters/opencode-runtime.ts#L42), [opencode-runtime.ts:55 formatOpencodeVersion()](/src/adapters/opencode-runtime.ts#L55), [opencode-runtime.ts:66 parseOpencodeVersion()](/src/adapters/opencode-runtime.ts#L66), [opencode-runtime.ts:88 detectOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L88), [run-cli.ts:284 runIngestionPhases()](/src/cli/run-cli.ts#L284)
+- Implementation: [opencode-runtime.ts:42 preview()](/src/adapters/opencode-runtime.ts#L42), [opencode-runtime.ts:55 formatOpencodeVersion()](/src/adapters/opencode-runtime.ts#L55), [opencode-runtime.ts:66 parseOpencodeVersion()](/src/adapters/opencode-runtime.ts#L66), [opencode-runtime.ts:88 detectOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L88), [run-cli.ts:313 runIngestionPhases()](/src/cli/run-cli.ts#L313)
 - Test: [opencode-runtime.test.ts:65 bounds both displayed version forms while preserving full supported identity](/test/contract/opencode-runtime.test.ts#L65)
 - Test (integration): [opencode-runtime.integration.test.ts:89 rejects unsupported dependencies with exit 4 and performs no analysis, while help/version never probe](/test/integration/opencode-runtime.integration.test.ts#L89)
 
@@ -1990,7 +2042,7 @@ IF the probe cannot spawn, exits nonzero, receives a signal, times out, exceeds 
 **Postcondition:** Detection causes are classified as `spawn_error`, `timeout`, `output_limit`, `invalid_version`, or `unsupported_major`. A signal or nonzero exit without timeout/output overflow is `spawn_error`. No assumed version or cross-major fallback is used.
 
 ##### Evidence
-- Implementation: [opencode-runtime.ts:66 parseOpencodeVersion()](/src/adapters/opencode-runtime.ts#L66), [opencode-runtime.ts:88 detectOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L88), [pipeline-helpers.ts:60 checkDependencies()](/src/cli/pipeline-helpers.ts#L60), [run-cli.ts:284 runIngestionPhases()](/src/cli/run-cli.ts#L284)
+- Implementation: [opencode-runtime.ts:66 parseOpencodeVersion()](/src/adapters/opencode-runtime.ts#L66), [opencode-runtime.ts:88 detectOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L88), [pipeline-helpers.ts:66 checkDependencies()](/src/cli/pipeline-helpers.ts#L66), [run-cli.ts:313 runIngestionPhases()](/src/cli/run-cli.ts#L313)
 - Test: [opencode-runtime.test.ts:29 rejects invalid release output: %s](/test/contract/opencode-runtime.test.ts#L29), [opencode-runtime.test.ts:34 uses exact dependency bounds and fails closed on unknown majors](/test/contract/opencode-runtime.test.ts#L34), [opencode-runtime.test.ts:47 classifies failed probe %o](/test/contract/opencode-runtime.test.ts#L47), [opencode-runtime.test.ts:54 normalizes spawn failures into inert bounded diagnostics](/test/contract/opencode-runtime.test.ts#L54)
 - Test (integration): [opencode-runtime.integration.test.ts:21 terminates hanging/verbose probes and rejects malformed bytes and non-executable files](/test/integration/opencode-runtime.integration.test.ts#L21), [opencode-runtime.integration.test.ts:89 rejects unsupported dependencies with exit 4 and performs no analysis, while help/version never probe](/test/integration/opencode-runtime.integration.test.ts#L89)
 
@@ -2068,7 +2120,7 @@ WHILE an analysis run is active, THE spec-check tool SHALL use its single immuta
 WHEN a valid run executes multiple phases and retries, THE spec-check tool SHALL perform exactly one OpenCode version probe for that run and retain the same binary/version/major descriptor through final reporting.
 
 ##### Evidence
-- Implementation: [run-cli.ts:170 runCliPipeline()](/src/cli/run-cli.ts#L170), [opencode-runtime.ts:114 runWithOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L114), [opencode-runtime.ts:125 resolveOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L125), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443)
+- Implementation: [run-cli.ts:179 runCliPipeline()](/src/cli/run-cli.ts#L179), [opencode-runtime.ts:114 runWithOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L114), [opencode-runtime.ts:125 resolveOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L125), [opencode.ts:464 callOpencode()](/src/adapters/opencode.ts#L464)
 - Test: [opencode-runtime.test.ts:108 detects once per direct logical call and retains the protocol across retries](/test/contract/opencode-runtime.test.ts#L108)
 - Test (property): [opencode-runtime.test.ts:88 isolates nested and interleaved scopes under generated schedules](/test/contract/opencode-runtime.test.ts#L88)
 - Test (integration): [opencode-runtime.integration.test.ts:43 runs compiled and bundled pipelines against major %s with one probe each](/test/integration/opencode-runtime.integration.test.ts#L43)
@@ -2084,14 +2136,14 @@ WHEN two analysis runs with different resolved binaries execute concurrently, TH
 WHEN a valid direct adapter call executes, THE OpenCode adapter SHALL select an explicit runtime override first, otherwise a matching scoped runtime, otherwise one bounded detection outside a scope, and SHALL resolve that selection before the retry loop.
 
 ##### Evidence
-- Implementation: [opencode-runtime.ts:125 resolveOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L125), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443)
+- Implementation: [opencode-runtime.ts:125 resolveOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L125), [opencode.ts:464 callOpencode()](/src/adapters/opencode.ts#L464)
 - Test: [opencode-runtime.test.ts:78 prioritizes an explicit runtime and rejects selected-binary mismatch before probing](/test/contract/opencode-runtime.test.ts#L78), [opencode-runtime.test.ts:108 detects once per direct logical call and retains the protocol across retries](/test/contract/opencode-runtime.test.ts#L108)
 
 #### Scenario: Reject Mismatched Runtime [CAT-OC-RUNTIME-MISMATCH]
 IF a selected binary conflicts with its explicit descriptor or a call without an explicit override conflicts with the scoped descriptor, THEN THE OpenCode adapter SHALL return a non-retryable `runtime_error` before any probe or analysis spawn.
 
 ##### Evidence
-- Implementation: [opencode-runtime.ts:125 resolveOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L125), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443)
+- Implementation: [opencode-runtime.ts:125 resolveOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L125), [opencode.ts:464 callOpencode()](/src/adapters/opencode.ts#L464)
 - Test: [opencode-runtime.test.ts:78 prioritizes an explicit runtime and rejects selected-binary mismatch before probing](/test/contract/opencode-runtime.test.ts#L78)
 
 #### Scenario: Reject Direct Detection Failure [CAT-OC-RUNTIME-FAIL]
@@ -2100,7 +2152,7 @@ IF direct-call runtime detection fails, THEN THE OpenCode adapter SHALL return a
 **Postcondition:** Runtime resolution does not pin executable bytes. Executable replacement during a run has no compatibility guarantee.
 
 ##### Evidence
-- Implementation: [opencode-runtime.ts:125 resolveOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L125), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443), [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80)
+- Implementation: [opencode-runtime.ts:125 resolveOpencodeRuntime()](/src/adapters/opencode-runtime.ts#L125), [opencode.ts:464 callOpencode()](/src/adapters/opencode.ts#L464), [degradation.ts:80 decideBatchDegradation()](/src/domain/formal/degradation.ts#L80)
 - Test: [opencode-runtime.test.ts:124 returns terminal runtime failure without response degradation](/test/contract/opencode-runtime.test.ts#L124)
 
 #### Requirement model
@@ -2157,8 +2209,8 @@ WHEN resolving an effective model setting, THE spec-check tool SHALL normalize i
 WHEN the effective model contains no `#` and satisfies existing nonempty-model validation, THE spec-check tool SHALL preserve its base value, apply the fixed variant for Luna/Terra/Sol, and leave other models without a forced variant.
 
 ##### Evidence
-- Implementation: [opencode-model.ts:31 normalizeOpencodeModel()](/src/domain/opencode-model.ts#L31), [opencode-model.ts:17 variantForModel()](/src/domain/opencode-model.ts#L17)
-- Test: [opencode.test.ts:213 selects only the preregistered model reasoning variants](/test/contract/opencode.test.ts#L213), [opencode.test.ts:219 passes the Luna max and Terra high variants to OpenCode](/test/contract/opencode.test.ts#L219)
+- Implementation: [opencode-model.ts:32 normalizeOpencodeModel()](/src/domain/opencode-model.ts#L32), [opencode-model.ts:17 variantForModel()](/src/domain/opencode-model.ts#L17)
+- Test: [opencode.test.ts:213 selects only the preregistered model reasoning variants](/test/contract/opencode.test.ts#L213), [opencode.test.ts:220 passes the fixed Luna, Terra and Sol variants to OpenCode](/test/contract/opencode.test.ts#L220), [config.test.ts:12 defaults to Sol at its fixed high variant](/test/contract/config.test.ts#L12)
 - Test (property): [opencode-runtime.test.ts:139 preserves bare models and round-trips generated explicit selections](/test/contract/opencode-runtime.test.ts#L139)
 
 #### Scenario: Accept Explicit Variant [CAT-OC-MODEL-EXPLICIT]
@@ -2167,7 +2219,7 @@ WHEN the effective model has exactly one `#`, no whitespace, a nonempty provider
 **Postcondition:** A matching fixed suffix is accepted. OpenCode, not `spec-check`, validates catalog availability for other models and variants.
 
 ##### Evidence
-- Implementation: [opencode-model.ts:31 normalizeOpencodeModel()](/src/domain/opencode-model.ts#L31)
+- Implementation: [opencode-model.ts:32 normalizeOpencodeModel()](/src/domain/opencode-model.ts#L32)
 - Test (property): [opencode-runtime.test.ts:139 preserves bare models and round-trips generated explicit selections](/test/contract/opencode-runtime.test.ts#L139)
 - Example:
 ```typescript
@@ -2185,8 +2237,8 @@ IF the effective model is malformed or its explicit suffix conflicts case-sensit
 **Postcondition:** Empty/whitespace-only components, an empty suffix, extra `#` separators, and whitespace in explicit references are rejected without silently trimming or changing case. Existing prompt/file/timeout request-shape failures likewise remain pre-spawn failures.
 
 ##### Evidence
-- Implementation: [opencode-model.ts:31 normalizeOpencodeModel()](/src/domain/opencode-model.ts#L31), [config.ts:198 resolveRunConfig()](/src/cli/config.ts#L198), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443)
-- Test: [opencode-runtime.test.ts:132 rejects invalid model before any process: %s](/test/contract/opencode-runtime.test.ts#L132), [opencode-compatibility.test.ts:116 rejects invalid effective model settings as ConfigError before dependencies](/test/contract/opencode-compatibility.test.ts#L116), [opencode.test.ts:367 rejects oversized instruction prompt before spawn](/test/contract/opencode.test.ts#L367), [opencode.test.ts:880 rejects invalid timeout below minimum (defense-in-depth)](/test/contract/opencode.test.ts#L880), [opencode.test.ts:970 rejects symlink files](/test/contract/opencode.test.ts#L970)
+- Implementation: [opencode-model.ts:32 normalizeOpencodeModel()](/src/domain/opencode-model.ts#L32), [config.ts:202 resolveRunConfig()](/src/cli/config.ts#L202), [opencode.ts:464 callOpencode()](/src/adapters/opencode.ts#L464)
+- Test: [opencode-runtime.test.ts:132 rejects invalid model before any process: %s](/test/contract/opencode-runtime.test.ts#L132), [opencode-compatibility.test.ts:116 rejects invalid effective model settings as ConfigError before dependencies](/test/contract/opencode-compatibility.test.ts#L116), [opencode.test.ts:372 rejects oversized instruction prompt before spawn](/test/contract/opencode.test.ts#L372), [opencode.test.ts:885 rejects invalid timeout below minimum (defense-in-depth)](/test/contract/opencode.test.ts#L885), [opencode.test.ts:975 rejects symlink files](/test/contract/opencode.test.ts#L975)
 - Test (integration): [opencode-runtime.integration.test.ts:89 rejects unsupported dependencies with exit 4 and performs no analysis, while help/version never probe](/test/integration/opencode-runtime.integration.test.ts#L89)
 
 #### Requirement model
@@ -2271,7 +2323,7 @@ WHEN invoking OpenCode with a normalized model selection, THE OpenCode adapter S
 WHEN the same Terra model selection is invoked against v1 and v2 fixtures, THE adapter SHALL respectively pass `--model github-copilot/gpt-5.6-terra --variant high` and `--model github-copilot/gpt-5.6-terra#high`, preserving prompt and repeated-file identities under each verified argument ordering.
 
 ##### Evidence
-- Implementation: [opencode-protocol.ts:17 buildOpencodeArgs()](/src/adapters/opencode-protocol.ts#L17), [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443)
+- Implementation: [opencode-protocol.ts:17 buildOpencodeArgs()](/src/adapters/opencode-protocol.ts#L17), [opencode.ts:464 callOpencode()](/src/adapters/opencode.ts#L464)
 - Test: [opencode-compatibility.test.ts:20 encodes major %s with exact validated attachment identity](/test/contract/opencode-compatibility.test.ts#L20)
 - Test (integration): [opencode-runtime.integration.test.ts:43 runs compiled and bundled pipelines against major %s with one probe each](/test/integration/opencode-runtime.integration.test.ts#L43)
 
@@ -2279,7 +2331,7 @@ WHEN the same Terra model selection is invoked against v1 and v2 fixtures, THE a
 IF an invocation fails and existing policy permits a retry, THEN THE adapter SHALL reuse the same resolved runtime and normalized model selection without re-probing or trying another major's arguments.
 
 ##### Evidence
-- Implementation: [opencode.ts:443 callOpencode()](/src/adapters/opencode.ts#L443), [opencode-protocol.ts:17 buildOpencodeArgs()](/src/adapters/opencode-protocol.ts#L17)
+- Implementation: [opencode.ts:464 callOpencode()](/src/adapters/opencode.ts#L464), [opencode-protocol.ts:17 buildOpencodeArgs()](/src/adapters/opencode-protocol.ts#L17)
 - Test: [opencode-runtime.test.ts:108 detects once per direct logical call and retains the protocol across retries](/test/contract/opencode-runtime.test.ts#L108)
 
 #### Requirement model
@@ -2313,14 +2365,14 @@ WHEN an external call reaches its timeout or capture limit, THE process adapter 
 IF an owned descendant retains inherited stdout/stderr after timeout or capture overflow, THEN THE process adapter SHALL terminate the owned group and return the corresponding failure flags within the cleanup bound, including after immediate-parent exit.
 
 ##### Evidence
-- Implementation: [process.ts:115 runProcess()](/src/adapters/process.ts#L115), [process.ts:167 killOwnedProcess()](/src/adapters/process.ts#L167), [process.ts:187 stopProcess()](/src/adapters/process.ts#L187), [process.ts:199 settleProcess()](/src/adapters/process.ts#L199)
+- Implementation: [process.ts:119 runProcess()](/src/adapters/process.ts#L119), [process.ts:171 killOwnedProcess()](/src/adapters/process.ts#L171), [process.ts:191 stopProcess()](/src/adapters/process.ts#L191), [process.ts:203 settleProcess()](/src/adapters/process.ts#L203)
 - Test: [process-tree.test.ts:25 bounds %s while inherited pipes are held, and kills owned descendants](/test/contract/process-tree.test.ts#L25), [process-settlement.test.ts:22 settles overflow once despite competing stream errors (%s)](/test/contract/process-settlement.test.ts#L22)
 
 #### Scenario: Bound Escaped Pipe Holders [CAT-PROCESS-PIPE-CLEANUP]
 IF an out-of-group descendant retains a pipe after termination is requested, THEN THE process adapter SHALL destroy its own stream handles and settle within the cleanup allowance without claiming that the escaped process was contained or terminated.
 
 ##### Evidence
-- Implementation: [process.ts:187 stopProcess()](/src/adapters/process.ts#L187), [process.ts:199 settleProcess()](/src/adapters/process.ts#L199)
+- Implementation: [process.ts:191 stopProcess()](/src/adapters/process.ts#L191), [process.ts:203 settleProcess()](/src/adapters/process.ts#L203)
 - Test: [process-tree.test.ts:51 settles after bounded pipe cleanup even if a descendant deliberately escapes ownership](/test/contract/process-tree.test.ts#L51), [process-settlement.test.ts:40 retains the first termination cause and releases pipes when close never arrives](/test/contract/process-settlement.test.ts#L40)
 
 #### Requirement model
@@ -2364,11 +2416,24 @@ WHEN the spec-check tool extracts requirement or scenario content, THE spec-chec
 #### Scenario: Embedded Model Remains Separate [CAT-SPANS-FENCES]
 WHEN a requirement block contains a fenced Alloy model or evidence section, THE spec-check tool SHALL retain it separately and SHALL omit it from EARS statement text and admitted SMT assumptions.
 
+##### Evidence
+- Implementation: [surface-block.ts:37 extractSurfaceBlock()](/src/domain/parser/surface-block.ts#L37), [surface-block.ts:83 consumeLine()](/src/domain/parser/surface-block.ts#L83)
+- Test: [ears-surface.test.ts:60 separates fences and keeps embedded headings out of parser control](/test/contract/ears-surface.test.ts#L60)
+
 #### Scenario: Normalized Text Maps To Source [CAT-SPANS-NORMALIZE]
 WHEN multiline text or CRLF input is normalized, THE spec-check tool SHALL retain original source mapping so every clause diagnostic identifies its source range without inventing line positions.
 
+##### Evidence
+- Implementation: [source.ts:15 sourceLines()](/src/domain/parser/source.ts#L15), [source.ts:51 normalizeSource()](/src/domain/parser/source.ts#L51), [ears.ts:97 clause()](/src/domain/parser/ears.ts#L97)
+- Test: [ears-surface.test.ts:70 maps multiline CRLF clauses to original offsets and positions](/test/contract/ears-surface.test.ts#L70), [ears-surface.test.ts:83 normalizes statement-edge whitespace before recognition without moving original clause offsets](/test/contract/ears-surface.test.ts#L83)
+- Test (property): [surface.property.test.ts:9 maps every normalized offset to an original character or join boundary](/test/property/surface.property.test.ts#L9)
+
 #### Scenario: Source Statement Limit Is Visible [CAT-SPANS-BOUND]
 IF a statement exceeds the effective byte bound of 65,536 bytes by default, THEN THE spec-check tool SHALL preserve its source reference and SHALL emit an explicit eligibility limitation before model work.
+
+##### Evidence
+- Implementation: [source.ts:51 normalizeSource()](/src/domain/parser/source.ts#L51), [ears.ts:46 parseEars()](/src/domain/parser/ears.ts#L46)
+- Test: [ears-surface.test.ts:94 preserves source identity and blocks oversized statement maps](/test/contract/ears-surface.test.ts#L94)
 
 #### Requirement model
 
@@ -2465,14 +2530,29 @@ WHEN the spec-check tool evaluates a non-EARS representation or scenario, THE sp
 #### Scenario: Justification Does Not Supply Semantics [CAT-FORMAT-JUSTIFIED]
 IF a non-EARS requirement has `**Format justification:**` but no supported formal representation, THEN THE spec-check tool SHALL retain the justification and SHALL mark formalization unsupported rather than guess its logical structure.
 
+##### Evidence
+- Implementation: [surface-block.ts:37 extractSurfaceBlock()](/src/domain/parser/surface-block.ts#L37), [ears.ts:46 parseEars()](/src/domain/parser/ears.ts#L46)
+- Test: [ears-surface.test.ts:104 requires supported meaning despite format justification](/test/contract/ears-surface.test.ts#L104)
+
 #### Scenario: Scenario Refinement Is The Default [CAT-SCENARIO-DEFAULT]
 WHEN an EARS scenario has no explicit scenario-kind metadata, THE spec-check tool SHALL classify it as a refinement and SHALL retain its postcondition scoped to that scenario.
+
+##### Evidence
+- Implementation: [surface-block.ts:37 extractSurfaceBlock()](/src/domain/parser/surface-block.ts#L37)
+- Test: [ears-surface.test.ts:121 distinguishes examples, prohibited examples and refinement postconditions](/test/contract/ears-surface.test.ts#L121)
 
 #### Scenario: Explicit Examples Are Distinguished [CAT-SCENARIO-EXAMPLE]
 WHEN a scenario declares `**Scenario kind:** example` or `prohibited-example`, THE spec-check tool SHALL classify it accordingly and SHALL require source-spanned `**Input:**` and respectively `**Expected:**` or `**Forbidden:**` fields for separate predicate formalization before solver admission.
 
+##### Evidence
+- Implementation: [surface-block.ts:37 extractSurfaceBlock()](/src/domain/parser/surface-block.ts#L37)
+- Test: [ears-surface.test.ts:121 distinguishes examples, prohibited examples and refinement postconditions](/test/contract/ears-surface.test.ts#L121), [ears-surface.test.ts:135 retains duplicate and contradictory fields as excluded evidence](/test/contract/ears-surface.test.ts#L135)
+
 #### Scenario: Invalid Metadata Remains Visible [CAT-SCENARIO-METADATA]
 IF scenario-kind metadata is unknown or duplicated, THEN THE spec-check tool SHALL preserve it and SHALL diagnose the ambiguity instead of choosing a kind silently.
+
+##### Evidence
+- Implementation: [surface-block.ts:37 extractSurfaceBlock()](/src/domain/parser/surface-block.ts#L37), [surface-block.ts:83 consumeLine()](/src/domain/parser/surface-block.ts#L83)
 
 #### Requirement model
 

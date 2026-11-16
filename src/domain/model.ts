@@ -6,6 +6,86 @@ export type DocumentType = "proposal" | "design" | "spec" | "task";
 import type { CapabilityName } from "./branded.js";
 import type { Finding } from "./findings.js";
 
+/** Exact UTF-16 source offset and one-based line/column in the original file. */
+export interface SourcePosition {
+  readonly offset: number;
+  readonly line: number;
+  readonly column: number;
+}
+
+/** Half-open source range; end identifies the first character outside the range. */
+export interface SourceSpan {
+  readonly file: string;
+  readonly start: SourcePosition;
+  readonly end: SourcePosition;
+}
+
+/** Source-local identity; authored IDs do not replace this identity. */
+export interface SourceReference {
+  readonly file: string;
+  readonly ordinal: number;
+  readonly namespace?: string;
+}
+
+/** Source text retained independently of its supported formal meaning. */
+export interface SourceFragment {
+  readonly text: string;
+  readonly span: SourceSpan;
+}
+
+/** Parsed clause with original span and offsets in the normalized statement. */
+export interface EarsClause extends SourceFragment {
+  readonly normalizedStart: number;
+  readonly normalizedEnd: number;
+}
+
+/** Source-owned structural modal, independent of logical expression content. */
+export type EarsModal = "SHALL" | "MUST" | "SHOULD" | "MAY";
+
+/** Ordered EARS structure; response negation is applied by deterministic lowering. */
+export interface EarsClauses {
+  readonly form: Exclude<EarsType, "non-ears">;
+  readonly subject: EarsClause;
+  readonly state?: EarsClause;
+  readonly trigger?: EarsClause;
+  readonly condition?: EarsClause;
+  readonly feature?: EarsClause;
+  readonly modal: EarsModal;
+  readonly negatedResponse: boolean;
+  readonly response: EarsClause;
+}
+
+/** Structural failure with a precise original source range. */
+export interface SurfaceIssue {
+  readonly code: string;
+  readonly message: string;
+  readonly span: SourceSpan;
+}
+
+/** Total formal admission result; excluded statements remain in the source graph. */
+export type FormalDisposition =
+  | { readonly kind: "eligible"; readonly representation: "ears" | "example" | "prohibited-example" }
+  | { readonly kind: "excluded"; readonly reasons: readonly SurfaceIssue[] };
+
+/** Explicit scenario interpretation. Ordinary EARS scenarios are refinements. */
+export type ScenarioKind = "refinement" | "example" | "prohibited-example";
+
+/** Separated statement and fields with a reversible normalized-text source map. */
+export interface SurfaceStatement {
+  readonly source: SourceReference;
+  readonly sourceSha256?: string;
+  readonly text: string;
+  readonly span: SourceSpan;
+  /** One original position per normalized UTF-16 offset, including the end. */
+  readonly sourceMap: readonly SourcePosition[];
+  readonly clauses?: EarsClauses;
+  readonly disposition: FormalDisposition;
+  readonly scenarioKind: ScenarioKind;
+  readonly fields: Readonly<Partial<Record<"justification" | "postcondition" | "input" | "expected" | "forbidden", SourceFragment>>>;
+  readonly supplementary: readonly SourceFragment[];
+  readonly issues: readonly SurfaceIssue[];
+}
+
 /**
  * One discovered input document with deterministic classification.
  */
@@ -100,12 +180,11 @@ export interface ParsedDesign {
  * - `"state-driven"` — active while a state holds ("While X, the system shall…").
  * - `"complex"` — both state and event required ("While X, when Y, the system shall…").
  * - `"unwanted-behavior"` — specifies response to an undesirable condition ("If X, then the system shall…").
- * - `"conditional"` — general conditional constraint ("If X, then the system shall…" without negative indicators).
  * - `"optional"` — optional or configurable behavior ("Where X is included, the system shall…").
  * - `"ubiquitous"` — unconditional obligation ("The system shall…").
  * - `"non-ears"` — requirement that does not conform to any EARS pattern.
  */
-export type EarsType = "event-driven" | "state-driven" | "complex" | "unwanted-behavior" | "conditional" | "optional" | "ubiquitous" | "non-ears";
+export type EarsType = "event-driven" | "state-driven" | "complex" | "unwanted-behavior" | "optional" | "ubiquitous" | "non-ears";
 
 /**
  * A single requirement extracted from a spec document.
@@ -123,6 +202,8 @@ export interface ParsedRequirement {
   readonly deltaOperation: DeltaOperation;
   readonly references: readonly string[];
   readonly provenance: LineProvenance;
+  /** Always produced by the source parser; optional for externally constructed models. */
+  readonly surface?: SurfaceStatement;
 }
 
 /**
@@ -139,6 +220,8 @@ export interface ParsedScenario {
   readonly deltaOperation: DeltaOperation;
   readonly parentRequirementIdentifier?: string;
   readonly provenance: LineProvenance;
+  /** Always produced by the source parser; optional for externally constructed models. */
+  readonly surface?: SurfaceStatement;
 }
 
 /**

@@ -24,10 +24,16 @@ import { buildClaimGraph } from "../domain/claim-graph.js";
 import { parseDesign } from "../domain/parser/design.js";
 import { parseProposal } from "../domain/parser/proposal.js";
 import { parseSpec } from "../domain/parser/spec.js";
+import type { EarsOptions } from "../domain/parser/ears.js";
+import type { QueryExecutor } from "../domain/formal/query-executor.js";
+import type { FrozenRegistry } from "../domain/formal/concepts.js";
+import type { EvidenceRecorder } from "../domain/formal/evidence.js";
+import { compareSemanticCapability } from "../domain/code-backwards/semantic-comparison.js";
+import { analyzeStaticGroup } from "../domain/formal/static-analysis.js";
 import { parseTaskDocument } from "../domain/parser/task.js";
 import { mergeSpecsByCapability } from "../domain/parser/merge.js";
 import { analyzeCoverage } from "../domain/spec-forward/coverage.js";
-import { clusterFormalizationSamples } from "../domain/formal/clustering.js";
+import { clusterWithSelection } from "../domain/formal/selected-clustering.js";
 import { deriveSpecsFromSource } from "../domain/code-backwards/derive.js";
 import { formalizeGeneratedSpecs, type GeneratedFormalizationOutput } from "../domain/code-backwards/gen-formal.js";
 import { analyzeGeneratedLogic } from "../domain/code-backwards/gen-logic.js";
@@ -112,7 +118,7 @@ export function computeSkippedPhases(config: RunConfig): readonly string[] {
  */
 export async function parseAllDocuments(catalogOutput: {
   readonly catalog: { readonly documents: readonly { readonly path: string; readonly type: string; readonly source: "final" | "delta" }[] };
-}): Promise<Pick<PipelineContext, "proposal" | "design" | "specs" | "tasks">> {
+}, options: EarsOptions = {}): Promise<Pick<PipelineContext, "proposal" | "design" | "specs" | "tasks">> {
   const docs = catalogOutput.catalog.documents;
   const proposalDoc = docs.find((d) => d.type === "proposal");
   const designDoc = docs.find((d) => d.type === "design");
@@ -121,7 +127,7 @@ export async function parseAllDocuments(catalogOutput: {
 
   const proposal = proposalDoc === undefined ? undefined : await parseProposal(proposalDoc.path);
   const design = designDoc === undefined ? undefined : await parseDesign(designDoc.path);
-  const specs = await Promise.all(specDocs.map((s) => parseSpec(s.path, s.source)));
+  const specs = await Promise.all(specDocs.map((s) => parseSpec(s.path, s.source, options)));
   const tasks = taskDoc === undefined ? undefined : await parseTaskDocument(taskDoc.path);
 
   return {
@@ -307,19 +313,23 @@ export function runClaimGraphPhase(ctx: Pick<PipelineContext, "proposal" | "desi
  */
 export async function runClusteringPhase(
   config: RunConfig,
-  candidates: readonly { readonly claim: { readonly id?: string }; readonly samples: readonly LogicIrClaim[] }[],
+  candidates: readonly { readonly claim: { readonly id?: string }; readonly samples: readonly LogicIrClaim[]; readonly registry?: FrozenRegistry }[],
+  executor?: QueryExecutor,
 ): Promise<{ readonly representatives: readonly LogicIrClaim[]; readonly findings: readonly Finding[] }> {
   const representatives: LogicIrClaim[] = [];
   const findings: Finding[] = [];
 
   for (const candidate of candidates) {
-    const clustered = await clusterFormalizationSamples({
+    const clustered = await clusterWithSelection({
       claimId: candidate.claim.id ?? "UNNAMED",
       samples: candidate.samples,
       stabilityThreshold: 0.6,
       ...(config.z3 === undefined ? {} : { z3Path: config.z3 }),
+      ...(executor === undefined ? {} : { executor }),
+      ...(candidate.registry === undefined ? {} : { group: candidate.registry.group }),
     });
-    representatives.push(clustered.clustered.representative);
+    const representative = clustered.clustered.representative;
+    representatives.push(representative);
     findings.push(...clustered.findings);
   }
 
@@ -472,6 +482,8 @@ export async function runCodeBackwardsWork(
   representativeClaims: readonly LogicIrClaim[],
   knownCapabilities: readonly string[],
   claimCapabilityMap: ReadonlyMap<string, string>,
+  evidence?: EvidenceRecorder,
+  executor?: QueryExecutor,
 ): Promise<{
   readonly allFindings: readonly Finding[];
   readonly logicFindings: readonly Finding[];
@@ -501,6 +513,7 @@ export async function runCodeBackwardsWork(
     timeoutMs: config.timeoutMs,
     traces: traceOutput.traces,
     suggestedCapabilities: knownCapabilities,
+    ...(evidence === undefined ? {} : { evidence }),
   });
   allFindings.push(...derivedSpecs.findings);
 
@@ -510,13 +523,52 @@ export async function runCodeBackwardsWork(
     model: config.model,
     timeoutMs: config.timeoutMs,
     ...(config.z3 === undefined ? {} : { z3Path: config.z3 }),
+    ...(config.analysis === undefined ? {} : { analysis: config.analysis }),
+    ...(evidence === undefined ? {} : { evidence }),
+    ...(executor === undefined ? {} : { executor }),
+    ...(config.configPath === undefined ? {} : { configSource: config.configPath }),
   });
   allFindings.push(...generatedFormal.findings);
+
+  // The run owns typed execution even when source admission produced no originals.
+  if (executor !== undefined) {
+    const original = new Map<string, LogicIrClaim[]>();
+    const generated = new Map<string, LogicIrClaim[]>();
+    for (const claim of representativeClaims) {
+      const capability = claimCapabilityMap.get(claim.claimId) ?? /^<merged-spec\/(.+)>$/u.exec(claim.registry?.group ?? "")?.[1] ?? "unknown";
+      original.set(capability, [...(original.get(capability) ?? []), claim]);
+    }
+    for (const claim of generatedFormal.claims) generated.set(claim.capability, [...(generated.get(claim.capability) ?? []), claim.representative]);
+    const logicFindings: Finding[] = [];
+    const compareFindings: Finding[] = [];
+    for (const capability of [...new Set([...original.keys(), ...generated.keys()])].sort()) {
+      const left = original.get(capability) ?? []; const right = generated.get(capability) ?? [];
+      if (right.length > 0) {
+        const analyzed = await analyzeStaticGroup(`<generated/${capability}>`, right, executor, config.pairBudget);
+        logicFindings.push(...analyzed.findings);
+      }
+      if (left[0]?.registry === undefined || right[0]?.registry === undefined) {
+        compareFindings.push({ severity: "warning", category: left.length === 0 ? "code_backwards.novel_capability" : right.length === 0 ? "code_backwards.unimplemented_capability" : "code_backwards.unmapped_capability", provenance: { file: `<comparison/${capability}>` },
+          description: "Independent typed artifacts or frozen registry are missing for comparison", rationale: "Missing generation/formalization/context or naming scope is not itself proof of an implementation defect.", evidence: [{ kind: "capability", value: capability }] });
+        continue;
+      }
+      compareFindings.push(...await compareSemanticCapability({ capability, original: left, generated: right, originalRegistry: left[0].registry, generatedRegistry: right[0].registry, executor, pairBudget: config.pairBudget }));
+      const context = derivedSpecs.specs.find((spec) => spec.capability === capability);
+      if (context !== undefined) compareFindings.push({ severity: "info", category: "code_backwards.generated_explanation", provenance: { file: `gen_specs/${capability}.md` },
+        description: "Independent generated context accompanies the scoped formal comparison", rationale: "Generated-only source interpretation is supporting explanatory evidence; it cannot promote uncertainty, unmapped scope, or permission differences to equivalence.",
+        evidence: [{ kind: "generated_spec", value: `gen_specs/${capability}.md` }, { kind: "generated_summary", value: context.requirements.map((requirement) => requirement.text).join("\n") }] });
+    }
+    allFindings.push(...logicFindings, ...compareFindings);
+    return { allFindings, logicFindings, compareFindings, evidenceFiles: generatedFormal.evidenceFiles };
+  }
 
   const generatedLogic = await analyzeGeneratedLogic({
     claims: generatedFormal.claims.map((c) => ({ capability: c.capability, representative: c.representative })),
     outputDir: config.output,
     ...(config.z3 === undefined ? {} : { z3Path: config.z3 }),
+    ...(config.analysis === undefined ? {} : { analysis: config.analysis }),
+    ...(evidence === undefined ? {} : { evidence }),
+    pairBudget: config.pairBudget,
   });
   allFindings.push(...generatedLogic.findings);
 

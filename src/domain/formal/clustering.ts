@@ -13,6 +13,8 @@ import { toSmtlibContent, type SmtlibContent } from "../branded.js";
 import type { Finding } from "../findings.js";
 import type { LogicIrClaim } from "../logic-ir.js";
 import { compileSmtlib } from "./smtlib.js";
+import { clusterTypedSamples } from "./typed-clustering.js";
+import type { QueryExecutor } from "./query-executor.js";
 
 /**
  * Result of a bidirectional Z3 implication check between two formalization samples.
@@ -48,6 +50,7 @@ export interface ClusteredClaim {
   readonly clusters: readonly { readonly members: readonly number[] }[];
   readonly pairwise: readonly PairwiseImplicationResult[];
   readonly ambiguous: boolean;
+  readonly stability?: "single" | "stable" | "unstable";
 }
 
 /**
@@ -100,7 +103,10 @@ export async function clusterFormalizationSamples(input: {
   readonly z3Path?: string;
   readonly stabilityThreshold: number;
   readonly concurrency?: number;
+  readonly executor?: QueryExecutor;
+  readonly group?: string;
 }): Promise<{ readonly clustered: ClusteredClaim; readonly findings: readonly Finding[] }> {
+  if (input.samples.some((sample) => sample.signature !== undefined)) return await clusterTypedSamples(input);
   const concurrency = input.concurrency ?? PAIRWISE_CONCURRENCY_DEFAULT;
   const pairwise = await generatePairwiseImplications(input.samples, input.z3Path, concurrency);
   const clusters = buildEquivalenceClusters(input.samples.length, pairwise);

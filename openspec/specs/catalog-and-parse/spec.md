@@ -16,8 +16,14 @@ sig InputPath {}             // A CLI positional input path (file or directory)
 
 // OpenSpec artifacts discovered from input paths
 sig Artifact {
-  source : one InputPath     // the input path this artifact was discovered from
+  source : one InputPath,    // artifact file identity used for provenance
+  providedBy : one InputPath,
+  documentKind : one DocumentKind,
+  explicitlyArchived : one Bool
 }
+
+abstract sig DocumentKind {}
+one sig ProposalDoc, DesignDoc, SpecDoc, TaskDoc extends DocumentKind {}
 
 // Subset of artifacts from archived change directories
 sig ArchivedArtifact in Artifact {}
@@ -37,7 +43,9 @@ sig Capability {
 // Findings with source-file provenance and classification
 sig Finding {
   sourceFile : one InputPath,
-  kind : one FindingKind
+  kind : one FindingKind,
+  location : lone SourceFragment,
+  violatedRule : lone StructuralRule
 }
 
 abstract sig FindingKind {}
@@ -48,7 +56,7 @@ one sig StructuralViolation, ParseWarning, EarsWarning,
 // EARS pattern classification
 abstract sig EarsType {}
 one sig Ubiquitous, EventDriven, StateDriven,
-        UnwantedBehavior, Conditional extends EarsType {}
+        UnwantedBehavior, Complex, OptionalFeature extends EarsType {}
 
 // Delta operation context assigned during parsing
 abstract sig DeltaOperation {}
@@ -64,16 +72,145 @@ sig ParsedDoc {
   source : one InputPath,
   hasHeadings : one Bool,
   hasUnmatched : one Bool,     // true if unparsed content lines exist
-  isDelta : one Bool           // true if this doc is a delta spec (not finalized)
+  isDelta : one Bool,          // true if this doc is a delta spec (not finalized)
+  elements : set SourceElement,
+  unmatched : set SourceFragment
 }
 
 // Parsed requirement within a document
 sig Requirement {
   doc : one ParsedDoc,
   earsType : lone EarsType,       // classified if EARS; absent if non-EARS
-  escapeHatch : one Bool,          // approved non-EARS escape hatch
+  escapeHatch : one Bool,          // format justification present; not semantics
   deltaOp : one DeltaOperation,   // enclosing delta operation context
-  parentReqId : lone Requirement   // scenario's parent requirement (lone = optional)
+  parentReqId : lone Requirement, // identified enclosing requirement, if any
+  at : one SourceElement,
+  scenario : one Bool,
+  identified : one Bool,
+  observedForm : lone EarsType,
+  modal : lone SourceModal,
+  responseNegated : one Bool,
+  grammarIssues : set SurfaceIssueKind,
+  withinBound : one Bool,
+  supportedAlternative : one Bool,
+  declaredKinds : set KindDeclaration,
+  fragments : set SourceFragment,
+  clauses : set SourceClause,
+  schemaDefects : set StructuralRule,
+  schemaLocation : StructuralRule -> lone SourceFragment
+}
+
+// Ordered source observations are immutable. The lexer/property corpus must
+// establish exact spelling, fence protection, byte bounds and source offsets.
+// Alloy checks the consequences of those observations, not English correctness.
+sig SourceElement {
+  document : one ParsedDoc,
+  prior : set SourceElement,
+  exactOperation : lone DeltaOperation,
+  fenced : one Bool
+}
+abstract sig SourceModal {}
+one sig ShallModal, MustModal, ShouldModal, MayModal extends SourceModal {}
+abstract sig SurfaceIssueKind {}
+one sig DriverOrder, MissingCommaOrThen, EmptyClause, ModalCount,
+  UnclosedContent, TrailingNormative, MayNotAmbiguous, UnsupportedGrammar,
+  WhereDisabled, StatementLimit, UnsupportedRepresentation,
+  MetadataAmbiguous, MissingExampleFields extends SurfaceIssueKind {}
+abstract sig StructuralRule {}
+one sig HeadingShapeRule, IdentifierRule, ScenarioPresenceRule,
+  ReferencesRule, DeltaCompletenessRule extends StructuralRule {}
+abstract sig FragmentRole {}
+one sig StatementContent, ReferenceContent, JustificationContent,
+  PostconditionContent, MetadataContent, FencedContent, EvidenceContent,
+  SupplementaryContent, UnmatchedContent, InputContent, ExpectedContent,
+  ForbiddenContent extends FragmentRole {}
+sig SourceText {}
+sig SourcePoint { file : one InputPath }
+sig NormalizedPoint {}
+sig SourceFragment {
+  file : one InputPath,
+  role : one FragmentRole,
+  raw : one SourceText,
+  start : one SourcePoint,
+  end : one SourcePoint,
+  normalizedOffsets : set NormalizedPoint,
+  offsetMap : NormalizedPoint -> lone SourcePoint
+}
+abstract sig ClauseRole {}
+one sig StateClause, TriggerClause, ConditionClause, FeatureClause,
+  SubjectClause, ResponseClause extends ClauseRole {}
+sig SourceClause {
+  role : one ClauseRole,
+  fragment : one SourceFragment, // containing statement; exact subranges are lexer observations
+  priorClause : set SourceClause
+}
+abstract sig ScenarioDisposition {}
+one sig RefinementForm, ExampleForm, ProhibitedExampleForm,
+  UnknownScenarioForm extends ScenarioDisposition {}
+sig KindDeclaration {
+  value : one ScenarioDisposition,
+  fragment : one SourceFragment
+}
+
+// External input/config observations make failure guards executable formulas.
+abstract sig ConfigReadResult {}
+one sig ConfigAbsent, ConfigValid, ConfigInvalidJson, ConfigBadShape,
+  ConfigUnreadable extends ConfigReadResult {}
+sig Setting {}
+sig SettingValue {}
+one sig Invocation {
+  inputs : set InputPath,
+  informational : one Bool,
+  badFlag : one Bool,
+  outputInsideSource : one Bool,
+  timeoutValid : one Bool,
+  configRead : one ConfigReadResult,
+  cliSettings : Setting -> lone SettingValue,
+  fileSettings : Setting -> lone SettingValue,
+  defaults : Setting -> lone SettingValue,
+  recognized : set Artifact,
+  unreadable : set InputPath,
+  selected : set Artifact,
+  preflight : one OCPreflight
+}
+abstract sig FilterRationale {}
+one sig ArchivePolicy, CapabilityPolicy extends FilterRationale {}
+
+fact source_observation_shape {
+  Invocation.preflight.informationalOnly = Invocation.informational
+  all p : OCPreflight | p.opencodeProbe != p.z3Probe
+  all c : Capability | {
+    no c.finalized & c.inDev
+    (c.finalized + c.inDev).documentKind in SpecDoc
+  }
+  all disj a, b : Capability | no (a.finalized + a.inDev) & (b.finalized + b.inDev)
+  all d : ParsedDoc | d.elements = document.d
+  all e : SourceElement | {
+    e.prior in e.document.elements
+    e not in e.prior
+    e.prior.prior in e.prior
+    e.exactOperation in DeltaAdded + DeltaModified + DeltaRemoved + DeltaRenamed
+  }
+  all d : ParsedDoc | all disj a, b : d.elements |
+    a in b.prior or b in a.prior
+  // Requirement/scenario headings cannot also be exact level-two delta headings.
+  all r : Requirement | r.at.document = r.doc and r.at.fenced = False and
+    no r.at.exactOperation
+  // Exact violated heading/line ranges are source observations, not invented
+  // positions. Each schema defect has one retained original-source location.
+  all r : Requirement | {
+    r.schemaDefects = (r.schemaLocation).SourceFragment
+    (r.schemaLocation)[StructuralRule] in r.fragments
+  }
+  all disj a, b : Requirement | a.at != b.at
+  // Retained fields belong to one source item, including scenario postconditions.
+  all disj a, b : Requirement | no a.fragments & b.fragments
+  all f : SourceFragment | f.start.file = f.file and f.end.file = f.file and
+    f.offsetMap[NormalizedPoint].file in f.file and
+    (f.offsetMap).SourcePoint in f.normalizedOffsets
+  all d : ParsedDoc | d.unmatched.file in d.source and
+    (d.hasUnmatched = True iff some d.unmatched)
+  all a : Invocation.recognized | a.providedBy in Invocation.inputs
 }
 
 // Pipeline phases in execution order
@@ -169,7 +306,8 @@ one sig OCInvalidModel, OCInvalidRequest, OCRuntimeMismatch,
 
 // Lexer outputs preserve case and additional model '/' characters.
 abstract sig OCModelClass {}
-one sig OCLuna, OCTerra, OCOtherModel extends OCModelClass {}
+// Models with the same fixed variant share a policy class (Terra and Sol are both high).
+one sig OCLuna, OCHighPolicyModel, OCOtherModel extends OCModelClass {}
 sig OCVariant {}
 one sig OCMax, OCHigh extends OCVariant {}
 sig OCModel {
@@ -249,9 +387,9 @@ fun oc_resolved_runtime[c : OCCall] : lone OCRuntime {
   no oc_call_error[c] => oc_proposed_runtime[c] else none
 }
 
-// Postcondition: fixed Luna/Terra variants; no forced variant for other models.
+// Postcondition: fixed Luna/Terra/Sol variants; no forced variant for other models.
 fun oc_fixed_variant[m : OCModel] : lone OCVariant {
-  m.modelClass = OCLuna => OCMax else (m.modelClass = OCTerra => OCHigh else none)
+  m.modelClass = OCLuna => OCMax else (m.modelClass = OCHighPolicyModel => OCHigh else none)
 }
 // Postcondition: preserve an explicit variant, otherwise apply the fixed policy.
 fun oc_normalized_variant[m : OCModel] : lone OCVariant {
@@ -344,6 +482,39 @@ IF recognized documents are present but another admission or filtering policy re
 - Implementation: [catalog.ts:222 classifyEmptyCatalogReason()](/src/domain/parser/catalog.ts#L222), [run-cli.ts:83 formatCatalogEmptyMessage()](/src/cli/run-cli.ts#L83)
 - Test: [catalog.test.ts:113 returns all_filtered when all recognized docs are excluded by capability resolution](/test/contract/catalog.test.ts#L113), [catalog.test.ts:134 reports correct filteredCount when inputs contain both archived and unresolvable docs](/test/contract/catalog.test.ts#L134), [cli.test.ts:198 formats all_filtered with count and filter reason](/test/contract/cli.test.ts#L198)
 - Test (integration): [catalog-abort.integration.test.ts:111 aborts pipeline on all_filtered — no downstream reports produced](/test/integration/catalog-abort.integration.test.ts#L111)
+
+#### Requirement model
+
+```alloy
+// Preconditions: recognition and admission are complete; active is a subset.
+// Postcondition: empty catalogs have one cause, with deterministic priority.
+fun archive_excluded[recognized : set Artifact] : set Artifact {
+  { a : recognized & ArchivedArtifact |
+    Config.allowArchive = False or a.explicitlyArchived = False }
+}
+fun empty_cause[recognized, active : set Artifact] : lone EmptyCatalogReason {
+  some active => none else
+  (no recognized => NoRecognizedDocs else
+  (recognized = archive_excluded[recognized] => AllArchived else AllFiltered))
+}
+fun filtering_rationale[recognized, active : set Artifact] : set FilterRationale {
+  (some archive_excluded[recognized] => ArchivePolicy else none) +
+  (some recognized - active - archive_excluded[recognized] => CapabilityPolicy else none)
+}
+// Safety: every empty catalog has one classified cause and filtering rationale.
+assert empty_cause_is_total_and_preserves_rationale {
+  all recognized, active : set Artifact | active in recognized implies {
+    no active iff one empty_cause[recognized, active]
+    empty_cause[recognized, active] = AllFiltered implies
+      CapabilityPolicy in filtering_rationale[recognized, active]
+  }
+}
+// Safety: --allow-archive guidance is applicable only to archive-excluded input.
+assert archive_remediation_is_relevant {
+  all recognized : set Artifact | empty_cause[recognized, none] = AllArchived implies
+    some recognized and recognized = archive_excluded[recognized]
+}
+```
 
 ### Requirement: CLI Argument Validation [CAT-CLI-ARGS]
 THE spec-check CLI SHALL accept positional input paths and optional `--output`, `--src`, `--caps`, `--z3`, `--config`, `--timeout-ms`, `--max-batch-size`, `--allow-archive`, `--help`, and `--version` flags, and SHALL reject unrecognized flags or missing required inputs with exit code `2` before any analysis begins.
@@ -490,6 +661,8 @@ result.value.allowArchive; //=> true
 // Failure modes: unrecognized flag, missing input, output-inside-src, timeout out-of-range
 
 pred cli_informational {
+  Invocation.informational = True
+  Invocation.badFlag = False
   // Guard: only from initial state (--help/-h or --version/-v), no prior outcome
   no RunState.completedPhases
   no RunState.lastOutcome
@@ -504,6 +677,8 @@ pred cli_informational {
 }
 
 pred cli_rejected_missing_input {
+  Invocation.informational = False
+  no Invocation.inputs
   // Guard: only from initial state; no positional input paths, no help/version, no prior outcome
   no RunState.completedPhases
   no RunState.lastOutcome
@@ -518,6 +693,7 @@ pred cli_rejected_missing_input {
 }
 
 pred cli_rejected_bad_flag {
+  Invocation.badFlag = True
   // Guard: only from initial state; unrecognized CLI flag supplied, no prior outcome
   no RunState.completedPhases
   no RunState.lastOutcome
@@ -532,6 +708,8 @@ pred cli_rejected_bad_flag {
 }
 
 pred cli_rejected_output_inside_src {
+  Invocation.informational = False
+  Invocation.outputInsideSource = True
   // Guard: only from initial state; resolved --output is descendant of --src, no prior outcome
   no RunState.completedPhases
   no RunState.lastOutcome
@@ -546,6 +724,8 @@ pred cli_rejected_output_inside_src {
 }
 
 pred cli_rejected_timeout_range {
+  Invocation.informational = False
+  Invocation.timeoutValid = False
   // Guard: only from initial state; --timeout-ms outside allowed range, no prior outcome
   no RunState.completedPhases
   no RunState.lastOutcome
@@ -567,10 +747,24 @@ pred cli_rejected {
   or cli_rejected_timeout_range
 }
 
-// Note: --flag=value / --flag value equivalence [CAT-CLI-EQSYNTAX] is a
-// syntactic property not expressible in Alloy's relational logic.
+// Lexer observations model value-bearing flags independently of wire spelling.
+abstract sig FlagSyntax {}
+one sig EqualsSyntax, SeparateSyntax extends FlagSyntax {}
+sig FlagValue { setting : one Setting, value : one SettingValue, syntax : one FlagSyntax }
+fun flag_binding[f : FlagValue] : Setting -> SettingValue { f.setting -> f.value }
+// Safety: equal observed flag bindings are independent of their wire syntax.
+// Lexer tests establish that equals/separate spellings yield these observations.
+assert equals_syntax_equivalence {
+  all a, b : FlagValue | a.setting = b.setting and a.value = b.value implies
+    flag_binding[a] = flag_binding[b]
+}
 
 pred cli_validate_success {
+  Invocation.informational = False
+  Invocation.badFlag = False
+  some Invocation.inputs
+  Invocation.outputInsideSource = False
+  Invocation.timeoutValid = True
   // Guard: at least one valid input path, recognized flags, output outside src,
   //        timeout in range (if provided), no prior outcome set
   no RunState.completedPhases
@@ -636,10 +830,12 @@ IF the `--config` file exists but contains invalid JSON or violates the expected
 ```alloy
 // --- Config loading and merge ---
 // Config merge is a pure function: CLI flags override config file values.
-// Precedence is modeled as a guard rather than tracked state.
+// Missing CLI/file values fall through to defaults; explicit values win.
 // Failure modes: invalid JSON, violated config structure, unreadable config file.
 
 pred config_load_success {
+  Invocation.configRead in ConfigAbsent + ConfigValid
+  Invocation.preflight.effectiveModelValid = True
   // Guard: CliValidate completed, no prior fatal outcome
   CliValidate in RunState.completedPhases
   ConfigLoad not in RunState.completedPhases
@@ -655,6 +851,7 @@ pred config_load_success {
 }
 
 pred config_load_fail_invalid_json {
+  Invocation.configRead in ConfigInvalidJson + ConfigUnreadable
   // Guard: CliValidate completed, config file contains invalid JSON, no prior outcome
   CliValidate in RunState.completedPhases
   ConfigLoad not in RunState.completedPhases
@@ -670,6 +867,7 @@ pred config_load_fail_invalid_json {
 }
 
 pred config_load_fail_bad_structure {
+  Invocation.configRead = ConfigBadShape
   // Guard: CliValidate completed, config JSON violates expected structure, no prior outcome
   CliValidate in RunState.completedPhases
   ConfigLoad not in RunState.completedPhases
@@ -699,6 +897,20 @@ assert invalid_config_blocks_downstream {
 // Safety: config error is always ConfigError outcome, never InputError
 assert config_failure_outcome {
   always (config_load_fail implies RunState.lastOutcome' = ConfigError)
+}
+
+fun resolved_settings : Setting -> SettingValue {
+  Invocation.defaults ++ Invocation.fileSettings ++ Invocation.cliSettings
+}
+// Safety: explicit CLI values override overlapping file/default bindings.
+assert cli_settings_take_precedence {
+  all s : Setting | some s.(Invocation.cliSettings) implies
+    s.resolved_settings = s.(Invocation.cliSettings)
+}
+// Safety: file values supply settings absent from the CLI.
+assert file_settings_fill_missing_cli_values {
+  all s : Setting | no s.(Invocation.cliSettings) and some s.(Invocation.fileSettings) implies
+    s.resolved_settings = s.(Invocation.fileSettings)
 }
 ```
 
@@ -767,6 +979,10 @@ IF no active documents survive recognition and catalog admission, THEN THE spec-
 // Failure modes: unreadable input, empty catalog (3 classified causes), delta conflicts.
 
 pred discover_success {
+  no Invocation.unreadable
+  RunState.catalog' = Invocation.recognized
+  RunState.activeCatalog' = Invocation.selected
+  catalog_selection_contract
   // Guard: ConfigLoad completed, no prior fatal outcome
   ConfigLoad in RunState.completedPhases
   Discover not in RunState.completedPhases
@@ -779,15 +995,18 @@ pred discover_success {
   all c : Capability | lone (c.inDev & RunState.activeCatalog')
   // Postcondition: active catalog is non-empty (success path)
   some RunState.activeCatalog'
+  // Every skipped eligible delta has its own source-attributed conflict finding.
+  all c : Capability | all a : (c.inDev & catalog_eligible) - Invocation.selected |
+    some f : RunState.findings' - RunState.findings |
+      f.kind = DeltaConflict and f.sourceFile = a.source
   // Delta conflicts produce DeltaConflict findings
   all c : Capability |
-    (#(c.inDev & RunState.catalog') > 1) implies
+    (#(c.inDev & catalog_eligible) > 1) implies
       (some f : RunState.findings' - RunState.findings |
         f.kind = DeltaConflict)
-  // New findings: provenance in the catalog, not from archived sources
+  // Opted-in archived sources can legitimately produce conflict findings.
   all f : RunState.findings' - RunState.findings |
-    f.sourceFile in RunState.catalog'.source and
-    f.sourceFile not in ArchivedArtifact.source
+    f.sourceFile in catalog_eligible.source
   // Findings monotonic
   RunState.findings in RunState.findings'
   // Effect
@@ -798,6 +1017,7 @@ pred discover_success {
 }
 
 pred discover_reject_unreadable [p : InputPath] {
+  p in Invocation.unreadable
   // Guard: ConfigLoad completed, input path not readable, no prior outcome
   ConfigLoad in RunState.completedPhases
   Discover not in RunState.completedPhases
@@ -813,6 +1033,8 @@ pred discover_reject_unreadable [p : InputPath] {
 }
 
 pred discover_empty_no_docs {
+  no Invocation.unreadable
+  no Invocation.recognized
   // Guard: ConfigLoad completed, input paths yield zero recognized documents, no prior outcome
   ConfigLoad in RunState.completedPhases
   Discover not in RunState.completedPhases
@@ -829,11 +1051,13 @@ pred discover_empty_no_docs {
 }
 
 pred discover_empty_all_archived {
+  no Invocation.unreadable
+  RunState.catalog' = Invocation.recognized
+  Invocation.recognized = archive_excluded[Invocation.recognized]
   // Guard: ConfigLoad completed, all recognized docs are archived, archive not allowed, no prior outcome
   ConfigLoad in RunState.completedPhases
   Discover not in RunState.completedPhases
   no RunState.lastOutcome
-  Config.allowArchive = False
   // Postcondition: catalog has items but they're all archived
   some RunState.catalog'
   RunState.catalog' in ArchivedArtifact
@@ -847,13 +1071,17 @@ pred discover_empty_all_archived {
 }
 
 pred discover_empty_all_filtered {
+  no Invocation.unreadable
+  RunState.catalog' = Invocation.recognized
+  no Invocation.selected
+  catalog_selection_contract
   // Guard: ConfigLoad completed, recognized docs exist but all excluded by policy, no prior outcome
   ConfigLoad in RunState.completedPhases
   Discover not in RunState.completedPhases
   no RunState.lastOutcome
   // Postcondition: catalog has non-archived items but none survive resolution
   some RunState.catalog'
-  some (RunState.catalog' - ArchivedArtifact)
+  some (RunState.catalog' - archive_excluded[RunState.catalog'])
   no RunState.activeCatalog'
   // Effect: pipeline stops, classified as all_filtered
   RunState.completedPhases' = RunState.completedPhases
@@ -883,10 +1111,9 @@ assert at_most_one_delta_per_capability {
 
 // Safety: empty catalog classification is exactly one cause (mutual exclusion)
 assert empty_catalog_exactly_one_cause {
-  always (some RunState.emptyCatalogReason implies
-    (RunState.emptyCatalogReason = NoRecognizedDocs
-     or RunState.emptyCatalogReason = AllArchived
-     or RunState.emptyCatalogReason = AllFiltered))
+  always (RunState.lastOutcome = EmptyCatalogError implies
+    one RunState.emptyCatalogReason and
+    RunState.emptyCatalogReason = empty_cause[RunState.catalog, RunState.activeCatalog])
 }
 
 // Safety: empty catalog always stops downstream analysis
@@ -900,8 +1127,30 @@ assert empty_catalog_stops_downstream {
 // Safety: delta conflicts always produce findings when multiple deltas exist
 assert delta_conflicts_surfaced {
   always (Discover in RunState.completedPhases implies
-    all c : Capability | (#(c.inDev & RunState.catalog) > 1) implies
+    all c : Capability | (#(c.inDev & catalog_eligible) > 1) implies
       (some f : RunState.findings | f.kind = DeltaConflict))
+}
+
+fun catalog_eligible : set Artifact {
+  Invocation.recognized - archive_excluded[Invocation.recognized]
+}
+pred catalog_selection_contract {
+  Invocation.selected in catalog_eligible
+  // Non-spec artifacts pass through; capability-less specs remain filtered.
+  { a : catalog_eligible | a.documentKind != SpecDoc } in Invocation.selected
+  Invocation.selected & { a : Artifact | a.documentKind = SpecDoc } in
+    Capability.finalized + Capability.inDev
+  all c : Capability | {
+    lone (c.finalized & Invocation.selected)
+    lone (c.inDev & Invocation.selected)
+    some c.finalized & catalog_eligible implies one c.finalized & Invocation.selected
+    some c.inDev & catalog_eligible implies one c.inDev & Invocation.selected
+  }
+}
+// Safety: active archived artifacts require opt-in and explicit archived input.
+assert explicitly_admitted_archives_only {
+  always (all a : RunState.activeCatalog & ArchivedArtifact |
+    Config.allowArchive = True and a.explicitlyArchived = True)
 }
 ```
 
@@ -941,6 +1190,7 @@ IF `z3` is required for the selected analysis mode and its default PATH command 
 // Failure modes: opencode missing/non-executable, z3 missing/non-executable.
 
 pred deps_check_success {
+  oc_dependency_admitted[Invocation.preflight]
   // Guard: Discover completed, all required deps available, no prior fatal outcome
   Discover in RunState.completedPhases
   DependencyCheck not in RunState.completedPhases
@@ -956,6 +1206,8 @@ pred deps_check_success {
 }
 
 pred deps_missing_opencode {
+  Invocation.preflight.cleanupComplete = True
+  not oc_version_ok[Invocation.preflight.opencodeProbe]
   // Guard: Discover completed, opencode not available or not executable, no prior outcome
   Discover in RunState.completedPhases
   DependencyCheck not in RunState.completedPhases
@@ -971,6 +1223,10 @@ pred deps_missing_opencode {
 }
 
 pred deps_missing_z3 {
+  Invocation.preflight.cleanupComplete = True
+  oc_version_ok[Invocation.preflight.opencodeProbe]
+  Invocation.preflight.needsZ3 = True
+  not oc_process_ok[Invocation.preflight.z3Probe]
   // Guard: Discover completed, z3 not available at default or --z3 path, no prior outcome
   Discover in RunState.completedPhases
   DependencyCheck not in RunState.completedPhases
@@ -1091,6 +1347,7 @@ parseCanonicalIdentifier("[bad]"); //=> undefined
 // syntactic property not fully expressible in Alloy's relational logic.
 // The model captures the structural invariant that violations produce findings.
 // Failure modes: headless document, malformed identifier, missing required sections.
+// Clarified all-headless case: retain parsed source/error evidence, stop analysis.
 
 pred struct_validate_phase {
   // Guard: Parse completed, no prior fatal outcome
@@ -1103,27 +1360,43 @@ pred struct_validate_phase {
     all d : headless |
       (some f : RunState.findings' - RunState.findings |
         f.sourceFile = d.source and f.kind = ParseErrorKind)
-    // If headed docs exist, exclude headless; otherwise keep all
+    // If headed docs exist, exclude headless; otherwise retain diagnostic records
     (some headed) implies RunState.parsedDocs' = RunState.parsedDocs - headless
     (no headed) implies RunState.parsedDocs' = RunState.parsedDocs
+    (some headed) implies {
+      RunState.completedPhases' = RunState.completedPhases + StructValidate
+      RunState.lastOutcome' = RunState.lastOutcome
+    }
+    (no headed) implies {
+      RunState.completedPhases' = RunState.completedPhases
+      RunState.lastOutcome' = InputError
+    }
   }
+  // Report each schema defect, including malformed identifiers, at its heading.
+  all r : Requirement | r.doc in RunState.parsedDocs implies
+    all rule : r.schemaDefects |
+      some f : RunState.findings' - RunState.findings |
+        f.sourceFile = r.doc.source and f.violatedRule = rule and
+        f.location = rule.(r.schemaLocation) and
+        f.kind = (rule = IdentifierRule => IdentifierError else StructuralViolation)
   // New findings have provenance in the parsed document set
   all f : RunState.findings' - RunState.findings |
     f.sourceFile in RunState.parsedDocs.source
   // Findings monotonic
   RunState.findings in RunState.findings'
   // Effect
-  RunState.completedPhases' = RunState.completedPhases + StructValidate
   RunState.catalog' = RunState.catalog
   RunState.activeCatalog' = RunState.activeCatalog
-  RunState.lastOutcome' = RunState.lastOutcome
   RunState.emptyCatalogReason' = RunState.emptyCatalogReason
 }
 
 // Safety: structural violations always produce findings with provenance
 assert violations_produce_findings {
-  always (StructValidate in RunState.completedPhases implies
-    all d : RunState.findings | some d.sourceFile)
+  always (struct_validate_phase implies
+    all r : Requirement | r.doc in RunState.parsedDocs implies
+      all rule : r.schemaDefects | some f : RunState.findings' |
+        f.sourceFile = r.doc.source and f.violatedRule = rule and
+        f.location = rule.(r.schemaLocation) and some f.location)
 }
 
 // Safety: after structural validation, if headed docs existed, only headed remain
@@ -1139,134 +1412,169 @@ assert identifier_errors_surfaced {
     all f : RunState.findings | f.kind = IdentifierError implies
       f.sourceFile in RunState.catalog.source)
 }
+// Safety: all-headless inputs retain diagnostic records and stop before emission.
+assert all_headless_inputs_stop_with_evidence {
+  always (struct_validate_phase and
+    (no d : RunState.parsedDocs | d.hasHeadings = True) implies
+      RunState.lastOutcome' = InputError and
+      RunState.parsedDocs' = RunState.parsedDocs and
+      Emit not in RunState.completedPhases')
+}
 ```
 
 ### Requirement: Spec Parser EARS Pattern Recognition [CAT-PARSE-EARS]
-WHEN the spec-check tool parses a capability spec file, THE spec-check tool SHALL recognize EARS-pattern requirement text using the documented keyword patterns (WHEN/THE...SHALL, IF/THEN THE...SHALL, WHILE/THE...SHALL), SHALL annotate each parsed requirement and scenario with its enclosing delta operation context, SHALL associate each scenario with its enclosing requirement block when present, and SHALL flag requirements that do not follow an EARS pattern or an approved escape-hatch format.
+WHEN the spec-check tool parses a capability spec file, THE spec-check tool SHALL parse complete source statements using the simplified strict project EARS grammar and SHALL preserve delta context and scenario parent associations independently of formal eligibility.
 
 **References:**
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Domain Model`
-- `openspec/changes/archive/2026-06-18-spec-check-core/proposal.md#Scope`
-- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/proposal.md#Scope`
-- `openspec/changes/archive/2026-06-22-merge-delta-spec-logic/design.md#Component Design`
+- [Proposal: Scope](../../changes/archive/2026-11-15-improve-ears-smt-analysis/proposal.md#scope)
+- [Design: Surface grammar and annotations](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#surface-grammar-and-annotations)
 
 #### Scenario: EARS Requirement Recognized [CAT-EARS-MATCH]
-WHEN a requirement body follows a recognized EARS pattern, THE spec-check tool SHALL classify it with the appropriate EARS type (ubiquitous, event-driven, state-driven, unwanted-behavior, conditional).
+WHEN a complete statement matches ubiquitous, state-driven, event-driven, unwanted-behavior, or complex syntax, THE spec-check tool SHALL retain its ordered clause spans, subject, modal, response, and response-negation flag.
 
-**Postcondition:** The parsed requirement carries its EARS classification for downstream analysis.
-
-##### Evidence
-- Implementation: [spec.ts:351 classifyEarsType()](/src/domain/parser/spec.ts#L351)
-- Test: [parser.test.ts:27 recognizes EARS and preserves unparsed lines deterministically](/test/contract/parser.test.ts#L27), [parser.test.ts:142 classifies complex (WHILE+WHEN) pattern](/test/contract/parser.test.ts#L142), [parser.test.ts:160 classifies optional (WHERE) pattern](/test/contract/parser.test.ts#L160), [parser.test.ts:178 still classifies WHILE-only as state-driven (not complex)](/test/contract/parser.test.ts#L178), [parser.test.ts:196 still classifies WHEN-only as event-driven (not complex)](/test/contract/parser.test.ts#L196)
+**Postcondition:** Classification follows structure, not substring presence; generic `conditional` is not a separate type.
 
 #### Scenario: Non-EARS Requirement Flagged [CAT-EARS-WARN]
-IF a requirement body does not match any recognized EARS pattern and is not marked as an approved escape-hatch, THEN THE spec-check tool SHALL emit a structural finding recommending EARS conformance.
-
-**Postcondition:** Reviewers are alerted to requirements that may lack testable behavioral structure.
-
-##### Evidence
-- Implementation: [spec.ts:141 parseRequirement()](/src/domain/parser/spec.ts#L141)
-- Test: [parser.test.ts:119 flags non-EARS requirement](/test/contract/parser.test.ts#L119)
+IF a statement lacks a supported EARS or justified supported alternative representation, THEN THE spec-check tool SHALL emit a structural diagnostic and SHALL mark the statement formally ineligible without removing it from parsed output.
 
 #### Scenario: Delta Operation Context Assigned Per Parsed Item [CAT-EARS-DELTA]
-WHEN the parser reads a finalized or selected delta spec, THE spec-check tool SHALL assign each parsed requirement and scenario a deterministic delta-operation context derived from the source type and exact enclosing delta section heading, using one of the values `"base"`, `"pre-section"`, `"ADDED"`, `"MODIFIED"`, `"REMOVED"`, or `"RENAMED"`.
-
-**Postcondition:** Downstream merge logic can distinguish base, pre-section, added, modified, removed, and renamed items without re-parsing headings.
-
-##### Evidence
-- Implementation: [spec.ts:43 parseSpec()](/src/domain/parser/spec.ts#L43), [spec.ts:141 parseRequirement()](/src/domain/parser/spec.ts#L141), [spec.ts:236 parseScenario()](/src/domain/parser/spec.ts#L236)
-- Test: [parser.test.ts:214 assigns deltaOperation by exact delta heading and scenario inheritance](/test/contract/parser.test.ts#L214)
+WHEN a finalized or selected delta spec is parsed, THE spec-check tool SHALL assign each requirement and scenario its deterministic `base`, `pre-section`, `ADDED`, `MODIFIED`, `REMOVED`, or `RENAMED` context from the source type and exact enclosing heading.
 
 #### Scenario: Scenario Parent Association Preserved [CAT-EARS-PARENT]
-WHEN the parser reads a scenario after a requirement heading in the same spec document, THE spec-check tool SHALL preserve the identifier of the most recently parsed requirement as the scenario's parent requirement identifier when that identifier exists.
-
-**Postcondition:** Requirement-block merge operations can replace or remove a requirement together with its nested scenarios.
-
-##### Evidence
-- Implementation: [spec.ts:43 parseSpec()](/src/domain/parser/spec.ts#L43), [spec.ts:236 parseScenario()](/src/domain/parser/spec.ts#L236)
-- Test: [parser.test.ts:214 assigns deltaOperation by exact delta heading and scenario inheritance](/test/contract/parser.test.ts#L214)
+WHEN a scenario follows an identified requirement in the same active section, THE spec-check tool SHALL retain that requirement's identifier as the scenario parent independently of whether either statement is formally eligible.
 
 #### Scenario: Scenario Without Identified Parent Preserved [CAT-EARS-NO-PARENT]
-IF the parser reads a scenario whose most recently parsed requirement has no identifier, OR if the parser reads a scenario before any requirement heading in the active section, THEN THE spec-check tool SHALL preserve the scenario in parsed output with no parent requirement identifier.
-
-**Postcondition:** Downstream merge logic receives enough structure to surface unsupported standalone scenario content deterministically.
-
-##### Evidence
-- Implementation: [spec.ts:236 parseScenario()](/src/domain/parser/spec.ts#L236)
-- Test: [parser.test.ts:303 keeps parentRequirementIdentifier undefined when scenario has no preceding requirement](/test/contract/parser.test.ts#L303)
+IF a scenario has no identified enclosing requirement in the active section, THEN THE spec-check tool SHALL preserve the scenario with no parent identifier for deterministic merge diagnostics.
 
 #### Scenario: Finalized Spec Delta Heading Ignored [CAT-EARS-FINAL-DELTA]
-IF a finalized spec contains one or more delta section headings, THEN THE spec-check tool SHALL preserve all parsed requirements and scenarios as base content, SHALL emit at most one warning for that finalized spec file, and SHALL include the guidance text `finalized specs should not have Delta Spec Headings`.
-
-**Postcondition:** Malformed finalized specs remain analyzable without changing delta semantics silently.
-
-##### Evidence
-- Implementation: [spec.ts:43 parseSpec()](/src/domain/parser/spec.ts#L43), [merge.ts:88 mergeCapability()](/src/domain/parser/merge.ts#L88)
-- Test: [parser.test.ts:262 keeps finalized items at base operation and exact headings only](/test/contract/parser.test.ts#L262), [merge.test.ts:187 warns on finalized delta headings and renamed sections](/test/contract/merge.test.ts#L187)
+IF a finalized spec contains delta headings, THEN THE spec-check tool SHALL treat its items as base content and SHALL emit at most one warning containing `finalized specs should not have Delta Spec Headings` for that file.
 
 #### Scenario: Exact Delta Heading Recognition Only [CAT-EARS-EXACT]
-WHEN the parser evaluates section headings in a delta spec, THE spec-check tool SHALL change delta-operation context only for the exact headings `## ADDED Requirements`, `## MODIFIED Requirements`, `## REMOVED Requirements`, and `## RENAMED Requirements`.
-
-**Postcondition:** Approximate, case-variant, or otherwise non-exact heading text is treated as ordinary content and does not silently change semantics.
-
-##### Evidence
-- Implementation: [spec.ts:43 parseSpec()](/src/domain/parser/spec.ts#L43)
-- Test: [parser.test.ts:214 assigns deltaOperation by exact delta heading and scenario inheritance](/test/contract/parser.test.ts#L214), [parser.test.ts:262 keeps finalized items at base operation and exact headings only](/test/contract/parser.test.ts#L262)
+WHEN a delta heading is evaluated, THE spec-check tool SHALL change operation context only for exact `## ADDED Requirements`, `## MODIFIED Requirements`, `## REMOVED Requirements`, or `## RENAMED Requirements` headings outside fenced content.
 
 #### Scenario: Pre-Section Delta Content Preserved Structurally [CAT-EARS-PRE-SECTION]
-IF the parser reads requirements or scenarios in a delta spec before the first recognized delta section heading, THEN THE spec-check tool SHALL assign `deltaOperation: "pre-section"` to those parsed items so the merge layer can deterministically identify and exclude them.
+IF a delta item occurs before a recognized delta heading, THEN THE spec-check tool SHALL preserve it with `pre-section` context and original source structure for merge exclusion findings.
 
-**Postcondition:** The merge layer can emit deterministic `spec_merge.pre_section_content` findings without losing source provenance or structure.
+#### Scenario: Malformed Clause Order Rejected [CAT-EARS-STRICT]
+IF a statement has reversed drivers, missing required commas or `THEN`, empty clauses, multiple primary modals, unclosed quoting, or trailing normative statements, THEN THE spec-check tool SHALL diagnose the precise source span and SHALL exclude the affected statement from formalization.
 
-##### Evidence
-- Implementation: [spec.ts:43 parseSpec()](/src/domain/parser/spec.ts#L43), [merge.ts:159 partitionDelta()](/src/domain/parser/merge.ts#L159)
-- Test: [parser.test.ts:214 assigns deltaOperation by exact delta heading and scenario inheritance](/test/contract/parser.test.ts#L214), [merge.test.ts:161 surfaces pre-section content](/test/contract/merge.test.ts#L161)
+#### Scenario: Keyword Substrings Remain Prose [CAT-EARS-TOKENS]
+WHEN a keyword-like substring appears inside a word, quote, inline code span, or response content, THE spec-check tool SHALL treat it as clause content rather than as a structural driver.
+
+#### Scenario: Optional Feature Extension Requires Selection [CAT-EARS-WHERE]
+IF a statement uses `WHERE` without the configured `where` extension, THEN THE spec-check tool SHALL retain its recognized extension structure and SHALL report formal ineligibility with extension-enablement guidance.
+
+**Postcondition:** With `analysis.earsExtensions: ["where"]`, the same well-formed statement is eligible; the default extension list is empty.
+
+#### Scenario: Modal Tokens And Negation Preserved [CAT-EARS-MODALS]
+WHEN a statement uses `SHALL`, `MUST`, `SHOULD`, or `MAY`, THE spec-check tool SHALL retain that structural modal and SHALL allow explicit response negation for `SHALL NOT`, `MUST NOT`, or `SHOULD NOT`.
+
+#### Scenario: Ambiguous Permission Negation Rejected [CAT-EARS-MAY-NOT]
+IF a statement uses `MAY NOT`, THEN THE spec-check tool SHALL diagnose ambiguous permission negation rather than infer a prohibition.
 
 #### Requirement model
 
 ```alloy
-// --- EARS pattern recognition and parse phase ---
-// EARS keyword matching (WHEN/THE...SHALL, IF/THEN, WHILE/THE...SHALL) is a
-// syntactic property; the model captures the obligation that non-conforming
-// requirements produce findings.
-// Delta operation assignment, scenario-parent association, and failure modes
-// are modeled as structural invariants on parse output.
+// --- Strict surface parsing and source-section scanner ---
+// Preconditions: bounded source observations supplied by the lexer.
+// Postconditions: retain all items, including excluded statements and orphans.
+// Grammar defect atoms represent the precise source-span diagnostics; no
+// optional extension or justification silently repairs malformed EARS.
+
+one sig ParserOptions { whereEnabled : one Bool }
+fun delta_boundaries[d : ParsedDoc] : set SourceElement {
+  { e : d.elements | some e.exactOperation and e.fenced = False }
+}
+fun preceding_boundary[r : Requirement] : lone SourceElement {
+  { e : delta_boundaries[r.doc] & r.at.prior |
+    no later : delta_boundaries[r.doc] & r.at.prior | e in later.prior }
+}
+fun source_operation[r : Requirement] : one DeltaOperation {
+  r.doc.isDelta = False => DeltaBase else
+    (some preceding_boundary[r] => preceding_boundary[r].exactOperation else PreSection)
+}
+fun enclosing_requirement[r : Requirement] : lone Requirement {
+  { p : Requirement | r.scenario = True and p.scenario = False and
+    p.doc = r.doc and p.at in r.at.prior and p.identified = True and
+    // A new requirement (identified or not) or an exact delta heading resets parent.
+    (no q : Requirement | q.scenario = False and q.doc = r.doc and
+      p.at in q.at.prior and q.at in r.at.prior) and
+    (no e : delta_boundaries[r.doc] & r.at.prior | p.at in e.prior) }
+}
+
+fun syntax_issues[r : Requirement] : set SurfaceIssueKind {
+  r.grammarIssues +
+    ((r.modal = MayModal and r.responseNegated = True) => MayNotAmbiguous else none)
+}
+pred ears_structure_supported[r : Requirement] {
+  some r.observedForm
+  some r.modal
+  no syntax_issues[r]
+}
+pred justified_alternative_supported[r : Requirement] {
+  r.supportedAlternative = True
+  r.escapeHatch = True
+}
+fun surface_issues[r : Requirement] : set SurfaceIssueKind {
+  syntax_issues[r] + metadata_issues[r] +
+    (r.withinBound = False => StatementLimit else none) +
+    ((r.observedForm = OptionalFeature and ParserOptions.whereEnabled = False) => WhereDisabled else none) +
+    ((not ears_structure_supported[r] and not justified_alternative_supported[r] and
+       scenario_form[r] not in ExampleForm + ProhibitedExampleForm) => UnsupportedRepresentation else none)
+}
+pred surface_eligible[r : Requirement] {
+  no surface_issues[r]
+  ears_structure_supported[r] or justified_alternative_supported[r] or
+    scenario_form[r] in ExampleForm + ProhibitedExampleForm
+}
+pred parser_item_contract[r : Requirement] {
+  r.deltaOp = source_operation[r]
+  r.parentReqId = enclosing_requirement[r]
+  r.earsType = (ears_structure_supported[r] => r.observedForm else none)
+  fragment_contract[r]
+  clause_contract[r]
+  disposition_contract[r]
+}
 
 pred parse_phase {
-  // Guard: DependencyCheck completed, no prior fatal outcome
+  // Guard: admitted dependencies, exactly one parse per active file.
   DependencyCheck in RunState.completedPhases
   Parse not in RunState.completedPhases
   no RunState.lastOutcome
-  // Every active catalog file produces exactly one parsed doc
+  RunState.parsedDocs' = { d : ParsedDoc | d.source in RunState.activeCatalog.source }
   RunState.parsedDocs'.source = RunState.activeCatalog.source
-  all p : InputPath | lone { d : RunState.parsedDocs' | d.source = p }
-  // New findings have provenance in the active catalog
-  all f : RunState.findings' - RunState.findings |
-    f.sourceFile in RunState.activeCatalog.source
-  // EARS: non-EARS, non-escape-hatch requirements produce EarsWarning findings
-  all r : Requirement | (r.doc in RunState.parsedDocs' and no r.earsType and r.escapeHatch = False)
-    implies (some f : RunState.findings' | f.sourceFile = r.doc.source and f.kind = EarsWarning)
-  // Unparsed content surfaced as ParseWarning (enforces no_silent_parser_loss)
-  all d : RunState.parsedDocs' | d.hasUnmatched = True implies
-    (some f : RunState.findings' | f.sourceFile = d.source and f.kind = ParseWarning)
-  // Delta operation assignment: every requirement gets a delta op
-  all r : Requirement | r.doc in RunState.parsedDocs' implies some r.deltaOp
-  // Finalized docs have all requirements at DeltaBase
-  all r : Requirement | (r.doc in RunState.parsedDocs' and r.doc.isDelta = False)
-    implies r.deltaOp = DeltaBase
-  // Delta docs: items before first heading get PreSection
-  // (exact heading recognition is syntactic; the invariant is completeness)
-  all r : Requirement | (r.doc in RunState.parsedDocs' and r.doc.isDelta = True)
-    implies r.deltaOp in (PreSection + DeltaAdded + DeltaModified + DeltaRemoved + DeltaRenamed)
-  // Scenario-parent: scenarios inherit parent's delta operation
-  all r : Requirement | (r.doc in RunState.parsedDocs' and some r.parentReqId)
-    implies r.deltaOp = r.parentReqId.deltaOp
-  // Pre-section items always produce PreSectionWarning findings
-  all r : Requirement | (r.doc in RunState.parsedDocs' and r.deltaOp = PreSection)
-    implies (some f : RunState.findings' | f.sourceFile = r.doc.source and f.kind = PreSectionWarning)
-  // Findings monotonic
+  all p : RunState.activeCatalog.source | one d : RunState.parsedDocs' | d.source = p
+  all r : Requirement | r.doc in RunState.parsedDocs' implies parser_item_contract[r]
+  // Every limitation has a source-attributed structural diagnostic.
+  all r : Requirement | r.doc in RunState.parsedDocs' and some surface_issues[r] implies
+    some f : RunState.findings' - RunState.findings |
+      f.kind = EarsWarning and f.sourceFile = r.doc.source and
+      f.location in r.fragments and some f.location
+  all d : RunState.parsedDocs' | {
+    all u : d.unmatched | some f : RunState.findings' - RunState.findings |
+      f.kind = ParseWarning and f.sourceFile = d.source and f.location = u
+    // Finalized delta headings warn once per file, not once per heading.
+    d.isDelta = False and some delta_boundaries[d] implies
+      one f : RunState.findings' - RunState.findings |
+        f.kind = DeltaHeadingWarning and f.sourceFile = d.source
+    some r : Requirement | r.doc = d and r.deltaOp = PreSection implies
+      some f : RunState.findings' - RunState.findings |
+        f.kind = PreSectionWarning and f.sourceFile = d.source
+  }
+  // Findings cannot invent defects in clean inputs.
+  all f : RunState.findings' - RunState.findings | {
+    f.kind in EarsWarning + ParseWarning + DeltaHeadingWarning + PreSectionWarning
+    f.kind = EarsWarning implies some r : Requirement |
+      r.doc in RunState.parsedDocs' and r.doc.source = f.sourceFile and some surface_issues[r]
+    f.kind = ParseWarning implies some d : RunState.parsedDocs' |
+      d.source = f.sourceFile and f.location in d.unmatched and some f.location
+    f.kind = DeltaHeadingWarning implies some d : RunState.parsedDocs' |
+      d.source = f.sourceFile and d.isDelta = False and some delta_boundaries[d]
+    f.kind = PreSectionWarning implies some r : Requirement |
+      r.doc in RunState.parsedDocs' and r.doc.source = f.sourceFile and r.deltaOp = PreSection
+  }
   RunState.findings in RunState.findings'
-  // Effect
+  all f : RunState.findings' - RunState.findings | f.sourceFile in RunState.parsedDocs'.source
   RunState.completedPhases' = RunState.completedPhases + Parse
   RunState.catalog' = RunState.catalog
   RunState.activeCatalog' = RunState.activeCatalog
@@ -1274,65 +1582,50 @@ pred parse_phase {
   RunState.emptyCatalogReason' = RunState.emptyCatalogReason
 }
 
-// Failure mode: finalized spec contains delta headings (non-fatal, produces warning)
-pred parse_finalized_delta_warning {
-  // Guard: during parse, a finalized spec has delta section headings
-  DependencyCheck in RunState.completedPhases
-  Parse not in RunState.completedPhases
-  // Postcondition: at most one DeltaHeadingWarning per finalized file with delta headings
-  some d : RunState.parsedDocs' | (d.isDelta = False) and
-    (some f : RunState.findings' - RunState.findings |
-      f.sourceFile = d.source and f.kind = DeltaHeadingWarning)
-  // All requirements in that doc remain at DeltaBase despite headings
-  all r : Requirement | (r.doc in RunState.parsedDocs' and r.doc.isDelta = False)
-    implies r.deltaOp = DeltaBase
-}
-
-// Failure mode: pre-section content in delta spec (non-fatal, produces warning)
-pred parse_pre_section_content {
-  // Guard: during parse, a delta spec has content before first delta heading
-  DependencyCheck in RunState.completedPhases
-  Parse not in RunState.completedPhases
-  // Postcondition: pre-section items get PreSection delta op and produce findings
-  some r : Requirement | (r.doc in RunState.parsedDocs' and r.doc.isDelta = True
-    and r.deltaOp = PreSection) and
-    (some f : RunState.findings' - RunState.findings |
-      f.sourceFile = r.doc.source and f.kind = PreSectionWarning)
-}
-
-// Safety: every non-EARS, non-escape-hatch requirement produces a finding
+// Safety: every parsed item with surface limitations has a diagnostic.
 assert non_ears_produces_finding {
   always (Parse in RunState.completedPhases implies
-    all r : Requirement | (r.doc in RunState.parsedDocs and no r.earsType and r.escapeHatch = False)
-      implies (some f : RunState.findings | f.sourceFile = r.doc.source and f.kind = EarsWarning))
+    all r : Requirement | r.doc in RunState.parsedDocs and some surface_issues[r] implies
+      some f : RunState.findings | f.kind = EarsWarning and f.sourceFile = r.doc.source)
 }
-
-// Safety: delta operation is always assigned to every requirement after parse
+// Safety: each parsed item has the operation derived from its source section.
 assert delta_op_always_assigned {
   always (Parse in RunState.completedPhases implies
-    all r : Requirement | r.doc in RunState.parsedDocs implies some r.deltaOp)
+    all r : Requirement | r.doc in RunState.parsedDocs implies r.deltaOp = source_operation[r])
 }
-
-// Safety: finalized documents never have non-Base delta operations
+// Safety: finalized items remain base content despite delta headings.
 assert finalized_always_base {
   always (Parse in RunState.completedPhases implies
-    all r : Requirement | (r.doc in RunState.parsedDocs and r.doc.isDelta = False)
-      implies r.deltaOp = DeltaBase)
+    all r : Requirement | r.doc in RunState.parsedDocs and r.doc.isDelta = False implies r.deltaOp = DeltaBase)
 }
-
-// Safety: scenario inherits parent's delta operation when parent exists
+// Safety: a scenario and its identified parent share document and delta context.
 assert scenario_inherits_parent_delta {
   always (Parse in RunState.completedPhases implies
-    all r : Requirement | (r.doc in RunState.parsedDocs and some r.parentReqId)
-      implies r.deltaOp = r.parentReqId.deltaOp)
+    all r : Requirement | r.doc in RunState.parsedDocs and some r.parentReqId implies
+      r.parentReqId.doc = r.doc and r.parentReqId.deltaOp = r.deltaOp)
 }
-
-// Safety: pre-section content is never silently promoted to a real delta operation
+// Safety: eligibility cannot change the source-derived scenario parent.
+assert scenario_parent_is_independent_of_eligibility {
+  always (Parse in RunState.completedPhases implies
+    all r : Requirement | r.doc in RunState.parsedDocs implies
+      r.parentReqId = enclosing_requirement[r])
+}
+// Safety: delta items preceding an exact boundary remain pre-section content.
 assert pre_section_never_promoted {
   always (Parse in RunState.completedPhases implies
-    all r : Requirement | (r.doc in RunState.parsedDocs and r.deltaOp = PreSection)
-      implies (some f : RunState.findings | f.sourceFile = r.doc.source and
-               f.kind = PreSectionWarning))
+    all r : Requirement | r.doc in RunState.parsedDocs and r.doc.isDelta = True and
+      no preceding_boundary[r] implies r.deltaOp = PreSection)
+}
+// Safety: syntax defects, byte limits and disabled extensions prevent eligibility.
+assert malformed_or_disabled_forms_never_admitted {
+  all r : Requirement | some syntax_issues[r] or r.withinBound = False or
+    (r.observedForm = OptionalFeature and ParserOptions.whereEnabled = False) implies
+      not surface_eligible[r]
+}
+// Safety: fenced and inexact headings cannot change delta context.
+assert only_exact_unfenced_headings_change_delta_context {
+  all r : Requirement | some preceding_boundary[r] implies
+    preceding_boundary[r].fenced = False and some preceding_boundary[r].exactOperation
 }
 ```
 
@@ -1381,6 +1674,13 @@ assert no_silent_parser_loss {
 assert findings_monotonic {
   always (RunState.findings in RunState.findings')
 }
+
+// Safety: each raw unmatched fragment survives with its observed source location.
+assert every_unmatched_fragment_is_evidence {
+  always (parse_phase implies all d : RunState.parsedDocs' | all u : d.unmatched |
+    some f : RunState.findings' | f.kind = ParseWarning and f.location = u and
+      f.sourceFile = u.file and f.sourceFile = d.source)
+}
 ```
 
 ### Requirement: Parser Determinism [CAT-PARSE-DETERMINISM]
@@ -1404,18 +1704,36 @@ WHEN the same document content is parsed on two separate runs, THE spec-check to
 #### Requirement model
 
 ```alloy
-// --- Parser determinism: functional refinement ---
-// Since Alloy atoms represent identity, two InputPaths with the same
-// content are the same atom. Determinism means each InputPath produces
-// at most one ParsedDoc in any completed parse phase.
+// --- Parser determinism: implementation boundary contract ---
+// Paths and content are distinct identities; equal bytes do not imply equal paths.
+// Repeated runs compare ordered serialized outputs for the same full parser input
+// (bytes, provenance, finalized/delta source type and effective options).
+// Byte-identical serialization is established by determinism/property tests.
+// ParseEvaluation records that external contract; it is not a second parser
+// implementation or an independent Alloy proof of serialization determinism.
+sig ParseInput {
+  path : one InputPath, bytes : one SourceText,
+  deltaSource : one Bool, whereOption : one Bool, boundOption : one SettingValue
+}
+sig ParseEvaluation { input : one ParseInput, serialized : one SourceText }
+pred same_parser_input[a, b : ParseInput] {
+  a.path = b.path and a.bytes = b.bytes and a.deltaSource = b.deltaSource and
+    a.whereOption = b.whereOption and a.boundOption = b.boundOption
+}
+// Safety contract (externally verified): equal full inputs have equal output bytes.
+pred repeated_parse_contract {
+  all a, b : ParseEvaluation | same_parser_input[a.input, b.input] implies
+    a.serialized = b.serialized
+}
 
 pred parse_is_functional {
   all p : InputPath |
     lone { d : RunState.parsedDocs | d.source = p }
 }
 
-// Safety: parse output is a deterministic function of input content
-assert parse_deterministic {
+// Safety: one completed parse retains at most one document per source path.
+// This is a within-run uniqueness check, not cross-run byte determinism.
+assert parsed_sources_are_unique {
   always (Parse in RunState.completedPhases implies parse_is_functional)
 }
 ```
@@ -1459,11 +1777,59 @@ IF a pipeline phase fails fatally, THEN THE spec-check tool SHALL emit a progres
 
 ```alloy
 // --- Progress event emission and pipeline lifecycle ---
-// Progress events are modeled as obligations on phase transitions
-// rather than tracked state. The key properties are:
-// - Every phase transition produces an event (safety)
+// A phase's started/terminal events are projected from its atomic transition.
+// The projection records event membership, not emission order or wall-clock
+// interleaving. Progress/phase-runner tests establish JSON encoding, timestamps,
+// started-before-terminal ordering and failure emission before process exit.
+// The key properties are:
+// - Under the external emission contract, every phase has its required events
 // - A valid pipeline eventually reaches completion (liveness)
 // Failure mode: phase failure emits "failed" event (modeled as outcome, not state)
+
+abstract sig ProgressStatus {}
+one sig ProgressStarted, ProgressCompleted, ProgressFailed extends ProgressStatus {}
+sig ProgressEvent {
+  phase : one Phase,
+  status : one ProgressStatus,
+  timestamp : one SourceText, // ISO timestamp encoding is an external observation
+  duration : lone Int,
+  jsonLineOnStdout : one Bool
+}
+fun failing_phase : lone Phase {
+  cli_rejected => CliValidate else
+  ((config_load_fail or config_invalid_model) => ConfigLoad else
+  (((some p : InputPath | discover_reject_unreadable[p]) or
+    discover_empty_no_docs or discover_empty_all_archived or discover_empty_all_filtered) => Discover else
+  ((deps_missing_opencode or deps_missing_z3) => DependencyCheck else
+  ((struct_validate_phase and RunState.lastOutcome' = InputError) => StructValidate else none))))
+}
+fun progress_obligations : Phase -> ProgressStatus {
+  (RunState.completedPhases' - RunState.completedPhases) -> (ProgressStarted + ProgressCompleted) +
+    failing_phase -> (ProgressStarted + ProgressFailed)
+}
+fun emitted_progress : set ProgressEvent {
+  { e : ProgressEvent | e.phase -> e.status in progress_obligations }
+}
+pred progress_emission_contract {
+  all p : Phase, s : ProgressStatus | p -> s in progress_obligations implies
+    one e : emitted_progress | e.phase = p and e.status = s
+  all e : emitted_progress | {
+    e.jsonLineOnStdout = True
+    e.status = ProgressCompleted implies one e.duration and e.duration >= 0
+  }
+}
+// Safety: the external emission contract covers completed-phase event fields.
+// Conditional projection checks do not prove the stdout implementation.
+assert phase_transitions_emit_json_progress {
+  always (progress_emission_contract implies all p : RunState.completedPhases' - RunState.completedPhases |
+    one e : emitted_progress | e.phase = p and e.status = ProgressCompleted and
+      one e.duration and e.jsonLineOnStdout = True)
+}
+// Safety: the external emission contract includes a failing-phase event.
+assert fatal_phase_has_failure_event {
+  always (progress_emission_contract and some failing_phase implies
+    one e : emitted_progress | e.phase = failing_phase and e.status = ProgressFailed)
+}
 
 pred emit_phase {
   // Guard: StructValidate completed, no prior fatal outcome
@@ -1512,9 +1878,9 @@ assert success_requires_all_phases {
 
 // Liveness: if CLI validation succeeds and no phase fails fatally,
 // the pipeline eventually reaches the Emit phase.
-// Strong fairness: each phase's success transition eventually fires
-// when its guard holds, modeling a cooperative environment (valid
-// inputs, valid config, available dependencies).
+// Cooperative success-path scheduling: enabled phases are eventually serviced.
+// This premise intentionally excludes invalid input and unavailable dependencies;
+// failure traces are checked separately and can stutter after their outcome.
 pred pipeline_fairness {
   // If CLI validation is enabled (initial state), it eventually succeeds
   always (no RunState.completedPhases implies
@@ -1545,6 +1911,7 @@ pred pipeline_fairness {
     eventually emit_phase)
 }
 
+// Liveness: success-path scheduling eventually completes the pipeline.
 assert pipeline_progress_liveness {
   pipeline_fairness implies eventually (Emit in RunState.completedPhases)
 }
@@ -1558,9 +1925,16 @@ pred failure_terminates {
     ((some p : InputPath | discover_reject_unreadable[p]) implies
       eventually some RunState.lastOutcome) and
     ((deps_missing_opencode or deps_missing_z3) implies
+      eventually some RunState.lastOutcome) and
+    (config_invalid_model implies eventually some RunState.lastOutcome) and
+    ((discover_empty_no_docs or discover_empty_all_archived or discover_empty_all_filtered) implies
+      eventually some RunState.lastOutcome) and
+    ((struct_validate_phase and RunState.lastOutcome' = InputError) implies
       eventually some RunState.lastOutcome))
 }
 
+// Liveness: an executed fatal transition eventually yields a terminal outcome.
+// This does not require failure transitions to be scheduled instead of stuttering.
 assert no_silent_hang {
   failure_terminates
 }
@@ -1656,6 +2030,31 @@ assert oc_signal_is_spawn_error {
   all p : OCProbe | p.signalled = True and p.timedOut = False and
     p.overflow = False implies oc_detection_cause[p] = OCSpawnError
 }
+
+// Presentation is separate from canonical descriptor identity. The character
+// count/escaping observations are established by presentation contract tests.
+sig OCVersionPresentation {
+  probe : one OCProbe,
+  retainedVersion : one OCText,
+  displayedVersion : one OCText,
+  inert : one Bool,
+  within300Characters : one Bool
+}
+pred oc_presentation_contract[p : OCVersionPresentation] {
+  p.retainedVersion = p.probe.canonicalVersion
+  p.inert = True
+  p.within300Characters = True
+}
+// Safety contract (externally verified): presentation remains bounded/inert and
+// retains canonical identity. Presentation tests establish these observations;
+// repeating the contract as an assertion would not independently verify them.
+// Safety: timeout takes detection priority, followed by capture overflow.
+assert oc_timeout_and_overflow_have_priority {
+  all p : OCProbe | {
+    p.timedOut = True implies oc_detection_cause[p] = OCTimeout
+    p.timedOut = False and p.overflow = True implies oc_detection_cause[p] = OCOutputLimit
+  }
+}
 ```
 
 ### Requirement: Preserve Run Protocol Identity [CAT-OC-RUNTIME]
@@ -1726,17 +2125,36 @@ assert oc_resolution_failure_is_pre_spawn {
   all c : OCCall | oc_call_error[c] in OCInvalidModel + OCInvalidRequest + OCRuntimeMismatch and
     some oc_call_error[c] implies no oc_call_probes[c] and no oc_resolved_runtime[c]
 }
+
+// Pipeline calls inherit the run descriptor. Direct calls can still explicitly
+// override a scope according to the separately modeled precedence contract.
+pred oc_pipeline_call_contract[c : OCCall] {
+  oc_run_contract[c.owner]
+  oc_call_contract[c]
+  no c.explicitRuntime
+  c.scopedRuntime = c.owner.runtime
+}
+// Safety: pipeline calls reuse the run descriptor without another probe.
+assert oc_pipeline_calls_reuse_one_run_probe {
+  all c : OCCall | oc_pipeline_call_contract[c] and no oc_call_error[c] implies
+    oc_resolved_runtime[c] = c.owner.runtime and no oc_call_probes[c]
+}
+// Safety: direct detection failure permits neither resolution nor model attempts.
+assert oc_direct_detection_failure_is_terminal {
+  all c : OCCall | oc_call_error[c] = OCRuntimeDetectionFailure implies
+    no oc_resolved_runtime[c] and no oc_attempts_allowed[c]
+}
 ```
 
 ### Requirement: Normalize OpenCode Model Selection [CAT-OC-MODEL]
-WHEN resolving an effective model setting, THE spec-check tool SHALL normalize it into a base model and optional variant, enforce Luna=`max` and Terra=`high` for the existing `github-copilot/gpt-5.6-*` fixed-policy models, and use that same semantic selection for invocation and telemetry.
+WHEN resolving an effective model setting, THE spec-check tool SHALL normalize it into a base model and optional variant, enforce Luna=`max`, Terra=`high`, and Sol=`high` for `github-copilot/gpt-5.6-luna`, `github-copilot/gpt-5.6-terra`, and `github-copilot/gpt-6.1-sol` respectively, and use that same semantic selection for invocation and telemetry. WHEN neither CLI nor configuration selects a model, THE spec-check tool SHALL default to `github-copilot/gpt-6.1-sol#high`.
 
 **References:**
 - `openspec/changes/archive/2026-10-21-support-opencode-v2/proposal.md#Invariants`
 - `openspec/changes/archive/2026-10-21-support-opencode-v2/design.md#Model-Encoding`
 
 #### Scenario: Preserve Bare Model Selection [CAT-OC-MODEL-BARE]
-WHEN the effective model contains no `#` and satisfies existing nonempty-model validation, THE spec-check tool SHALL preserve its base value, apply the fixed variant for Luna/Terra, and leave other models without a forced variant.
+WHEN the effective model contains no `#` and satisfies existing nonempty-model validation, THE spec-check tool SHALL preserve its base value, apply the fixed variant for Luna/Terra/Sol, and leave other models without a forced variant.
 
 ##### Evidence
 - Implementation: [opencode-model.ts:31 normalizeOpencodeModel()](/src/domain/opencode-model.ts#L31), [opencode-model.ts:17 variantForModel()](/src/domain/opencode-model.ts#L17)
@@ -1783,7 +2201,7 @@ pred oc_model_valid[m : OCModel] {
   (some m.explicitVariant and some oc_fixed_variant[m]) implies
     m.explicitVariant = oc_fixed_variant[m]
 }
-// Safety: accepted Luna/Terra selections preserve their fixed reasoning variants.
+// Safety: accepted Luna/Terra/Sol selections preserve their fixed reasoning variants.
 assert oc_fixed_variant_is_enforced {
   all m : OCModel | oc_model_valid[m] and some oc_fixed_variant[m] implies
     oc_normalized_variant[m] = oc_fixed_variant[m]
@@ -1792,6 +2210,53 @@ assert oc_fixed_variant_is_enforced {
 assert oc_invalid_model_never_probes {
   all c : OCCall | not oc_model_valid[c.model] implies
     oc_call_error[c] = OCInvalidModel and no oc_call_probes[c] and no oc_resolved_runtime[c]
+}
+
+// Effective settings select the named default only when CLI/config are absent.
+one sig DefaultSolBase in OCText {}
+sig EffectiveModelInput { cliModel : lone OCModel, fileModel : lone OCModel }
+fun effective_model_base[i : EffectiveModelInput] : one OCText {
+  some i.cliModel => i.cliModel.base else
+    (some i.fileModel => i.fileModel.base else DefaultSolBase)
+}
+fun effective_model_variant[i : EffectiveModelInput] : lone OCVariant {
+  some i.cliModel => oc_normalized_variant[i.cliModel] else
+    (some i.fileModel => oc_normalized_variant[i.fileModel] else OCHigh)
+}
+// Safety: absent CLI/file selection resolves to the Sol/high default.
+assert model_default_is_sol_high {
+  all i : EffectiveModelInput | no i.cliModel + i.fileModel implies
+    effective_model_base[i] = DefaultSolBase and effective_model_variant[i] = OCHigh
+}
+// CLI model rejection precedes discovery/dependency work; it is ConfigError
+// exit 3, distinct from malformed JSON/shape (ConfigError exit 2).
+pred config_invalid_model {
+  CliValidate in RunState.completedPhases
+  ConfigLoad not in RunState.completedPhases
+  no RunState.lastOutcome
+  Invocation.configRead in ConfigAbsent + ConfigValid
+  Invocation.preflight.effectiveModelValid = False
+  RunState.completedPhases' = RunState.completedPhases
+  RunState.findings' = RunState.findings
+  RunState.catalog' = RunState.catalog
+  RunState.activeCatalog' = RunState.activeCatalog
+  RunState.parsedDocs' = RunState.parsedDocs
+  RunState.lastOutcome' = ConfigError
+  RunState.emptyCatalogReason' = RunState.emptyCatalogReason
+}
+abstract sig CLIExitCode {}
+one sig ExitZero, ExitTwo, ExitThree, ExitFour extends CLIExitCode {}
+fun terminal_exit : lone CLIExitCode {
+  RunState.lastOutcome = CmdSuccess => ExitZero else
+  (RunState.lastOutcome = DependencyError => ExitFour else
+  (RunState.lastOutcome = ConfigError and Invocation.preflight.effectiveModelValid = False and
+    Invocation.configRead in ConfigAbsent + ConfigValid => ExitThree else
+  (some RunState.lastOutcome => ExitTwo else none)))
+}
+// Safety: invalid effective model selection stops before dependency work.
+assert invalid_effective_model_stops_before_dependencies {
+  always (config_invalid_model implies
+    RunState.lastOutcome' = ConfigError and DependencyCheck not in RunState.completedPhases')
 }
 ```
 
@@ -1890,6 +2355,199 @@ assert oc_parent_exit_does_not_suppress_group_request {
 // Windows requests remain bounded best effort, without POSIX kill guarantees.
 ```
 
+### Requirement: Separate Statements From Supporting Content [CAT-STATEMENT-SPANS]
+WHEN the spec-check tool extracts requirement or scenario content, THE spec-check tool SHALL separate the statement, references, justification, postcondition, metadata, fenced models, evidence, and supplementary content with reversible source spans.
+
+**References:**
+- [Design: Source and identity](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#source-and-identity)
+
+#### Scenario: Embedded Model Remains Separate [CAT-SPANS-FENCES]
+WHEN a requirement block contains a fenced Alloy model or evidence section, THE spec-check tool SHALL retain it separately and SHALL omit it from EARS statement text and admitted SMT assumptions.
+
+#### Scenario: Normalized Text Maps To Source [CAT-SPANS-NORMALIZE]
+WHEN multiline text or CRLF input is normalized, THE spec-check tool SHALL retain original source mapping so every clause diagnostic identifies its source range without inventing line positions.
+
+#### Scenario: Source Statement Limit Is Visible [CAT-SPANS-BOUND]
+IF a statement exceeds the effective byte bound of 65,536 bytes by default, THEN THE spec-check tool SHALL preserve its source reference and SHALL emit an explicit eligibility limitation before model work.
+
+#### Requirement model
+
+```alloy
+// --- Source extraction boundary contract ---
+// Preconditions: raw fragments and source-map observations belong to the file.
+// Effects/Frames: none; all retained source objects are immutable.
+// The bound is an observed comparison against the effective limit (default
+// 65,536 UTF-8 bytes), avoiding overflow in Alloy's bounded integer arithmetic.
+// Source-map round trips, point ordering, exact clause subranges and original
+// spelling are established by parser contract/property tests. Alloy checks
+// item ownership, per-fragment map coverage and file provenance, not the lexer.
+fun statement_fragments[r : Requirement] : set SourceFragment {
+  { f : r.fragments | f.role = StatementContent }
+}
+fun supporting_fragments[r : Requirement] : set SourceFragment {
+  r.fragments - statement_fragments[r]
+}
+pred fragment_contract[r : Requirement] {
+  r.fragments.file in r.doc.source
+  some statement_fragments[r]
+  r.escapeHatch = True iff some f : r.fragments | f.role = JustificationContent
+  // Each fragment owns its modeled normalized offset domain, including the
+  // exclusive end. Synthetic join spaces may share a source position; totality
+  // is not an injectivity or exact-reversibility proof. Oversized input retains
+  // source evidence without requiring an unbounded per-character map.
+  r.withinBound = True implies all f : statement_fragments[r] |
+    all n : f.normalizedOffsets | one n.(f.offsetMap)
+  all k : r.declaredKinds | k.fragment in r.fragments and k.fragment.role = MetadataContent
+}
+pred clause_contract[r : Requirement] {
+  r.clauses.fragment in statement_fragments[r]
+  no r.clauses implies not ears_structure_supported[r]
+  ears_structure_supported[r] implies {
+    one c : r.clauses | c.role = SubjectClause
+    one c : r.clauses | c.role = ResponseClause
+    all cr : ClauseRole | lone c : r.clauses | c.role = cr
+    let drivers = r.clauses - { c : r.clauses | c.role in SubjectClause + ResponseClause } | {
+      r.observedForm = Ubiquitous implies no drivers
+      r.observedForm = StateDriven implies drivers.role = StateClause
+      r.observedForm = EventDriven implies drivers.role = TriggerClause
+      r.observedForm = UnwantedBehavior implies drivers.role = ConditionClause
+      r.observedForm = OptionalFeature implies drivers.role = FeatureClause
+      r.observedForm = Complex implies drivers.role = StateClause + TriggerClause
+    }
+    all c : r.clauses | {
+      c.priorClause in r.clauses
+      c not in c.priorClause
+      c.priorClause.priorClause in c.priorClause
+      c.role = ResponseClause implies c.priorClause = r.clauses - c
+      c.role = SubjectClause implies c.priorClause.role =
+        r.clauses.role - SubjectClause - ResponseClause
+      c.role = TriggerClause and r.observedForm = Complex implies c.priorClause.role = StateClause
+    }
+  }
+}
+// Parser-side candidate predicate slots, not solver-admitted assumptions.
+// Selected merged-view authority, predicate validation and query prerequisites
+// belong to the downstream capability models. Scenario postconditions supply
+// a scoped slot alongside the response, expected, or forbidden predicate.
+fun candidate_predicate_fragments[r : Requirement] : set SourceFragment {
+  not surface_eligible[r] => none else
+  ((scenario_form[r] = ExampleForm => { f : r.fragments | f.role in InputContent + ExpectedContent } else
+  (scenario_form[r] = ProhibitedExampleForm => { f : r.fragments | f.role in InputContent + ForbiddenContent } else
+     statement_fragments[r])) +
+    (r.scenario = True => fields[r, PostconditionContent] else none))
+}
+// Safety: supporting prose/models cannot become candidate predicate slots.
+assert supporting_prose_never_becomes_predicate_slots {
+  all r : Requirement | no candidate_predicate_fragments[r] &
+    { f : r.fragments | f.role in ReferenceContent + JustificationContent +
+      MetadataContent + FencedContent + EvidenceContent + SupplementaryContent }
+}
+// Safety: oversized statements retain source evidence without predicate slots.
+assert oversized_source_is_preserved_and_excluded {
+  always (Parse in RunState.completedPhases implies all r : Requirement |
+    r.doc in RunState.parsedDocs and r.withinBound = False implies
+      some statement_fragments[r] and StatementLimit in surface_issues[r] and
+      no candidate_predicate_fragments[r])
+}
+// Safety: clause observations refer to their item's original file.
+assert clause_spans_belong_to_original_file {
+  always (Parse in RunState.completedPhases implies all r : Requirement |
+    r.doc in RunState.parsedDocs implies r.clauses.fragment.file in r.doc.source)
+}
+```
+
+### Requirement: Admit Explicit Alternative And Scenario Forms [CAT-FORMAL-DISPOSITION]
+WHEN the spec-check tool evaluates a non-EARS representation or scenario, THE spec-check tool SHALL record its supported formal disposition and SHALL preserve unsupported content with a reason.
+
+**References:**
+- [Design: Surface grammar and annotations](../../changes/archive/2026-11-15-improve-ears-smt-analysis/design.md#surface-grammar-and-annotations)
+
+#### Scenario: Justification Does Not Supply Semantics [CAT-FORMAT-JUSTIFIED]
+IF a non-EARS requirement has `**Format justification:**` but no supported formal representation, THEN THE spec-check tool SHALL retain the justification and SHALL mark formalization unsupported rather than guess its logical structure.
+
+#### Scenario: Scenario Refinement Is The Default [CAT-SCENARIO-DEFAULT]
+WHEN an EARS scenario has no explicit scenario-kind metadata, THE spec-check tool SHALL classify it as a refinement and SHALL retain its postcondition scoped to that scenario.
+
+#### Scenario: Explicit Examples Are Distinguished [CAT-SCENARIO-EXAMPLE]
+WHEN a scenario declares `**Scenario kind:** example` or `prohibited-example`, THE spec-check tool SHALL classify it accordingly and SHALL require source-spanned `**Input:**` and respectively `**Expected:**` or `**Forbidden:**` fields for separate predicate formalization before solver admission.
+
+#### Scenario: Invalid Metadata Remains Visible [CAT-SCENARIO-METADATA]
+IF scenario-kind metadata is unknown or duplicated, THEN THE spec-check tool SHALL preserve it and SHALL diagnose the ambiguity instead of choosing a kind silently.
+
+#### Requirement model
+
+```alloy
+// --- Formal disposition and downstream admission ---
+// Preconditions: structured fields and metadata remain source-owned.
+// Invalid/duplicate kind declarations have no silently selected semantic kind.
+fun scenario_form[r : Requirement] : one ScenarioDisposition {
+  no r.declaredKinds => RefinementForm else
+    (one r.declaredKinds and r.declaredKinds.value != UnknownScenarioForm =>
+      r.declaredKinds.value else UnknownScenarioForm)
+}
+fun fields[r : Requirement, fr : FragmentRole] : set SourceFragment {
+  { f : r.fragments | f.role = fr }
+}
+fun metadata_issues[r : Requirement] : set SurfaceIssueKind {
+  (scenario_form[r] = UnknownScenarioForm => MetadataAmbiguous else none) +
+  ((scenario_form[r] = ExampleForm and
+    (no fields[r, InputContent] or no fields[r, ExpectedContent] or some fields[r, ForbiddenContent])) =>
+      MissingExampleFields else none) +
+  ((scenario_form[r] = ProhibitedExampleForm and
+    (no fields[r, InputContent] or no fields[r, ForbiddenContent] or some fields[r, ExpectedContent])) =>
+      MissingExampleFields else none)
+}
+pred disposition_contract[r : Requirement] {
+  // Supported alternative semantics are an external representation-validator
+  // observation. A justification is required but cannot itself supply semantics.
+  r.supportedAlternative = True implies
+    r.escapeHatch = True and some fields[r, StatementContent]
+}
+// Safety: justification alone cannot make unsupported non-EARS content eligible.
+assert justification_alone_is_not_formal_semantics {
+  all r : Requirement | r.escapeHatch = True and no r.observedForm and
+    r.supportedAlternative = False and scenario_form[r] = RefinementForm implies
+      not surface_eligible[r] and UnsupportedRepresentation in surface_issues[r]
+}
+// Safety: ambiguous scenario-kind metadata prevents eligibility.
+assert invalid_metadata_is_excluded {
+  all r : Requirement | scenario_form[r] = UnknownScenarioForm implies
+    MetadataAmbiguous in surface_issues[r] and not surface_eligible[r]
+}
+// Safety: eligible examples retain Input and the matching outcome field.
+assert examples_require_matching_source_fields {
+  all r : Requirement | surface_eligible[r] implies {
+    scenario_form[r] = ExampleForm implies
+      some fields[r, InputContent] and some fields[r, ExpectedContent] and no fields[r, ForbiddenContent]
+    scenario_form[r] = ProhibitedExampleForm implies
+      some fields[r, InputContent] and some fields[r, ForbiddenContent] and no fields[r, ExpectedContent]
+  }
+}
+
+// Safety: surface exclusion produces no candidate predicate slots.
+assert excluded_items_have_no_predicate_slots {
+  all r : Requirement | not surface_eligible[r] implies
+    no candidate_predicate_fragments[r]
+}
+// Safety: an eligible scenario's postcondition remains an item-local slot.
+assert scenario_postconditions_are_scoped {
+  all r : Requirement | parser_item_contract[r] and r.scenario = True and
+    surface_eligible[r] implies {
+      fields[r, PostconditionContent] in candidate_predicate_fragments[r]
+      all p : Requirement - r | no fields[r, PostconditionContent] &
+        candidate_predicate_fragments[p]
+    }
+}
+// Safety: bounded statements map precisely their own modeled offset domain.
+assert statement_maps_cover_owned_offsets {
+  all r : Requirement | fragment_contract[r] and r.withinBound = True implies
+    all f : statement_fragments[r] | (f.offsetMap).SourcePoint = f.normalizedOffsets
+}
+// Sampling and queries consume selected merged items, not all parsed items.
+// Their lifecycle is specified in merged-capability-analysis and formalization-
+// and-logic-analysis; this parser contract does not invent an independent run.
+```
+
 ### State machine and invariant checks
 ```alloy
 // --- Transition system ---
@@ -1927,6 +2585,7 @@ fact transitions {
     or config_load_success
     or config_load_fail_invalid_json
     or config_load_fail_bad_structure
+    or config_invalid_model
     // Discovery: success, unreadable, and 3 empty-catalog causes
     or discover_success
     or (some p : InputPath | discover_reject_unreadable[p])
@@ -1950,80 +2609,82 @@ fact transitions {
 
 // --- Scenario commands ---
 
-run show_spec_check {} for 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 8 steps
+run show_spec_check {} for 3 but 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 8 steps
 
 run scenario_full_pipeline {
-  eventually (Emit in RunState.completedPhases)
-} for 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 10 steps
+  always progress_emission_contract
+  some r : Requirement | r.observedForm = Complex and surface_eligible[r] and
+    eventually (Emit in RunState.completedPhases and r.doc in RunState.parsedDocs)
+} for 3 but 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 4 SourceClause, 14 ProgressEvent, 10 steps expect 1
 
 run scenario_config_failure_stops_pipeline {
   eventually (RunState.lastOutcome = ConfigError)
-} for 2 InputPath, 2 Artifact, 1 Capability, 2 Finding, 2 ParsedDoc, 1 Requirement, 5 steps
+} for 3 but 2 InputPath, 2 Artifact, 1 Capability, 2 Finding, 2 ParsedDoc, 1 Requirement, 14 ProgressEvent, 5 steps
 
 run scenario_empty_catalog_no_docs {
   eventually (RunState.emptyCatalogReason = NoRecognizedDocs)
-} for 2 InputPath, 2 Artifact, 1 Capability, 2 Finding, 2 ParsedDoc, 1 Requirement, 5 steps
+} for 3 but 2 InputPath, 2 Artifact, 1 Capability, 2 Finding, 2 ParsedDoc, 1 Requirement, 14 ProgressEvent, 5 steps
 
 run scenario_empty_catalog_all_archived {
   eventually (RunState.emptyCatalogReason = AllArchived)
-} for 2 InputPath, 3 Artifact, 1 Capability, 2 Finding, 2 ParsedDoc, 1 Requirement, 5 steps
+} for 3 but 2 InputPath, 3 Artifact, 1 Capability, 2 Finding, 2 ParsedDoc, 1 Requirement, 14 ProgressEvent, 5 steps
 
 run scenario_empty_catalog_all_filtered {
   eventually (RunState.emptyCatalogReason = AllFiltered)
-} for 2 InputPath, 3 Artifact, 1 Capability, 2 Finding, 2 ParsedDoc, 1 Requirement, 5 steps
+} for 3 but 2 InputPath, 3 Artifact, 1 Capability, 2 Finding, 2 ParsedDoc, 1 Requirement, 14 ProgressEvent, 5 steps
 
 run scenario_delta_conflict_surfaced {
   eventually (some f : RunState.findings | f.kind = DeltaConflict)
-} for 3 InputPath, 4 Artifact, 2 Capability, 4 Finding, 2 ParsedDoc, 2 Requirement, 8 steps
+} for 3 but 3 InputPath, 4 Artifact, 2 Capability, 4 Finding, 2 ParsedDoc, 2 Requirement, 14 ProgressEvent, 8 steps
 
 run scenario_finalized_delta_warning {
   eventually (some f : RunState.findings | f.kind = DeltaHeadingWarning)
-} for 2 InputPath, 3 Artifact, 1 Capability, 4 Finding, 2 ParsedDoc, 2 Requirement, 8 steps
+} for 3 but 2 InputPath, 3 Artifact, 1 Capability, 4 Finding, 2 ParsedDoc, 2 Requirement, 14 ProgressEvent, 8 steps
 
 run scenario_pre_section_warning {
   eventually (some f : RunState.findings | f.kind = PreSectionWarning)
-} for 2 InputPath, 3 Artifact, 1 Capability, 4 Finding, 2 ParsedDoc, 2 Requirement, 8 steps
+} for 3 but 2 InputPath, 3 Artifact, 1 Capability, 4 Finding, 2 ParsedDoc, 2 Requirement, 14 ProgressEvent, 8 steps
 
 run scenario_dep_failure {
   eventually (RunState.lastOutcome = DependencyError)
-} for 2 InputPath, 2 Artifact, 1 Capability, 2 Finding, 1 ParsedDoc, 1 Requirement, 5 steps
+} for 3 but 2 InputPath, 2 Artifact, 1 Capability, 2 Finding, 1 ParsedDoc, 1 Requirement, 14 ProgressEvent, 5 steps
 
 run scenario_timeout_rejection {
   eventually (cli_rejected_timeout_range)
-} for 1 InputPath, 1 Artifact, 1 Capability, 1 Finding, 1 ParsedDoc, 1 Requirement, 3 steps
+} for 3 but 1 InputPath, 1 Artifact, 1 Capability, 1 Finding, 1 ParsedDoc, 1 Requirement, 14 ProgressEvent, 3 steps
 
 // --- Safety checks ---
 
-check cli_rejection_blocks_analysis for 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check informational_no_analysis for 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check timeout_rejection_is_input_error for 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check invalid_config_blocks_downstream for 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check config_failure_outcome for 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check archived_never_active for 3 InputPath, 4 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 15 steps expect 0
-check at_most_one_delta_per_capability for 3 InputPath, 4 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 15 steps expect 0
-check empty_catalog_exactly_one_cause for 3 InputPath, 4 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check empty_catalog_stops_downstream for 3 InputPath, 4 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check delta_conflicts_surfaced for 3 InputPath, 4 Artifact, 2 Capability, 5 Finding, 3 ParsedDoc, 3 Requirement, 15 steps expect 0
-check no_llm_without_opencode for 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check no_solver_without_z3 for 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check dep_failure_outcome for 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check violations_produce_findings for 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check headless_excluded_from_downstream for 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check identifier_errors_surfaced for 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check non_ears_produces_finding for 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check delta_op_always_assigned for 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check finalized_always_base for 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check scenario_inherits_parent_delta for 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check pre_section_never_promoted for 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check no_silent_parser_loss for 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check findings_monotonic for 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 15 steps expect 0
-check parse_deterministic for 3 InputPath, 4 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 10 steps expect 0
-check completed_phases_monotonic for 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 15 steps expect 0
-check phase_ordering_respected for 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 15 steps expect 0
-check fatal_outcome_freezes_pipeline for 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 15 steps expect 0
-check success_requires_all_phases for 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 15 steps expect 0
-check no_silent_hang for 3 InputPath, 4 Artifact, 2 Capability, 5 Finding, 3 ParsedDoc, 3 Requirement, 15 steps expect 0
-check pipeline_progress_liveness for 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 20 steps expect 0
+check cli_rejection_blocks_analysis for 3 but 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 10 steps expect 0
+check informational_no_analysis for 3 but 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 10 steps expect 0
+check timeout_rejection_is_input_error for 3 but 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 10 steps expect 0
+check invalid_config_blocks_downstream for 3 but 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 10 steps expect 0
+check config_failure_outcome for 3 but 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 10 steps expect 0
+check archived_never_active for 3 but 3 InputPath, 4 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 15 steps expect 0
+check at_most_one_delta_per_capability for 3 but 3 InputPath, 4 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 15 steps expect 0
+check empty_catalog_exactly_one_cause for 3 but 3 InputPath, 4 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 10 steps expect 0
+check empty_catalog_stops_downstream for 3 but 3 InputPath, 4 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 10 steps expect 0
+check delta_conflicts_surfaced for 3 but 3 InputPath, 4 Artifact, 2 Capability, 5 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 15 steps expect 0
+check no_llm_without_opencode for 3 but 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 10 steps expect 0
+check no_solver_without_z3 for 3 but 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 10 steps expect 0
+check dep_failure_outcome for 3 but 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 10 steps expect 0
+check violations_produce_findings for 3 but 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 10 steps expect 0
+check headless_excluded_from_downstream for 3 but 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 10 steps expect 0
+check identifier_errors_surfaced for 3 but 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 10 steps expect 0
+check non_ears_produces_finding for 3 but 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 4 SourceClause, 14 ProgressEvent, 10 steps expect 0
+check delta_op_always_assigned for 3 but 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 4 SourceClause, 14 ProgressEvent, 10 steps expect 0
+check finalized_always_base for 3 but 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 4 SourceClause, 14 ProgressEvent, 10 steps expect 0
+check scenario_inherits_parent_delta for 3 but 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 4 SourceClause, 14 ProgressEvent, 10 steps expect 0
+check pre_section_never_promoted for 3 but 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 4 SourceClause, 14 ProgressEvent, 10 steps expect 0
+check no_silent_parser_loss for 3 but 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 10 steps expect 0
+check findings_monotonic for 3 but 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 15 steps expect 0
+check parsed_sources_are_unique for 3 but 3 InputPath, 4 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 4 SourceClause, 14 ProgressEvent, 10 steps expect 0
+check completed_phases_monotonic for 3 but 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 15 steps expect 0
+check phase_ordering_respected for 3 but 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 15 steps expect 0
+check fatal_outcome_freezes_pipeline for 3 but 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 15 steps expect 0
+check success_requires_all_phases for 3 but 3 InputPath, 3 Artifact, 2 Capability, 4 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 15 steps expect 0
+check no_silent_hang for 3 but 3 InputPath, 4 Artifact, 2 Capability, 5 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 15 steps expect 0
+check pipeline_progress_liveness for 3 but 3 InputPath, 4 Artifact, 2 Capability, 6 Finding, 3 ParsedDoc, 3 Requirement, 14 ProgressEvent, 20 steps expect 0
 
 // --- Compatibility boundary witnesses ---
 // Structural checks use one state; existing pipeline bounds are unchanged.
@@ -2034,7 +2695,7 @@ run oc_supported_release_witness {
 
 run oc_v2_variant_witness {
   some a : OCAttempt | a in oc_attempts_allowed[a.call] and
-    a.call.model.modelClass = OCTerra and oc_attempt_encoding[a] = OCHashVariant
+    a.call.model.modelClass = OCHighPolicyModel and oc_attempt_encoding[a] = OCHashVariant
 } for 3 but 1 steps expect 1
 
 run oc_escaped_pipe_cleanup_witness {
@@ -2063,4 +2724,104 @@ check oc_parent_exit_does_not_suppress_group_request for 3 but 1 steps expect 0
 // Conditional on callback delivery; no additional pipeline fairness assumption.
 
 check oc_cleanup_callback_cannot_be_blocked_by_pipes for 3 but 1 steps expect 0
+
+// --- New surface-contract checks and nonvacuity witnesses ---
+// Event atoms are immutable records (up to two per successful phase); provide
+// enough scope to exercise a complete pipeline rather than vacuous checks.
+run surface_where_disabled_witness {
+  some r : Requirement | r.observedForm = OptionalFeature and
+    parser_item_contract[r] and ears_structure_supported[r] and ParserOptions.whereEnabled = False and
+    WhereDisabled in surface_issues[r] and not surface_eligible[r]
+} for 3 but 1 steps expect 1
+run surface_orphan_witness {
+  some r : Requirement | parser_item_contract[r] and r.scenario = True and no enclosing_requirement[r]
+} for 3 but 1 steps expect 1
+run surface_duplicate_metadata_witness {
+  some r : Requirement | parser_item_contract[r] and #r.declaredKinds = 2 and
+    r.declaredKinds.value = ExampleForm and scenario_form[r] = UnknownScenarioForm and
+    not surface_eligible[r]
+} for 3 but 1 steps expect 1
+run surface_example_slots_witness {
+  some r : Requirement | r.scenario = True and scenario_form[r] = ExampleForm and
+    surface_eligible[r] and some fields[r, PostconditionContent] and
+    eventually (Parse in RunState.completedPhases and r.doc in RunState.parsedDocs)
+} for 3 but 5 SourceFragment, 14 ProgressEvent, 10 steps expect 1
+run surface_prohibited_example_slots_witness {
+  some r : Requirement | r.scenario = True and scenario_form[r] = ProhibitedExampleForm and
+    surface_eligible[r] and some fields[r, PostconditionContent] and
+    eventually (Parse in RunState.completedPhases and r.doc in RunState.parsedDocs)
+} for 3 but 5 SourceFragment, 14 ProgressEvent, 10 steps expect 1
+run surface_refinement_postcondition_witness {
+  some r : Requirement | r.scenario = True and scenario_form[r] = RefinementForm and
+    surface_eligible[r] and some fields[r, PostconditionContent] and
+    eventually (Parse in RunState.completedPhases and r.doc in RunState.parsedDocs)
+} for 3 but 4 SourceClause, 14 ProgressEvent, 10 steps expect 1
+
+// Exercise each supported grammar form under the actual completed parse contract.
+pred parsed_form_witness[form : EarsType] {
+  some r : Requirement | r.observedForm = form and ears_structure_supported[r] and
+    surface_eligible[r] and
+    eventually (Parse in RunState.completedPhases and r.doc in RunState.parsedDocs)
+}
+run parsed_ubiquitous_witness { parsed_form_witness[Ubiquitous] }
+  for 3 but 4 SourceClause, 14 ProgressEvent, 10 steps expect 1
+run parsed_state_witness { parsed_form_witness[StateDriven] }
+  for 3 but 4 SourceClause, 14 ProgressEvent, 10 steps expect 1
+run parsed_event_witness { parsed_form_witness[EventDriven] }
+  for 3 but 4 SourceClause, 14 ProgressEvent, 10 steps expect 1
+run parsed_unwanted_witness { parsed_form_witness[UnwantedBehavior] }
+  for 3 but 4 SourceClause, 14 ProgressEvent, 10 steps expect 1
+run parsed_complex_witness { parsed_form_witness[Complex] }
+  for 3 but 4 SourceClause, 14 ProgressEvent, 10 steps expect 1
+run parsed_where_enabled_witness {
+  ParserOptions.whereEnabled = True
+  parsed_form_witness[OptionalFeature]
+} for 3 but 4 SourceClause, 14 ProgressEvent, 10 steps expect 1
+run fragment_local_maps_witness {
+  some r : Requirement | fragment_contract[r] and r.withinBound = True and
+    some disj a, b : statement_fragments[r] |
+      some a.normalizedOffsets and some b.normalizedOffsets and
+      no a.normalizedOffsets & b.normalizedOffsets
+} for 3 but 1 steps expect 1
+run surface_ineligible_parent_witness {
+  some r : Requirement | r.scenario = True and some r.parentReqId and
+    not surface_eligible[r.parentReqId] and
+    eventually (Parse in RunState.completedPhases and r.doc in RunState.parsedDocs)
+} for 3 but 5 SourceFragment, 14 ProgressEvent, 10 steps expect 1
+run success_path_fairness_witness {
+  pipeline_fairness
+} for 3 but 14 ProgressEvent, 10 steps expect 1
+
+check empty_cause_is_total_and_preserves_rationale for 3 but 1 steps expect 0
+check archive_remediation_is_relevant for 3 but 1 steps expect 0
+check equals_syntax_equivalence for 3 but 1 steps expect 0
+check cli_settings_take_precedence for 3 but 1 steps expect 0
+check file_settings_fill_missing_cli_values for 3 but 1 steps expect 0
+check model_default_is_sol_high for 3 but 1 steps expect 0
+check malformed_or_disabled_forms_never_admitted for 3 but 4 SourceClause, 1 steps expect 0
+check only_exact_unfenced_headings_change_delta_context for 4 but 1 steps expect 0
+check supporting_prose_never_becomes_predicate_slots for 4 but 1 steps expect 0
+check justification_alone_is_not_formal_semantics for 3 but 1 steps expect 0
+check invalid_metadata_is_excluded for 3 but 1 steps expect 0
+check examples_require_matching_source_fields for 4 but 1 steps expect 0
+check explicitly_admitted_archives_only for 3 but 14 ProgressEvent, 10 steps expect 0
+check scenario_parent_is_independent_of_eligibility for 3 but 4 SourceClause, 14 ProgressEvent, 10 steps expect 0
+check every_unmatched_fragment_is_evidence for 3 but 14 ProgressEvent, 10 steps expect 0
+check oversized_source_is_preserved_and_excluded for 3 but 14 ProgressEvent, 10 steps expect 0
+check clause_spans_belong_to_original_file for 3 but 4 SourceClause, 14 ProgressEvent, 10 steps expect 0
+check phase_transitions_emit_json_progress for 3 but 14 ProgressEvent, 10 steps expect 0
+check fatal_phase_has_failure_event for 3 but 14 ProgressEvent, 10 steps expect 0
+check invalid_effective_model_stops_before_dependencies for 3 but 14 ProgressEvent, 10 steps expect 0
+check excluded_items_have_no_predicate_slots for 3 but 1 steps expect 0
+check scenario_postconditions_are_scoped for 3 but 5 SourceFragment, 4 SourceClause, 1 steps expect 0
+check statement_maps_cover_owned_offsets for 3 but 1 steps expect 0
+check all_headless_inputs_stop_with_evidence for 3 but 14 ProgressEvent, 10 steps expect 0
+check oc_timeout_and_overflow_have_priority for 3 but 1 steps expect 0
+check oc_pipeline_calls_reuse_one_run_probe for 3 but 1 steps expect 0
+check oc_direct_detection_failure_is_terminal for 3 but 1 steps expect 0
+
+run all_headless_failure_witness {
+  eventually (struct_validate_phase and
+    (no d : RunState.parsedDocs | d.hasHeadings = True) and some RunState.parsedDocs)
+} for 3 but 14 ProgressEvent, 10 steps expect 1
 ```

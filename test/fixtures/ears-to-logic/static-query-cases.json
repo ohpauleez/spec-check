@@ -1,0 +1,110 @@
+[
+  {
+    "name": "guarded response versus unconditional prohibition",
+    "identifiers": ["FLA-ACTIVATE-UBIQUITOUS", "FLA-LOGIC-SAT"],
+    "declarations": ["(declare-const g Bool)", "(declare-const x Bool)"],
+    "queries": [
+      { "name": "global valuation exists", "expr": "(and (=> g x) (not x))", "expected": "sat" },
+      { "name": "guard feasible", "expr": "g", "expected": "sat" },
+      { "name": "activation conflicts", "expr": "(and g (=> g x) (not x))", "expected": "unsat" }
+    ]
+  },
+  {
+    "name": "self-conflict without another claim",
+    "identifiers": ["FLA-ACTIVATE-SELF"],
+    "declarations": ["(declare-const g Bool)"],
+    "queries": [
+      { "name": "vacuous global model", "expr": "(=> g (not g))", "expected": "sat" },
+      { "name": "guard feasible", "expr": "g", "expected": "sat" },
+      { "name": "own response infeasible", "expr": "(and g (not g))", "expected": "unsat" }
+    ]
+  },
+  {
+    "name": "three responses conflict with every response pair compatible",
+    "identifiers": ["FLA-ACTIVATE-MULTI", "FLA-PAIRWISE-CONTRA"],
+    "declarations": ["(declare-const g Bool)", "(declare-const x Bool)", "(declare-const y Bool)"],
+    "queries": [
+      { "name": "first pair", "expr": "(and g x y)", "expected": "sat" },
+      { "name": "second pair", "expr": "(and g x (not (and x y)))", "expected": "sat" },
+      { "name": "third pair", "expr": "(and g y (not (and x y)))", "expected": "sat" },
+      { "name": "full activated set", "expr": "(and g (=> g x) (=> g y) (=> g (not (and x y))))", "expected": "unsat" }
+    ]
+  },
+  {
+    "name": "advisory constraint is separate from mandatory baseline",
+    "identifiers": ["FLA-MODAL-ADVISORY", "FLA-LOGIC-ADVISORY"],
+    "declarations": ["(declare-const x Bool)"],
+    "queries": [
+      { "name": "mandatory baseline", "expr": "x", "expected": "sat" },
+      { "name": "advisory extension", "expr": "(and x (not x))", "expected": "unsat" }
+    ]
+  },
+  {
+    "name": "permission is optional but can conflict with prohibition",
+    "identifiers": ["FLA-MODAL-PERMISSION", "FLA-MODAL-PROHIBITION"],
+    "declarations": ["(declare-const g Bool)", "(declare-const x Bool)"],
+    "queries": [
+      { "name": "missing permitted response allowed", "expr": "(and g (not x))", "expected": "sat" },
+      { "name": "permission impossible under prohibition", "expr": "(and g (not x) x)", "expected": "unsat" }
+    ]
+  },
+  {
+    "name": "coverage ignores unrelated invariant and respects applicability",
+    "identifiers": ["FLA-COMPLETENESS-UBIQ", "FLA-COMPLETENESS-GAP", "FLA-COMPLETENESS-EXHAUST"],
+    "declarations": ["(declare-const a Bool)", "(declare-const b Bool)", "(declare-const invariant Bool)"],
+    "queries": [
+      { "name": "uncovered valuation with invariant", "expr": "(and invariant (not a) (not b))", "expected": "sat" },
+      { "name": "explicit active domain covered", "expr": "(and invariant (or a b) (not a) (not b))", "expected": "unsat" }
+    ]
+  },
+  {
+    "name": "concrete examples do not globally constrain inputs",
+    "identifiers": ["FLA-SCENARIO-WITNESS", "FLA-SCENARIO-PROHIBITED"],
+    "declarations": ["(declare-const g Bool)", "(declare-const x Bool)"],
+    "queries": [
+      { "name": "positive example admitted", "expr": "(and (=> g x) g x)", "expected": "sat" },
+      { "name": "other input remains admitted", "expr": "(and (=> g x) (not g) (not x))", "expected": "sat" },
+      { "name": "bad activated response excluded", "expr": "(and (=> g x) g (not x))", "expected": "unsat" },
+      { "name": "unregulated behavior allowed", "expr": "(and (=> g x) (not g) x)", "expected": "sat" }
+    ]
+  },
+  {
+    "name": "inconsistent premises must block favorable implication",
+    "identifiers": ["FLA-CLUSTER-VACUOUS", "STC-IMPLY-VACUOUS", "FLA-LOGIC-BACKGROUND"],
+    "declarations": ["(declare-const x Bool)", "(declare-const target Bool)"],
+    "queries": [
+      { "name": "premise fails nonvacuity", "expr": "(and x (not x))", "expected": "unsat" },
+      { "name": "vacuous implication query is also unsat", "expr": "(and x (not x) (not target))", "expected": "unsat" }
+    ]
+  },
+  {
+    "name": "compatible shared declarations must not be repeated",
+    "identifiers": ["FLA-SPEC-DEDUP", "FLA-CLUSTER-QUERY", "STC-IMPLY-QUERY"],
+    "declarations": ["(declare-const x Bool)"],
+    "queries": [
+      { "name": "shared signature implication", "expr": "(and x (not x))", "expected": "unsat" }
+    ]
+  },
+  {
+    "name": "linear arithmetic has an infeasible input within a feasible region",
+    "identifiers": ["FLA-TYPED-EXACT", "RAE-STRENGTH-STATIC"],
+    "declarations": ["(declare-const x Int)", "(declare-const y Int)"],
+    "queries": [
+      { "name": "compatible valuation exists", "expr": "(and (>= x 0) (<= x 2) (= y x) (= y 0))", "expected": "sat" },
+      { "name": "specific allowed input infeasible", "expr": "(and (= x 1) (= y x) (= y 0))", "expected": "unsat" },
+      { "name": "large exact integer", "expr": "(= x 9007199254740993)", "expected": "sat" }
+    ]
+  },
+  {
+    "name": "broader permission has a separate inclusion verdict",
+    "identifiers": ["STC-PERMISSION-BROADER", "STC-PERMISSION-NARROWER", "STC-PERMISSION-EQUIVALENT", "STC-PERMISSION-DIFFERENT"],
+    "declarations": ["(declare-const x Bool)", "(declare-const y Bool)"],
+    "queries": [
+      { "name": "original subset generated", "expr": "(and x (not (or x y)))", "expected": "unsat" },
+      { "name": "generated not subset original", "expr": "(and (or x y) (not x))", "expected": "sat" },
+      { "name": "equal permission relations", "expr": "(and x (not x))", "expected": "unsat" },
+      { "name": "different permissions forward", "expr": "(and x (not y))", "expected": "sat" },
+      { "name": "different permissions reverse", "expr": "(and y (not x))", "expected": "sat" }
+    ]
+  }
+]

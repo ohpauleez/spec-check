@@ -1,5 +1,5 @@
 /** Pure OpenCode model policy, independent of subprocess protocol versions.
- * @example normalizeOpencodeModel("github-copilot/gpt-5.6-terra#high");
+ * @example normalizeOpencodeModel("github-copilot/gpt-6.1-sol#high");
  */
 import { err, ok, type Result } from "./result.js";
 
@@ -12,11 +12,12 @@ export interface OpencodeModelSelection {
 /** Resolve the existing fixed, case-sensitive reasoning policy.
  * @param model - Base model identifier without a variant suffix.
  * @returns Fixed variant or undefined; pure, total, and non-mutating.
- * @example variantForModel("github-copilot/gpt-5.6-terra") // "high"
+ * @example variantForModel("github-copilot/gpt-6.1-sol") // "high"
  */
 export function variantForModel(model: string): string | undefined {
   if (model === "github-copilot/gpt-5.6-luna") return "max";
   if (model === "github-copilot/gpt-5.6-terra") return "high";
+  if (model === "github-copilot/gpt-6.1-sol") return "high";
   return undefined;
 }
 
@@ -29,6 +30,7 @@ export function variantForModel(model: string): string | undefined {
  * @example normalizeOpencodeModel("acme/family/model#high");
  */
 export function normalizeOpencodeModel(raw: string): Result<OpencodeModelSelection, string> {
+  if (Buffer.byteLength(raw, "utf8") > 4_096) return err("invalid model reference: exceeds the 4096-byte metadata/argv bound");
   if (raw.trim().length === 0) return err("invalid model reference: model must not be empty");
   const separator = raw.indexOf("#");
   if (separator === -1) {

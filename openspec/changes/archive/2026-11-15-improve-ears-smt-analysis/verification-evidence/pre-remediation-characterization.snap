@@ -1,0 +1,139 @@
+// Vitest Snapshot v1, https://vitest.dev/guide/snapshot.html
+
+exports[`pre-refactor orchestration characterization > formalization capacity preserves attribution, recovery and evidence 1`] = `
+{
+  "calls": 0,
+  "outputHash": "96be931c519dbc522f6671111cfaa7e1073f02c0640d35f7bd46ffa1443ac6ed",
+  "protocolHash": "56966f11a5fec92aa62f120300830e7dbb8595667e6d95b60981b0c8dfe97cdb",
+}
+`;
+
+exports[`pre-refactor orchestration characterization > formalization invalid preserves attribution, recovery and evidence 1`] = `
+{
+  "calls": 7,
+  "outputHash": "3e6bed56cb320ce5374a63595472abf1433686667cd3d98ef0813d31995303fb",
+  "protocolHash": "1789f608b32bedabfbbb98a66c59294d3fe32e62c0206e7c9d1ffad7b15a17a4",
+}
+`;
+
+exports[`pre-refactor orchestration characterization > formalization recovery preserves attribution, recovery and evidence 1`] = `
+{
+  "calls": 3,
+  "outputHash": "4fa9db859082f579ccc567a22b7678aa92cc6ba234e9a7092f8d1f45e3cff2ca",
+  "protocolHash": "eea57cb370786ea862f8c28747204192ab30079439c0241dd07f2cfe35afb5b7",
+}
+`;
+
+exports[`pre-refactor orchestration characterization > formalization shortfall preserves attribution, recovery and evidence 1`] = `
+{
+  "calls": 3,
+  "outputHash": "c719ede30ba65044ef8644719ee7c7369e5f11dddbe31c93f40456c7f1e58707",
+  "protocolHash": "4f7c2531a4690ab03d1ae4c0acc102c6fce55024fbaabac3962f1d303a98bcb7",
+}
+`;
+
+exports[`pre-refactor orchestration characterization > formalization success preserves attribution, recovery and evidence 1`] = `
+{
+  "calls": 1,
+  "outputHash": "56129cd4d9d8a7d788aca959aa6635f4a5bda751c1770110fe378998fe839842",
+  "protocolHash": "ba9ae5fb17445133c7f0ef588dcbe50830004aa836fba6355913e9addd4995c7",
+}
+`;
+
+exports[`pre-refactor orchestration characterization > formalization write-failure preserves attribution, recovery and evidence 1`] = `
+{
+  "calls": 1,
+  "outputHash": "bae1589cd58953adb33b5406f3c95a376b4ef29a69984c9a75f6371a4c74eada",
+  "protocolHash": "b2b821070df1c4fa31659c82a19f6da2a73048dadad4e7f75ecefe3705e8d865",
+}
+`;
+
+exports[`pre-refactor orchestration characterization > static background-unsat preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 2,
+  "ledgerEntries": 17,
+  "protocolHash": "9cb6e98abaa0bc8e457acc46245debb56315765f9f17e753168cfbb06105467f",
+  "queries": "background",
+}
+`;
+
+exports[`pre-refactor orchestration characterization > static baseline-unsat preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 6,
+  "ledgerEntries": 19,
+  "protocolHash": "fa8467fa39075711cee7c183d5a805630c34f8e6372bd8b8a787285f477f9693",
+  "queries": "background, global, global:core",
+}
+`;
+
+exports[`pre-refactor orchestration characterization > static capacity preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 0,
+  "ledgerEntries": 17,
+  "protocolHash": "006ada5f9cdcd7f93c84d781442681530ac969b1e1bf7ef045f5a0e8819e2455",
+  "queries": "",
+}
+`;
+
+exports[`pre-refactor orchestration characterization > static conflicts preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 45,
+  "ledgerEntries": 24,
+  "protocolHash": "2ac55f25de07880a21687b23c5e657bd21d4f8892d0f21c197bd438a5adfb8a8",
+  "queries": "background, global, guard:CHAR-0, mandatory-response:CHAR-0, activation:CHAR-0, activation:CHAR-0:core, guard:CHAR-1, mandatory-response:CHAR-1, activation:CHAR-1, activation:CHAR-1:core, guard:CHAR-2, advisory-response:CHAR-2, guard:CHAR-3, advisory-response:CHAR-3, guard:CHAR-4, permission-response:CHAR-4, coactivation:0:1, example:5, coverage:family, coverage:family:witness, advisory-combination, advisory-coactivation:0:1",
+}
+`;
+
+exports[`pre-refactor orchestration characterization > static pair-limit preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 37,
+  "ledgerEntries": 20,
+  "protocolHash": "06b7e064c4215bc1ccf980c5480a62f020419c67ee56c2ce008ebba199be2d8d",
+  "queries": "background, global, guard:CHAR-0, mandatory-response:CHAR-0, activation:CHAR-0, guard:CHAR-1, mandatory-response:CHAR-1, activation:CHAR-1, guard:CHAR-2, advisory-response:CHAR-2, guard:CHAR-3, advisory-response:CHAR-3, guard:CHAR-4, permission-response:CHAR-4, example:5, coverage:family, coverage:family:witness, advisory-combination",
+}
+`;
+
+exports[`pre-refactor orchestration characterization > static script-limit preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 8,
+  "ledgerEntries": 20,
+  "protocolHash": "3cf0fae2601107a35d093eaaf1d831a3a483e2038cd09a41473d7b3f118751fc",
+  "queries": "background, global, guard:CHAR-0, mandatory-response:CHAR-0",
+}
+`;
+
+exports[`pre-refactor orchestration characterization > static success preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 45,
+  "ledgerEntries": 22,
+  "protocolHash": "ba811c951b1338a09ff28234353f3556653e39cdf76c16291f420abb1540283d",
+  "queries": "background, global, guard:CHAR-0, mandatory-response:CHAR-0, activation:CHAR-0, guard:CHAR-1, mandatory-response:CHAR-1, activation:CHAR-1, guard:CHAR-2, advisory-response:CHAR-2, guard:CHAR-3, advisory-response:CHAR-3, guard:CHAR-4, permission-response:CHAR-4, coactivation:0:1, pair-conflict:0:1, example:5, coverage:family, coverage:family:witness, advisory-combination, advisory-coactivation:0:1, advisory-pair:0:1",
+}
+`;
+
+exports[`pre-refactor orchestration characterization > static timeout preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 45,
+  "ledgerEntries": 22,
+  "protocolHash": "cc44c049ef5438d308215c3307f91233f0028e4621ef0b18ebba3a53bcb9ce9e",
+  "queries": "background, global, guard:CHAR-0, mandatory-response:CHAR-0, activation:CHAR-0, guard:CHAR-1, mandatory-response:CHAR-1, activation:CHAR-1, guard:CHAR-2, advisory-response:CHAR-2, guard:CHAR-3, advisory-response:CHAR-3, guard:CHAR-4, permission-response:CHAR-4, coactivation:0:1, pair-conflict:0:1, example:5, coverage:family, coverage:family:witness, advisory-combination, advisory-coactivation:0:1, advisory-pair:0:1",
+}
+`;
+
+exports[`pre-refactor orchestration characterization > static unknown preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 27,
+  "ledgerEntries": 21,
+  "protocolHash": "9709c347335ff6e0485b80252f072458b2153fed882f991428b5ce95c2557400",
+  "queries": "background, global, guard:CHAR-0, guard:CHAR-1, guard:CHAR-2, guard:CHAR-3, guard:CHAR-4, example:5, coverage:family, coverage:family:witness, advisory-combination, advisory-coactivation:0:1, advisory-pair:0:1",
+}
+`;
+
+exports[`pre-refactor orchestration characterization > static write-failure preserves protocol and exact evidence 1`] = `
+{
+  "artifacts": 0,
+  "ledgerEntries": 0,
+  "protocolHash": "09c8fdffeb803ca64ee9fede9ddfc41d4cffffa3db42a69b7e023997c4d31ba9",
+  "queries": "",
+}
+`;

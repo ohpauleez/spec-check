@@ -6,9 +6,10 @@ import { describe, expect, it } from "vitest";
 
 import { traceSpec } from "../support/spec-trace.js";
 import { resolveRunConfig } from "../../src/cli/config.js";
+import { normalizeOpencodeModel } from "../../src/domain/opencode-model.js";
 
 describe("config loading and precedence", () => {
-  it("defaults to Terra at its fixed high variant", async () => {
+  it("defaults to Sol at its fixed high variant", async () => {
     traceSpec("CAT-CLI-CONFIG", "CAT-CONFIG-MERGE");
     const resolved = await resolveRunConfig({
       inputs: ["in"],
@@ -19,7 +20,8 @@ describe("config loading and precedence", () => {
 
     expect(resolved.ok).toBe(true);
     if (!resolved.ok) return;
-    expect(resolved.value.model).toBe("github-copilot/gpt-5.6-terra");
+    expect(resolved.value.model).toBe("github-copilot/gpt-6.1-sol");
+    expect(normalizeOpencodeModel(resolved.value.model)).toEqual({ ok: true, value: { model: "github-copilot/gpt-6.1-sol", variant: "high" } });
     expect(resolved.value.output).toBe(resolve("spec-check-output"));
   });
 

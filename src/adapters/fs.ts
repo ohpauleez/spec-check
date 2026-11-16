@@ -80,7 +80,7 @@ export function resolveConfinedOutputPath(outputDir: OutputDirPath, relativePath
  * `ensuredDirectories`; the memo is an optimization only and does not change
  * the write/rename guarantees above.
  */
-export async function writeOutputAtomic(outputDir: OutputDirPath, relativePath: RelativePath, content: string): Promise<void> {
+export async function writeOutputAtomic(outputDir: OutputDirPath, relativePath: RelativePath, content: string | Uint8Array): Promise<void> {
   const finalPath = resolveConfinedOutputPath(outputDir, relativePath);
   const parentDir = dirname(finalPath);
   // Skip the syscall for directories already ensured this process; recursive

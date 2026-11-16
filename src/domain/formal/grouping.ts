@@ -197,16 +197,17 @@ export function selectClaimLogicalFile(
  * Whether a claim is eligible for formalization.
  *
  * @param claim - claim to classify
- * @returns `true` for requirement and scenario claims, the two kinds that
- *   carry formalizable obligations
+ * @returns `true` for requirement/scenario claims not excluded by source admission.
  *
  * @remarks
- * This is the single eligibility predicate shared by grouping and by the CLI
+ * Every parser-produced claim has an explicit surface disposition. Externally
+ * constructed domain fixtures may omit that metadata. This is the single eligibility predicate shared by grouping and by the CLI
  * layer that resolves eligible indexes back to claims; keeping it in one
  * place prevents the two from drifting. The function is pure and total.
  */
 export function isFormalizableClaim(claim: Claim): boolean {
-  return claim.kind === "requirement" || claim.kind === "scenario";
+  return (claim.kind === "requirement" || claim.kind === "scenario")
+    && claim.surface?.disposition.kind !== "excluded";
 }
 
 /**

@@ -193,6 +193,9 @@ export interface BatchAttemptEvidence {
       readonly detail: string;
     };
   readonly cleanup: "succeeded" | "failed" | "not_attempted";
+  readonly registryHash?: string;
+  readonly contextArtifact?: string;
+  readonly responseArtifacts?: readonly string[];
 }
 
 /**

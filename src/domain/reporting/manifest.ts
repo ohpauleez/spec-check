@@ -90,6 +90,11 @@ export function validateCoreManifestEntries(entries: readonly ManifestEntry[]): 
   if (finalReportEntry !== undefined) {
     throw new Error("core manifest must exclude report.md");
   }
+  const paths = new Set<string>();
+  for (const entry of entries) {
+    if (paths.has(entry.path)) throw new Error(`duplicate core manifest path: ${entry.path}`);
+    paths.add(entry.path);
+  }
   return entries;
 }
 

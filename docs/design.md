@@ -69,6 +69,22 @@ The goal is not a proof of the whole system. The goal is justified confidence: t
 
 ### 1.5 Relevant Capability Specs
 
+**Static analysis boundary guarantees:** Predicate requests retain parser-owned
+subject/form context as well as exact clause slots. Selected artifacts retain
+single/stable/unstable sample assessments separately from concept-identity and
+mapping scope. Unstable selected samples and contributing permission baselines
+receive diagnostic comparisons without favorable matching credit. A singleton
+does not establish observed agreement.
+
+With `--src`, generated-only typed checks use the run's shared executor and
+per-capability script budget even if every original statement is excluded.
+Independent generation records selected source-byte snapshots, path mappings,
+exact request/prompt identity and raw model attempts in `semantic_evidence/`.
+The model reads private copies of those captured bytes; later original-file edits
+do not change the attachments. Typed SMT declarations include inert reversible
+identifier mapping comments. Numeric schemas remain unchanged; fingerprints
+identify the current contract.
+
 | Capability | Purpose |
 |---|---|
 | [`catalog-and-parse`](openspec/specs/catalog-and-parse/spec.md) | input discovery, CLI validation, structured parsing, EARS extraction, loss-aware evidence |
@@ -364,7 +380,7 @@ erDiagram
 | Document | A proposal, design, capability spec, or task file | input filesystem | read-only; never mutated by analysis; classified by basename |
 | Capability | A logical behavior group represented by one spec file and its purpose | active catalog | resolved from finalized specs plus at most one in-development delta; lexicographically first delta wins on conflict |
 | Merged Capability Spec | The active merged view of a capability after applying delta operations against the finalized base | merge phase | produced per capability; contains merged requirements, scenarios, findings, and provenance-preserving source file links |
-| Requirement | A capability-level behavioral obligation in EARS format | parsed spec file | must carry a canonical bracketed identifier; classified into one of 8 EARS types |
+| Requirement | A capability-level behavioral obligation in EARS format | parsed spec file | source-preserving strict clauses and explicit formal disposition; canonical identifiers are display/trace metadata |
 | Scenario | A concrete, testable behavioral case that refines a requirement | parsed spec file | must carry a canonical bracketed identifier |
 | Claim | A normalized statement derived from requirements, scenarios, properties, or code | claim graph builder | always carries provenance, obligation level, and capability; extraction from merged specs is deterministic |
 | Finding | An analysis result with severity, rationale, provenance, and evidence | analysis phases | never exists without provenance; never silently removed; category is dot-separated hierarchical |
@@ -445,15 +461,14 @@ All spec.md files define verifiable behavior using EARS format and RFC 2119 keyw
 | Ubiquitous | `THE <system> SHALL <response>.` | Always active |
 | State-driven | `WHILE <precondition>, THE <system> SHALL <response>.` | Active in a continuous state |
 | Event-driven | `WHEN <trigger>, THE <system> SHALL <response>.` | Discrete event causes behavior |
-| Unwanted-behavior | `IF <trigger>, THEN THE <system> SHALL <response>.` | Error/failure mitigation with Negation qualifier |
+| Unwanted-behavior | `IF <trigger>, THEN THE <system> SHALL <response>.` | Guarded IF/THEN response; no negative-word heuristic |
 | Complex | `WHILE <precondition>, WHEN <trigger>, THE <system> SHALL <response>.` | Both state and event required |
-| Optional | `WHERE <feature is included>, THE <system> SHALL <response>.` | Optional/configurable behavior |
-| Conditional | `IF <condition>, THEN THE <system> SHALL <response>.` | Conditional without unwanted behavior / Negation qualifier |
-| Non-EARS | Free-form with justification | When EARS is insufficient (> 3 preconditions, mathematical, tabular) |
+| Optional extension | `WHERE <feature is included>, THE <system> SHALL <response>.` | Requires configured `where` extension |
+| Non-EARS | Alternative representation with justification | Retained evidence; justification alone does not establish supported formal semantics |
 
 RFC 2119: SHALL/MUST = absolute requirement (mandatory), SHOULD = recommended (advisory), MAY = optional (informational).
 
-EARS classification priority in the parser: complex before event/state-driven; unwanted-behavior before conditional; optional before ubiquitous. This ordering prevents ambiguous matches.
+The parser recognizes ordered complete clauses, required commas/THEN, one structural modal, and a final period. Quoted/code content does not introduce structural keywords. Generic conditional is not a separate type. SHALL/MUST constrain the mandatory model, SHOULD is an advisory extension, and MAY is permission rather than required action; ambiguous MAY NOT is diagnosed.
 
 Relevant code: [`src/domain/parser/spec.ts`](src/domain/parser/spec.ts)
 
@@ -463,8 +478,8 @@ The claim graph builder extracts claims from parsed artifacts in a fixed order: 
 
 | Claim Kind | Source | Obligation Derivation |
 |---|---|---|
-| `requirement` | spec requirements | RFC 2119 keyword: SHALL → mandatory, SHOULD → advisory, MAY → informational |
-| `scenario` | spec scenarios | always mandatory |
+| `requirement` | spec requirements | Parser-owned SHALL/MUST → mandatory, SHOULD → advisory, MAY → informational permission |
+| `scenario` | spec scenarios | EARS refinements use parsed modality; explicit examples/prohibited examples are scoped queries, not global assertions |
 | `proposal_property` | proposal sections | mapped by section heading (e.g., Preconditions → mandatory, Context → informational) |
 | `design_property` | design sections | informational |
 | `assumption` | proposal sections | informational |
@@ -747,12 +762,12 @@ stateDiagram-v2
 | qualitative pass 1 | schema-valid LLM response | exhausted retries | `QualitativeError` |
 | qualitative pass 2 | schema-valid LLM response | exhausted retries | `QualitativeError` |
 | coverage | always succeeds (deterministic) | -- | -- |
-| formalization | candidate and claim-error indexes exactly and disjointly partition eligible indexes, with at least one candidate phase-wide; additional-sample failures are warnings only | zero candidates phase-wide after semantic batching and bounded first-sample/degradation work | `FormalizationError` |
+| formalization | frozen vocabulary and typed source predicates; exhaustive candidate/error outcomes; additional failures preserve candidates | attempted eligible claims yield zero candidates after bounded work | `FormalizationError` exit 9; all-ineligible or entirely capacity-skipped inputs complete diagnostic reporting without formal verdicts |
 | clustering | representative selected from largest stable cluster | stability threshold not met | ambiguity finding emitted |
 | logic: group preflight | claims have unique raw + sanitized IDs and fit size bounds | duplicate IDs, or size beyond `CLAIMS_PER_GROUP_MAX` / `DECLARATIONS_PER_CLAIM_MAX` | `logic.invalid_group`; zero compile/solver/write work (D-15) |
 | logic: spec-combine | claim declarations are mutually compatible | variable-sort, symbol-kind, or function-signature conflict | `logic.merge_conflict`; conflicting claim excluded, survivors are `compiled.claimIds` (D-14) |
 | logic: global check-sat | `sat` — globally consistent | `unsat`, solver error, or `timeout`/`unknown` | `logic.contradiction`, `logic.solver_error`, or `logic.inconclusive` |
-| logic: deeper checks | pairwise and completeness sub-checks definitive | contradiction, gap, or inconclusive sub-check | `logic.conditional_contradiction`, `logic.completeness_gap`, aggregated `logic.inconclusive` |
+| logic: deeper checks | background-aware guards, self/activation/co-activation, modal/scenario, and scoped coverage queries definitive | conflict, scoped gap, failed decoding, or unestablished subcheck | explicit scoped conflict/gap/inconclusive outcomes with exact query evidence; valuations are not reachable states |
 
 #### Invariants
 
@@ -1173,7 +1188,7 @@ Protocol rules:
 - after OpenCode detection, `probeZ3Dependency` runs the configured `--z3` command (default `z3` on PATH) once with `--version`, a 5s timeout and 16-KiB combined capture bound; only signal-free zero exit without spawn/timeout/overflow failure succeeds. Missing/non-executable commands (including `EACCES`/`EPERM`), other spawn failures, nonzero exits, signals, timeouts and overflow abort before any LLM analysis or SMT query with actionable bounded diagnostics and dependency exit 4. There is no Z3 version policy, retry, or telemetry attempt allocation; process cleanup retains its 250-ms allowance
 - the immutable runtime descriptor is adapter-scoped through all subsequent calls and optional reporting; retries never re-probe or fall back to another major, and direct calls outside a scope resolve once per call unless explicitly supplied a matching runtime
 - the adapter parses newline-delimited JSON output and keeps the instruction prompt as one positional argv element; model and attachment ordering is verified against pinned releases v1.19.3 and v2.0.15
-- model normalization accepts explicit `provider/model#variant` references and retains the existing fixed Luna=`max` and Terra=`high` policy; malformed or conflicting effective references use `ConfigError` exit 3, while direct invalid requests return terminal `invalid_model` before any process work
+- model normalization accepts explicit `provider/model#variant` references with fixed Luna=`max`, Terra=`high`, and Sol=`high` policies; the built-in default is `github-copilot/gpt-6.1-sol#high`. Malformed or conflicting effective references use `ConfigError` exit 3, while direct invalid requests return terminal `invalid_model` before any process work
 - v1 receives `--model <base> --variant <variant>`; v2 receives `--model <base>#<variant>`; telemetry records the same normalized base and variant, with additive optional `opencodeMajor` metadata under schema version 1
 - final reporting uses verified v1 `--pure`/`--dir` controls or v2 standalone execution with private subprocess cwd/config and explicit `OPENCODE_CONFIG_PROJECT_DISABLE=1`; the native setting overrides inherited values and excludes project/ancestor server-plugin and MCP sources before startup, while private `OPENCODE_CONFIG_DIR` replaces the server-global source
 - final-report policy intent remains version-independent; adapter serialization emits v1 permission maps or native ordered v2 rules. Required built-ins remain available, terminal-only plugins are outside the exclusion requirement, and credentials are not copied into generated config
@@ -1806,3 +1821,104 @@ Maintenance guidance:
 - Preserve the separation between design intent here and normative behavior in the capability specs.
 - When the repository layout changes, update section 14.4 alongside the code change.
 - Keep numbered invariant IDs stable across revisions; add new IDs at the end of each series.
+
+---
+
+## 19. Typed Source-Based Static Analysis
+
+The current source-based path separates three representations: source clauses and
+spans, validated typed scalar expressions, and static behavioral rules/scenarios.
+SMT-LIB is compiled output. Raw domain/oracle fixtures can still exercise reusable
+compilation boundaries, but CLI specification and generated-specification inputs
+use the strict source/predicate contract.
+
+### 19.1 Vocabulary and Authority
+
+Selected merged statements supply one bounded concept-discovery pass per semantic
+group and source side. Source-order reconciliation finishes before the registry
+is frozen. Every physical batch, fallback, and sample receives that registry and
+hash. Model-proposed concepts require selected-source grounding and remain
+conditional interpretation evidence. Same-sort names do not establish identity;
+collisions remain unresolved. Inferred positivity, exclusivity, and exhaustive
+enums never become hard background facts automatically.
+
+Optional `analysis.models` and separately authored `analysis.generatedModels`
+provide explicit concepts, exact units/enums, background expressions, and scoped
+coverage expectations. Original contexts never feed generated discovery.
+Configuration provenance includes the file/JSON pointer; configured generated
+premises are not source-proven guarantees.
+
+### 19.2 Expressions and Modal Meaning
+
+The initial fragment admits Bool, explicit finite enums, exact linear Int/Real
+arithmetic, and typed uninterpreted functions. Expressions are bounded by bytes,
+nodes, and depth; numerals additionally have a 4,096-digit limit. Validation checks
+complete syntax, symbol references, arity, sorts, units, and the assembled fragment.
+Strings, nonlinear products, division/remainder, general quantifiers, collections,
+recursive datatypes, and temporal timing remain unsupported formal scope.
+
+Source clauses own guard composition, structural modality and NOT. SHALL/MUST
+enter mandatory C; SHOULD is an advisory extension; MAY records an explicit
+permission, not a required response. `(quantity constant unit)` and
+`(convert expression unit)` are semantic annotations lowered into exact scalar
+SMT arithmetic with authored unit scales. They are not solver operators.
+
+Scenario kind defaults to EARS refinement. Explicit examples use Input/Expected,
+and prohibited examples use Input/Forbidden. Postconditions remain scoped to their
+scenario. Concrete inputs never become assertions about every valuation.
+
+### 19.3 Query Contracts and Strength
+
+- Check explicit background B before dependent favorable conclusions.
+- Global SAT of B and mandatory C establishes one shared valuation, not an
+  implementation valid for every allowed input.
+- Test guards, self-responses, and full-set activation separately. Conditional
+  requirements can conflict with ubiquitous prohibitions despite global SAT.
+- Co-activation uses typed dependency closure through all constraints, including
+  third-party links; sufficient cores are not automatically minimal.
+- Advisory and permission feasibility checks cannot poison mandatory consistency.
+- Coverage uses an explicit applicability domain and selected behavior-family
+  guards. Unrelated ubiquitous invariants do not suppress it. Without explicit
+  expectations, uncovered valuations are potential-gap suggestions.
+- Clustering requires compatible nonvacuous premises. Impossible samples do not
+  establish stable meaning; one sample is selected, not measured stable.
+- Original/generated registry alignment happens after independent derivation.
+  Missing or incompatible mappings and assumptions remain scope outcomes.
+  Permissions use equivalent/broader/narrower/different permitted relations,
+  separately from obligation same/stronger/weaker/different.
+
+No static conclusion establishes reachability, deadlines, unbounded liveness,
+response completeness, or universal input/output realizability. Temporal work
+requires a later explicit Init/Trans/events/frames/timing/horizon contract; embedded
+Alloy remains separate.
+
+### 19.4 Evidence and Completion
+
+`semantic_evidence/` stores source mappings/hashes, registries and decisions,
+source-owned predicate contexts, accepted IR, exact model output bytes, model
+validation status, exact solver scripts/results/version, alignment, and scope
+ledgers. Pointer-only invocation envelopes link the registry/context/response
+artifacts without duplicating claim bodies.
+
+Admission reserves bounded storage before model/solver work. Actual model output
+has an 8-MiB combined capture ceiling; solver output/decoding is also bounded.
+Required writes fail as OutputError without a new manifest. Capacity-skipped work
+remains explicit scope. Fixed sequential typed admission currently avoids
+capacity-limited outcomes depending on response scheduling; the concurrency
+setting is a ceiling, not a saturation target.
+
+Current numeric versions remain. Exact source/configuration, prompt, registry,
+runtime-code and solver identity bind the conclusions to their actual analysis.
+The core manifest checksums every produced semantic artifact, generated spec and
+SMT/comparison artifact. Optional report.md remains a post-completion derivative;
+handled failure refreshes the summary/manifest while retaining scope qualifications.
+
+### 19.5 Verification
+
+Independent Bool/enum truth-table evaluation is compared to typed production
+queries and real Z3. Hand-derived arithmetic/unit fixtures retain exact boundary
+and all-input-strength counterexamples. Generated histories exercise source maps,
+admission, signature immutability and completion-order independence. Bounded Alloy
+models include positive witnesses and separate invariant assertions. Full release
+acceptance includes traced tests, compiled/bundled parity, and fixed-corpus real
+model/solver cost, latency, coverage and inconclusive-rate measurements.

@@ -83,17 +83,13 @@ describe("code-backwards pipeline", () => {
           requirements: [{ id: "CAT-PIPELINE-001", text: "WHEN source runs, THE system SHALL produce output.", evidence: [] }],
         }],
       },
-    }).mockResolvedValue({
-      ok: true,
-      value: {
-        sample: {
-          claimId: "CAT-PIPELINE-001",
-          obligation: "mandatory",
-          variables: [{ name: "State", sort: "Bool" }],
-          functions: [{ name: "supports", args: ["Bool"], returns: "Bool" }],
-          assertions: [{ id: "ASSERT_1", expr: "(supports true)" }],
-        },
-      },
+    }).mockImplementation(async (options) => {
+      const context = JSON.parse(await readFile(options.files![0]!, "utf8"));
+      if (options.phase === "concept-discovery") return { ok: true, value: { concepts: context.claims.flatMap((claim: { source: { file: string; ordinal: number }; clauses: Record<string, string> }) => [
+        { name: "State", definition: "Source running", role: "event", sort: "Bool", source: claim.source, term: claim.clauses.trigger },
+        { name: "Output", definition: "Output produced", role: "output", sort: "Bool", source: claim.source, term: claim.clauses.response },
+      ]) } };
+      return { ok: true, value: { formalizations: context.claims.map((claim: { index: number }) => ({ index: claim.index, registryHash: context.registry.hash, predicates: { trigger: "State", response: "Output" } })) } };
     });
 
     const derived = await deriveSpecsFromSource({

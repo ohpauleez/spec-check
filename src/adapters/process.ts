@@ -29,6 +29,9 @@ export interface ProcessResult {
   readonly outputLimitExceeded?: boolean;
   readonly stdoutInvalidUtf8?: boolean;
   readonly stderrInvalidUtf8?: boolean;
+  /** Exact captured bytes when explicitly requested for durable evidence. */
+  readonly stdoutBase64?: string;
+  readonly stderrBase64?: string;
   /** Present when an owned-tree termination request fails; never implies success. */
   readonly terminationError?: string;
 }
@@ -40,6 +43,7 @@ export interface RunProcessOptions {
   readonly stdinText?: string;
   readonly envOverrides?: Readonly<NodeJS.ProcessEnv>;
   readonly maxOutputBytes?: number;
+  readonly captureBytes?: boolean;
 }
 
 /** Single-writer capture/termination state owned by one process invocation. */
@@ -218,6 +222,7 @@ function settleProcess(session: ProcessSession, error?: Error): void {
     stdout: stdout.toString("utf8"), stderr: stderr.toString("utf8"),
     timedOut: session.reason === "timeout", outputLimitExceeded: session.reason === "output_limit",
     stdoutInvalidUtf8: !isUtf8(stdout), stderrInvalidUtf8: !isUtf8(stderr),
+    ...(session.options.captureBytes === true ? { stdoutBase64: stdout.toString("base64"), stderrBase64: stderr.toString("base64") } : {}),
     ...(session.terminationError === undefined ? {} : { terminationError: session.terminationError }),
   });
 }

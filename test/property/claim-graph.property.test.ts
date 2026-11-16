@@ -40,8 +40,8 @@ describe("claim graph properties", () => {
     traceSpec("CGC-OBLIGATION-LEVEL", "CGC-OBLIG-MANDATORY", "CGC-OBLIG-ADVISORY", "CGC-OBLIG-INFO");
     const shallArb = fc.constantFrom(
       "WHEN x, THE system SHALL y.",
-      "IF condition THEN THE system SHALL respond.",
-      "WHILE active THE system SHALL monitor.",
+      "IF condition, THEN THE system SHALL respond.",
+      "WHILE active, THE system SHALL monitor.",
     );
     const shouldArb = fc.constantFrom(
       "WHEN x, THE system SHOULD y.",

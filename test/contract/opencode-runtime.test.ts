@@ -129,7 +129,7 @@ describe("OpenCode runtime compatibility", () => {
     expect(decideBatchDegradation("runtime_error", true)).toEqual({ kind: "emit_claim_errors" });
   });
 
-  it.each(["provider/model#", "provider/model#a#b", "/model#high", "provider/#high", "p/m# high", "github-copilot/gpt-5.6-terra#max"])("rejects invalid model before any process: %s", async (model) => {
+  it.each(["provider/model#", "provider/model#a#b", "/model#high", "provider/#high", "p/m# high", "github-copilot/gpt-5.6-terra#max", "github-copilot/gpt-6.1-sol#max"])("rejects invalid model before any process: %s", async (model) => {
     traceSpec("CAT-OC-MODEL", "CAT-OC-MODEL-INVALID");
     expect(normalizeOpencodeModel(model).ok).toBe(false);
     expect(await callOpencode({ model, phase: "formalization", prompt: "p" })).toMatchObject({ ok: false, error: { kind: "invalid_model" } });
@@ -141,6 +141,8 @@ describe("OpenCode runtime compatibility", () => {
     expect(normalizeOpencodeModel("test-model")).toEqual({ ok: true, value: { model: "test-model" } });
     expect(normalizeOpencodeModel("github-copilot/gpt-5.6-luna")).toEqual({ ok: true, value: { model: "github-copilot/gpt-5.6-luna", variant: "max" } });
     expect(normalizeOpencodeModel("github-copilot/gpt-5.6-terra#high").ok).toBe(true);
+    expect(normalizeOpencodeModel("github-copilot/gpt-6.1-sol")).toEqual({ ok: true, value: { model: "github-copilot/gpt-6.1-sol", variant: "high" } });
+    expect(normalizeOpencodeModel("github-copilot/gpt-6.1-sol#high").ok).toBe(true);
     fc.assert(fc.property(fc.array(fc.constantFrom("a", "Z", "0", "-"), { minLength: 1, maxLength: 15 }), (letters) => {
       const variant = letters.join("");
       expect(normalizeOpencodeModel(`provider/family/model#${variant}`)).toEqual({ ok: true, value: { model: "provider/family/model", variant } });

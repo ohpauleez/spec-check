@@ -44,6 +44,8 @@ const RETRY_BACKOFF_MAX_MS = 2_000;
 // Two JSON encoding layers can expand every report byte to a six-byte escape;
 // leave additional room for event metadata and reasoning/tool events.
 const FINAL_REPORT_OUTPUT_MAX_BYTES = 8_388_608;
+/** Every model attempt has a capture ceiling, including analysis without telemetry. */
+export const MODEL_OUTPUT_MAX_BYTES = 8_388_608;
 
 /**
  * Closed domain of verification phases supported by the opencode invocation protocol.
@@ -56,6 +58,7 @@ export type OpencodePhase =
   | "qualitative-review"
   | "qualitative-properties"
   | "formalization"
+  | "concept-discovery"
   | "code-derived-generation"
   | "code-derived-formalization"
   | "blind-comparison"
@@ -89,7 +92,16 @@ export interface OpencodeCallOptions {
    * out real backoff delays. Production callers should leave this unset.
    */
   readonly backoffDelay?: (delayMs: number) => Promise<void>;
+  /** Required evidence failures propagate; they are never retried as model failures. */
+  readonly captureEvidence?: (event: OpencodeEvidenceEvent) => void | Promise<void>;
+  /** Refuse unrecordable attempts before spawning; false is a terminal scope limit. */
+  readonly beforeAttempt?: (attempt: number) => boolean | Promise<boolean>;
 }
+
+/** Exact captured attempt followed by its separately recorded validation outcome. */
+export type OpencodeEvidenceEvent =
+  | { readonly kind: "captured"; readonly attempt: number; readonly phase: OpencodePhase; readonly model: string; readonly prompt: string; readonly runtime: OpencodeRuntime["version"]; readonly process?: ProcessResult; readonly spawnError?: string }
+  | { readonly kind: "classified"; readonly attempt: number; readonly outcome: "success" | OpencodeError["kind"] };
 
 /** Token and cost usage aggregated from OpenCode `step_finish` events. */
 export interface OpencodeUsage {
@@ -336,11 +348,11 @@ function classifyProcessResult(
       stderr: processResult.stderr,
     });
   }
-  if (options.phase === "final-report" && processResult.stdoutInvalidUtf8 === true) {
+  if (processResult.stdoutInvalidUtf8 === true) {
     return err({
       kind: "invalid_json",
       phase: options.phase,
-      message: "opencode final-report event stream is not valid UTF-8",
+      message: "opencode event stream is not valid UTF-8",
     });
   }
 
@@ -378,35 +390,43 @@ function classifyProcessResult(
  *   spawn is normalized to `spawn_error` so the retry loop stays total
  *
  * @remarks
- * Exactly one subprocess is spawned per call. The function never throws:
- * process-level throws (binary missing, not executable) are expected adapter
- * failures and are returned as data.
+ * Exactly one subprocess is spawned per call. Process-level throws become data;
+ * required evidence callback failures propagate without model retries.
  */
 async function attemptOpencodeOnce(
   runtime: OpencodeRuntime,
   args: readonly string[],
   options: OpencodeCallOptions,
   timeoutMs: number,
+  attempt: number,
 ): Promise<{ readonly result: Result<unknown, OpencodeError>; readonly processResult?: ProcessResult }> {
-  let processResult: ProcessResult;
+  let processResult: ProcessResult | undefined;
+  let spawnError: string | undefined;
   try {
     const envOverrides = buildOpencodeEnvironment(options, runtime);
     processResult = await runProcess(runtime.binaryPath, [...args], {
       timeoutMs,
       ...(Object.keys(envOverrides).length === 0 ? {} : { envOverrides }),
       ...(options.phase === "final-report" && runtime.major === 2 ? { cwd: options.workspaceRoot } : {}),
-      ...(options.phase === "final-report" ? { maxOutputBytes: FINAL_REPORT_OUTPUT_MAX_BYTES } : {}),
+      maxOutputBytes: options.phase === "final-report" ? FINAL_REPORT_OUTPUT_MAX_BYTES : MODEL_OUTPUT_MAX_BYTES,
+      ...(options.captureEvidence === undefined ? {} : { captureBytes: true }),
     });
   } catch (error) {
-    return {
-      result: err({
-        kind: "spawn_error",
-        phase: options.phase,
-        message: error instanceof Error ? error.message : "opencode spawn failed",
-      }),
-    };
+    spawnError = error instanceof Error ? error.message : "opencode spawn failed";
   }
-  return { result: classifyProcessResult(processResult, options, timeoutMs), processResult };
+  // Capture before JSON extraction or phase/domain validation. This callback is
+  // deliberately outside the spawn catch: failed required persistence must
+  // propagate, never become a transient spawn/model error and consume retries.
+  await options.captureEvidence?.({ kind: "captured", attempt, phase: options.phase, model: options.model,
+    prompt: options.prompt, runtime: runtime.version,
+    ...(processResult === undefined ? {} : { process: processResult }),
+    ...(spawnError === undefined ? {} : { spawnError }),
+  });
+  const result: Result<unknown, OpencodeError> = processResult === undefined
+    ? err({ kind: "spawn_error", phase: options.phase, message: spawnError ?? "opencode spawn failed" })
+    : classifyProcessResult(processResult, options, timeoutMs);
+  await options.captureEvidence?.({ kind: "classified", attempt, outcome: result.ok ? "success" : result.error.kind });
+  return { result, ...(processResult === undefined ? {} : { processResult }) };
 }
 
 /**
@@ -427,6 +447,7 @@ async function attemptOpencodeOnce(
  * - Process exceeds timeout on every attempt → `kind: "timeout"`.
  * - Model returns non-JSON output → `kind: "invalid_json"`.
  * - Model returns JSON that fails phase schema validation → `kind: "schema_validation_error"`.
+ * - Required injected evidence persistence fails → propagates that failure.
  *
  * Retry policy: only transient kinds (`spawn_error`, `timeout`, `invalid_json`)
  * are retried, up to `options.retries` (default 3) total attempts. The remaining
@@ -456,6 +477,9 @@ export async function callOpencode(
 
   let lastError: OpencodeError | undefined;
   for (let attempt = 1; attempt <= retries; attempt += 1) {
+    if (options.beforeAttempt !== undefined && !await options.beforeAttempt(attempt)) {
+      return err({ kind: "output_limit", phase: options.phase, message: "evidence capacity cannot admit model attempt" });
+    }
     // Backoff precedes every attempt after the first; attempt 1 runs
     // immediately so the common no-retry path pays no scheduling cost.
     if (attempt > 1) {
@@ -464,7 +488,7 @@ export async function callOpencode(
 
     const startedAt = new Date().toISOString();
     const startedNs = process.hrtime.bigint();
-    const attempted = await attemptOpencodeOnce(runtime, args, options, timeoutMs);
+    const attempted = await attemptOpencodeOnce(runtime, args, options, timeoutMs, attempt);
     const durationMs = Number((process.hrtime.bigint() - startedNs) / 1_000_000n);
     if (logicalCallId !== undefined) {
       const usage = extractOpencodeUsage(attempted.processResult?.stdout ?? "");
@@ -1035,6 +1059,9 @@ function validatePhaseSchema(
   }
 
   const findings = record.findings;
+  if (phase === "concept-discovery" && (!Array.isArray(record.concepts) || (record.proposedAssumptions !== undefined && !Array.isArray(record.proposedAssumptions)))) {
+    return err({ kind: "schema_validation_error", phase, message: "expected concepts and optional proposedAssumptions arrays" });
+  }
   if (findings !== undefined && !Array.isArray(findings)) {
     return err({
       kind: "schema_validation_error",
@@ -1068,6 +1095,12 @@ function validatePhaseSchema(
           phase,
           message: "expected every formalizations entry index to be a non-negative safe integer",
         });
+      }
+      if (entryRecord.registryHash !== undefined || entryRecord.predicates !== undefined) {
+        const predicates = asRecord(entryRecord.predicates);
+        if (typeof entryRecord.registryHash !== "string" || predicates === undefined || Array.isArray(entryRecord.predicates) || Object.values(predicates).some((value) => typeof value !== "string")) {
+          return err({ kind: "schema_validation_error", phase, message: "expected predicate entries with registryHash and string-valued predicate slots" });
+        }
       }
     }
   }

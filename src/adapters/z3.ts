@@ -7,6 +7,7 @@
  */
 import type { SmtlibContent } from "../domain/branded.js";
 import { runProcess } from "./process.js";
+import { locateSolverVerdict } from "../domain/formal/solver-verdict.js";
 import { err, ok, type Result } from "../domain/result.js";
 
 /** Independent preflight execution budget, in milliseconds. */
@@ -88,6 +89,13 @@ export interface Z3Result {
   readonly stderr: string;
   readonly exitCode: number | null;
   readonly errorCount?: number;
+  readonly outputLimitExceeded?: boolean;
+  readonly stdoutBase64?: string;
+  readonly stderrBase64?: string;
+  readonly signal?: NodeJS.Signals | null;
+  readonly timedOut?: boolean;
+  readonly stdoutInvalidUtf8?: boolean;
+  readonly stderrInvalidUtf8?: boolean;
 }
 
 /**
@@ -121,12 +129,15 @@ export async function runZ3Query(input: {
   readonly smtlib: SmtlibContent;
   readonly z3Path?: string;
   readonly timeoutMs?: number;
+  readonly maxOutputBytes?: number;
 }): Promise<Z3Result> {
   let result;
   try {
     result = await runProcess(input.z3Path ?? "z3", ["-in"], {
       timeoutMs: input.timeoutMs ?? 30_000,
       stdinText: input.smtlib,
+      maxOutputBytes: input.maxOutputBytes ?? 1_048_576,
+      captureBytes: true,
     });
   } catch (error) {
     return {
@@ -138,6 +149,14 @@ export async function runZ3Query(input: {
     };
   }
 
+  const capture = { signal: result.signal, timedOut: result.timedOut, outputLimitExceeded: result.outputLimitExceeded === true,
+    stdoutInvalidUtf8: result.stdoutInvalidUtf8 === true, stderrInvalidUtf8: result.stderrInvalidUtf8 === true,
+    ...(result.stdoutBase64 === undefined ? {} : { stdoutBase64: result.stdoutBase64 }),
+    ...(result.stderrBase64 === undefined ? {} : { stderrBase64: result.stderrBase64 }) };
+  if (result.outputLimitExceeded === true || result.stdoutInvalidUtf8 === true || (!result.timedOut && (result.exitCode !== 0 || result.signal !== null))) {
+    return { kind: "error", stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, errorCount: 0,
+      ...capture };
+  }
   if (result.timedOut) {
     return {
       kind: "timeout",
@@ -145,6 +164,7 @@ export async function runZ3Query(input: {
       stderr: result.stderr,
       exitCode: result.exitCode,
       errorCount: 0,
+      ...capture,
     };
   }
 
@@ -157,9 +177,7 @@ export async function runZ3Query(input: {
   const errorCount = lines.filter((line) => line.startsWith("(error")).length;
 
   // Find the actual verdict line (skip error diagnostics).
-  const verdictLine = lines.find(
-    (line) => line === "sat" || line === "unsat" || line === "unknown",
-  );
+  const verdictLine = locateSolverVerdict(result.stdout)?.kind;
 
   // If Z3 emitted any errors, classify as "error" regardless of eventual verdict.
   // A verdict after errors is unreliable (e.g., vacuously "sat" when all assertions failed).
@@ -170,17 +188,18 @@ export async function runZ3Query(input: {
       stderr: result.stderr,
       exitCode: result.exitCode,
       errorCount,
+      ...capture,
     };
   }
 
   if (verdictLine === "sat") {
-    return { kind: "sat", stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, errorCount: 0 };
+    return { kind: "sat", stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, errorCount: 0, ...capture };
   }
   if (verdictLine === "unsat") {
-    return { kind: "unsat", stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, errorCount: 0 };
+    return { kind: "unsat", stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, errorCount: 0, ...capture };
   }
   if (verdictLine === "unknown") {
-    return { kind: "unknown", stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, errorCount: 0 };
+    return { kind: "unknown", stdout: result.stdout, stderr: result.stderr, exitCode: result.exitCode, errorCount: 0, ...capture };
   }
 
   return {
@@ -189,5 +208,6 @@ export async function runZ3Query(input: {
     stderr: result.stderr,
     exitCode: result.exitCode,
     errorCount: 0,
+    ...capture,
   };
 }

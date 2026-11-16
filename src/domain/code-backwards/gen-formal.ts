@@ -6,12 +6,18 @@
  * Exports: generateCodeFormalizations, CodeFormalizationOutput.
  */
 import { writeOutputAtomic } from "../../adapters/fs.js";
-import { toCapabilityName, toClaimId, toRelativePath, type ModelName, type OutputDirPath, type RelativePath } from "../branded.js";
+import { toCapabilityName, toRelativePath, type ModelName, type OutputDirPath, type RelativePath } from "../branded.js";
 import type { Finding } from "../findings.js";
 import type { Claim } from "../claim-graph.js";
+import { buildClaimGraph } from "../claim-graph.js";
+import { parseSpecText } from "../parser/spec.js";
+import { DEFAULT_ANALYSIS, type AnalysisConfig } from "../formal/analysis-config.js";
+import type { EvidenceRecorder } from "../formal/evidence.js";
+import { QueryExecutor } from "../formal/query-executor.js";
 import { formalizeClaims } from "../formal/formalize.js";
-import { clusterFormalizationSamples } from "../formal/clustering.js";
+import { clusterWithSelection } from "../formal/selected-clustering.js";
 import { compileSmtlib } from "../formal/smtlib.js";
+import { TypedCompilationPreparation } from "../formal/typed-smtlib.js";
 import type { LogicIrClaim } from "../logic-ir.js";
 import {
   buildFormalizationAttemptSet,
@@ -70,34 +76,44 @@ export interface GeneratedFormalizationOutput {
  */
 export async function formalizeGeneratedSpecs(input: {
   readonly outputDir: OutputDirPath;
-  readonly generatedSpecs: readonly { readonly capability: string; readonly requirements: readonly { readonly id: string; readonly text: string }[]; readonly sourceIdentifiers: readonly string[] }[];
+  readonly generatedSpecs: readonly { readonly capability: string; readonly markdown?: string; readonly requirements: readonly { readonly id: string; readonly text: string }[]; readonly sourceIdentifiers: readonly string[] }[];
   readonly model: ModelName;
   readonly timeoutMs: number;
   readonly z3Path?: string;
+  readonly analysis?: AnalysisConfig;
+  readonly evidence?: EvidenceRecorder;
+  readonly executor?: QueryExecutor;
+  readonly configSource?: string;
+  /** Direct composition may request multiple samples; ordinary CLI generation selects one. */
+  readonly samplesPerClaim?: number;
 }): Promise<GeneratedFormalizationOutput> {
   const findings: Finding[] = [];
   const outputClaims: GeneratedFormalization[] = [];
   const evidenceFiles: FormalizationEvidenceFile[] = [];
 
+  const compilation = new TypedCompilationPreparation();
+  const executor = input.executor ?? new QueryExecutor((input.analysis ?? DEFAULT_ANALYSIS).limits, input.evidence, input.z3Path);
   for (let ordinal = 0; ordinal < input.generatedSpecs.length; ordinal += 1) {
     const spec = input.generatedSpecs[ordinal]!;
     // Use actual requirement text from informalization (not tautological templates).
-    const syntheticClaims: Claim[] = spec.requirements.map((req) => ({
-      id: toClaimId(req.id),
-      kind: "requirement",
-      text: req.text,
-      obligation: "mandatory",
-      provenance: { file: `<gen_specs/${spec.capability}.md>`, heading: req.id },
-      references: [],
-      capability: toCapabilityName(spec.capability),
-    }));
+    const markdown = spec.markdown ?? spec.requirements.map((req) => `### Requirement: ${req.id} [${req.id}]\n${req.text}\n`).join("\n");
+    const parsed = parseSpecText(`gen_specs/${spec.capability}.md`, markdown, "delta", { ...(input.analysis === undefined ? {} : { earsExtensions: input.analysis.earsExtensions, statementMaxBytes: input.analysis.limits.statementBytes }) });
+    const graph = buildClaimGraph({ specs: [parsed] });
+    const syntheticClaims: Claim[] = graph.graph.claims.map((claim) => ({ ...claim, capability: toCapabilityName(spec.capability),
+      ...(claim.surface === undefined ? {} : { surface: Object.freeze({ ...claim.surface, source: Object.freeze({ ...claim.surface.source, namespace: `generated_spec:${ordinal}:${spec.capability}` }) }) }) }));
+    for (const claim of syntheticClaims) if (claim.surface?.disposition.kind === "excluded") findings.push({ severity: "warning", category: "code_derived.formalization_ineligible", provenance: claim.provenance,
+      description: "Generated statement is not eligible for the selected structural/semantic profile", rationale: "Source-derived prose remains evidence but cannot support an unsupported formal verdict.", evidence: [{ kind: "source", value: claim.text }] });
 
     const formalized = await formalizeClaims({
       claims: syntheticClaims,
       model: input.model,
-      samplesPerClaim: 1,
+      samplesPerClaim: input.samplesPerClaim ?? 1,
       timeoutMs: input.timeoutMs,
       logicalFileByCapability: new Map(),
+      side: "generated_spec", ordinal,
+      ...(input.analysis === undefined ? {} : { analysis: input.analysis }),
+      ...(input.evidence === undefined ? {} : { evidence: input.evidence }),
+      ...(input.configSource === undefined ? {} : { configSource: input.configSource }),
     });
     const evidenceFile = await writeFormalizationAttemptSet(
       input.outputDir,
@@ -150,15 +166,17 @@ export async function formalizeGeneratedSpecs(input: {
     findings.push(...formalized.value.findings);
 
     for (const candidate of formalized.value.candidates) {
-      const clustered = await clusterFormalizationSamples({
+      const clustered = await clusterWithSelection({
         claimId: candidate.claim.id ?? `GEN-${spec.capability}`,
         samples: candidate.samples,
         stabilityThreshold: 0.6,
         ...(input.z3Path === undefined ? {} : { z3Path: input.z3Path }),
+        executor,
+        ...(candidate.registry === undefined ? {} : { group: candidate.registry.group }),
       });
       findings.push(...clustered.findings);
 
-      const compiled = compileSmtlib(clustered.clustered.representative);
+      const compiled = compileSmtlib(clustered.clustered.representative, compilation);
       const smtPath = toRelativePath(`gen_specs_smt/${spec.capability}/${compiled.sanitizedClaimId}.smt2`);
       await writeOutputAtomic(input.outputDir, smtPath, compiled.smtlib);
 

@@ -338,6 +338,11 @@ live-provider measurement, commit or archive change accompanies this remediation
 
 ## 12. Paired SMT Impact Experiment
 
+This section records a completed one-off evaluation from 2026-11-15. The paired
+harness, experiment proxies, measurement fixtures, experiment-only tests and older
+binary were retired on 2026-11-17. They are no longer build, test or release
+dependencies. The completed tasks and measurements below remain historical.
+
 - [x] 12.1 Predeclare a bounded paired corpus, independent oracle, negative controls, strata, failure-inclusive rubric and practical improvement criterion before measured runs.
 - [x] 12.2 Implement an actual old/current CLI harness with exact binary/input identity, native-schema fixed interpretations, live model mode, counterbalanced repetitions, bounded subprocesses and complete experiment artifacts.
 - [x] 12.3 Execute controlled and live paired batches against pasture/spec-check.older with the same Z3/model controls; retain all selected outcomes and keep context-capability cases separate.
@@ -346,48 +351,50 @@ live-provider measurement, commit or archive change accompanies this remediation
 
 ### Paired experiment change summary
 
-**12.1–12.2 — protocol and harness:** `experiments/smt-impact/README.md` declares
-the hypothesis/thresholds, sixteen defect/control specimens and a six-case live
-subset before measurement. Opaque model-visible identities prevent answer-label
-leakage. `build/smt-impact/` contains the corpus, an independent eight-valuation
-oracle, report parser/scorer, collector and paired aggregation; the entry point is
-`build/smt-impact.ts`. Both actual executables are copied byte-for-byte, hashed and
-run with real Z3. The old file's nonstandard extension is adapted only by the copy's
-`.mjs` filename. Fixed interpretation replies encode identical hand-authored meaning
-in each native schema; live mode uses each engine's own prompts/discovery against
-the same model. Qualitative review and optional narrative are excluded identically
-so their prose cannot mask solver insight differences. Actual query capture also
-makes the older tool's unpersisted deep scripts auditable in the experiment.
+**12.1–12.2 — protocol and harness:** The experiment predeclared the
+hypothesis/thresholds, sixteen defect/control specimens and a six-case live subset.
+Opaque model-visible identities prevented answer-label leakage. The retired
+harness included the corpus, an independent eight-valuation oracle, report
+parser/scorer, collector and paired aggregation. Both actual executables were
+copied byte-for-byte, hashed and run with real Z3. The old file's nonstandard
+extension was adapted only by the copy's `.mjs` filename. Fixed interpretation
+replies encoded identical hand-authored meaning in each native schema; live mode
+used each engine's own prompts/discovery against the same model. Qualitative review
+and optional narrative were excluded identically so their prose could not mask
+solver insight differences. Query capture made the older tool's unpersisted deep
+scripts auditable during the evaluation.
 
-**12.3 — measured outcomes:** Verified batches contain 64 controlled CLI runs
+**12.3 — measured outcomes:** Verified batches contained 64 controlled CLI runs
 (16 cases, two repeats, two arms) and 24 live CLI runs (six cases, two repeats,
 two arms), with case-level averaging and counterbalanced order. Shared-source
 controlled recall improved from 14.3% to 100%; clean controls from 85.7% to 100%.
 The live subset improved positive recall from 0% to 100%, with clean controls and
 assessed completion at 100% for both. Added scoped-context capability is reported
-separately because the old CLI cannot consume that configuration. These meet the
+separately because the old CLI could not consume that configuration. These met the
 predeclared practical criterion on this diagnostic corpus, not a population test.
 
-**12.4 — credibility and bounds:** Independent expected signals never enter the
-provider fixture or live prompt. Failures/missing coverage cannot earn clean-negative
-credit; duplicate findings cannot inflate recall. Every experiment artifact checksum
-was verified. The live proxy records requests before spawn and streams bounded exact
-output to both engine and disk; fake provider tests preserve partial bytes under
+**12.4 — credibility and bounds:** Independent expected signals never entered the
+provider fixture or live prompt. Failures/missing coverage could not earn clean-negative
+credit; duplicate findings could not inflate recall. Every experiment artifact checksum
+was verified. The live proxy recorded requests before spawn and streamed bounded exact
+output to both engine and disk; fake provider tests checked partial bytes under
 model and outer timeouts without paid calls. Oracle/scorer, actual binary/Z3 and
-blinded-label independence tests are in the full suite. `make check` passed 1,127
-tests across 124 passing files with three existing opt-in skips. Strict TypeScript/
-ESLint, full canonical trace coverage and compiled/bundled parity remain passing.
+blinded-label independence tests were included in that acceptance run. At the time,
+`make check` passed 1,127 tests across 124 passing files with three existing opt-in
+skips, including strict TypeScript/ESLint, canonical trace coverage and
+compiled/bundled parity. These historical counts include the retired experiment
+tests and do not describe the current suite.
 
-**12.5 — interpretation and handoff:** `experiments/smt-impact/RESULTS.md` and
-`measurement.json` retain exact identities, metrics and evidence references. Live
+**12.5 — interpretation and handoff:** The [verification record](verification.md)
+retains the principal measurements, binary hashes and evaluation limits. Live
 core time increased from 3.649 s to 8.892 s/run, with model calls doubling (1 to 2)
 and more solver scripts/evidence. Token/cost telemetry was incomplete for almost
 all calls, so total monetary comparison remains unavailable. Preliminary batches
-are retained separately and agree on diagnosis scores; they are not pooled as
+were retained separately and agreed on diagnosis scores; they were not pooled as
 independent samples. Publication-only review-label/context corrections and a scorer
 clarification did not alter any acquired score or primary report bytes; provenance
-records and re-evaluation of all 88 verified runs establish that boundary. Human
-packets exist but are unscored. No production analyzer, baseline bytes or normative
+records and re-evaluation of all 88 verified runs established that boundary. Human
+packets were unscored. No production analyzer, baseline bytes or normative
 SMT semantics were changed for this experiment. Representative real-document and
 source-backed/temporal quality remain outside the selected synthetic study.
 

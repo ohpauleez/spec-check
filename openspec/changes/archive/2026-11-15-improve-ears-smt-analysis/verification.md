@@ -81,63 +81,77 @@ represented as a passing canonical check. Recorded output:
 
 ## Paired SMT Impact Experiment — 2026-11-15
 
-The requested previous-stable comparison is implemented and measured; this is
-separate from the earlier single-corpus evaluation and CPU microbenchmarks.
+This section records a completed one-off previous-stable comparison. It is
+separate from the earlier single-corpus evaluation and CPU microbenchmarks. The
+comparison harness, proxies, measurement fixtures, experiment-only tests and older
+binary were retired on 2026-11-17. They are no longer required for builds, tests or
+release acceptance. The measurements and limitations below describe the historical
+evaluation, not the current executable or an ongoing regression requirement.
 
-- Protocol: [experiment README](../../../../experiments/smt-impact/README.md).
-- Conclusions/trade-offs: [RESULTS.md](../../../../experiments/smt-impact/RESULTS.md).
-- Exact identities/metrics/digests: [measurement.json](../../../../experiments/smt-impact/measurement.json).
-- Previous stable bytes: `pasture/spec-check.older`, SHA-256
+- Historical previous-stable executable (retired; former path
+  `pasture/spec-check.older`), SHA-256
   `12fe9a3ffb3be5469eea30cda295c14b036a801836d22d5d03647977621a6730`.
-- Measured current bundle: SHA-256
+- Then-current bundle measured on 2026-11-15: SHA-256
   `88ad9e6413aef62cbefdbde9801b043dc42b7e87422eb17f5980d39aa9dd3b66`.
 - Runtime: Node 22.23.2, Z3 4.8.12, OpenCode 2.0.15; live model
   `github-copilot/gpt-5.6-terra#high` in both arms.
 
-Verified measurement commands:
-
-```sh
-make dist
-node dist/build/smt-impact.js --mode controlled --output /tmp/opencode/smt-impact-controlled-verified
-node dist/build/smt-impact.js --mode live --output /tmp/opencode/smt-impact-live-verified
-```
-
-The primary mechanism comparison fixes semantic interpretations and runs both
+The primary mechanism comparison fixed semantic interpretations and ran both
 unmodified CLI binaries with real Z3. An independent exhaustive Boolean oracle
-imports no production semantics. The live subset uses each CLI's own prompts and
+imported no production semantics. The live subset used each CLI's own prompts and
 discovery/formalization with identical model/input/budget controls. Qualitative
-reviews and optional narrative are excluded equally; scored output is core static
-diagnosis and evidence. Opaque source IDs/paths omit defect/control labels.
+reviews and optional narrative were excluded equally; scored output was core static
+diagnosis and evidence. Opaque source IDs/paths omitted defect/control labels.
 
-The 64 controlled runs and 24 live runs retain all selected outcomes. Repetitions
-are averaged within cases, not treated as independent samples. Fourteen shared-
+The 64 controlled runs and 24 live runs retained all selected outcomes. Repetitions
+were averaged within cases, not treated as independent samples. Fourteen shared-
 source controlled cases improved positive recall from 14.3% to 100%, clean-control
 success from 85.7% to 100%, and exact useful diagnosis from 50% to 100%. The six-case
 live subset improved positive recall from 0% to 100% while both arms retained 100%
 clean-control success and assessed completion. Two context-enabled controlled
-cases demonstrate scoped coverage separately, not equal-context engine superiority.
+cases demonstrated scoped coverage separately, not equal-context engine superiority.
 
-The predeclared practical criterion is met on this corpus. Real trade-offs include
+The predeclared practical criterion was met on this corpus. Observed trade-offs included
 live mean core latency 3.649 → 8.892 seconds, model calls 1 → 2 and actual solver
 scripts 1.17 → 8.67 per run. Most model attempts omitted usage events; total token/
 monetary comparisons are unavailable, not zero. Hand-selected diagnostic cases do
 not establish population precision/recall, temporal correctness, source-backed
 comparison quality or human prose actionability. Review packets are unscored.
 
-Every collected artifact checksum was verified. Requests, native responses, actual
-solver inputs/outputs/status and both core bundles are retained under the verified
-directories. The exact pre-run protocol bytes match their recorded digest. Later
-review-label/context publication corrections left primary result/report bytes
-unchanged. A scorer clarification affects no acquired observation; re-scoring all
-88 verified runs reproduces every stored score. Dedicated provenance files retain
-these publication boundaries. Initial pilot/preliminary batches remain separate,
+Every collected artifact checksum was verified during the evaluation. Requests,
+native responses, actual solver inputs/outputs/status and both core bundles were
+captured in disposable evaluation directories. Those temporary paths are not
+repository dependencies or durable reproduction instructions. The exact pre-run
+protocol bytes matched their recorded digest. Later review-label/context
+publication corrections left primary result/report bytes unchanged. A scorer
+clarification affected no acquired observation; re-scoring all
+88 verified runs reproduced every stored score. Dedicated provenance records captured
+these publication boundaries. Initial pilot/preliminary batches remained separate,
 not silently discarded or pooled to inflate sample size.
 
-Acceptance: `make check` passed **1,127 tests across 124 passing files**, with three
-existing opt-in skips in two files. Includes strict TypeScript/ESLint, full trace
-coverage, independent experiment oracle/scorer checks, actual old/current CLI runs
+Historical acceptance: `make check` passed **1,127 tests across 124 passing files**,
+with three existing opt-in skips in two files. That run included strict
+TypeScript/ESLint, full trace coverage, independent experiment oracle/scorer checks,
+actual old/current CLI runs
 with real Z3, and fake-provider timeout tests preserving exact partial bytes.
-Disposable log: `/tmp/opencode/smt-impact-release-check.log`.
+These counts include the retired experiment-only tests and do not describe the
+current suite. Its disposable log is not required for ongoing verification.
+
+### Retirement validation — 2026-11-17
+
+After removal of the one-off harness, proxies, fixtures, experiment-only tests and
+older binary, `make clean` followed by `make check` passed: build, bundle, strict
+TypeScript/ESLint and trace-enabled verification completed with **1,145 tests across
+125 passing files**, plus three opt-in skips in two files. The older binary was
+absent throughout validation. The rebuilt distribution contains no experiment
+harness, compiled experiment tests or references to the retired binary/proxies.
+
+Local file links in the edited archived records resolve. Evidence/example checks
+passed across all seven canonical specifications and these archived task and
+verification records. The scan reported 21 pre-existing stale-anchor warnings in
+`source-traceability-and-code-backwards`; its specification and all six referenced
+source/test files are unchanged from the pre-cleanup commit. No warning references
+a removed experiment file. `git diff --check` passed.
 
 ## TypeScript Guideline Remediation Acceptance
 
